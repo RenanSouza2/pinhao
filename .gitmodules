@@ -4,3 +4,6 @@
 [submodule "mods/macros"]
 	path = mods/macros
 	url = https://github.com/RenanSouza2/c-macros.git
+[submodule "mods/number"]
+	path = mods/number
+	url = https://github.com/RenanSouza2/number.git
