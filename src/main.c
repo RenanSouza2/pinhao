@@ -9,7 +9,7 @@ int main()
 {
     setbuf(stdout, NULL);
 
-    pi_threads(1000, 5);
+    pi_threads(10000, 0);
 
     printf("\n");
     return 0;
