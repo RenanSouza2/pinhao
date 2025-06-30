@@ -1,0 +1,6 @@
+[submodule "mods/clu"]
+	path = mods/clu
+	url = https://github.com/RenanSouza2/clu.git
+[submodule "mods/macros"]
+	path = mods/macros
+	url = https://github.com/RenanSouza2/c-macros.git
