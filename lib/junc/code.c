@@ -36,20 +36,20 @@ void junc_free(junc_p junc)
     free(junc->queues);
 }
 
-void junc_get(junc_p junc, handler_p out_res, bool volatile * is_idle)
+void junc_recv(junc_p junc, handler_p out_res, bool volatile * is_idle)
 {
     uint64_t index = junc->index;
     junc->index++;
     if(junc->index == junc->total)
         junc->index = 0;
-    queue_get(&junc->queues[index], out_res, is_idle);
+    queue_recv(&junc->queues[index], out_res, is_idle);
 }
 
-void junc_post(junc_p junc, handler_p res, bool volatile * is_idle)
+void junc_send(junc_p junc, handler_p res, bool volatile * is_idle)
 {
     uint64_t index = junc->index;
     junc->index++;
     if(junc->index == junc->total)
         junc->index = 0;
-    queue_post(&junc->queues[index], res, is_idle);
+    queue_send(&junc->queues[index], res, is_idle);
 }

@@ -53,3 +53,5 @@ dkms.conf
 
 # VS code
 .vscode/settings.json
+
+thread_log/*

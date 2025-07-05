@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
 #include "debug.h"
 #include "../../mods/clu/header.h"
@@ -13,6 +14,22 @@
 
 #ifdef DEBUG
 #endif
+
+
+
+void dbg(char format[], ...)
+{
+    char name[100];
+    sprintf(name, "thread_log/log_%lu.txt", pthread_self());
+    FILE *fp = fopen(name, "a");
+    assert(fp);
+
+    va_list args;
+    va_start(args, format);
+    fprintf(fp, "\n");
+    vfprintf(fp, format, args);
+    fclose(fp);
+}
 
 
 
@@ -31,9 +48,11 @@ void pthread_lock(pthread_t thread_id, uint64_t cpu)
     TREAT(pthread_setaffinity_np(thread_id, sizeof(cpu_set_t), &cpuset));
 }
 
-void pthread_join_treat(pthread_t thread_id)
+handler_p pthread_join_treat(pthread_t thread_id)
 {
-    TREAT(pthread_join(thread_id, NULL));
+    handler_p h;
+    TREAT(pthread_join(thread_id, &h));
+    return h;
 }
 
 uint64_t sem_getvalue_treat(sem_t *sem)

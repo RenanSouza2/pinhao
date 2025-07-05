@@ -52,7 +52,7 @@ uint64_t queue_get_occupancy(queue_p q)
     return sem_getvalue_treat(&q->sem_f);
 }
 
-void queue_post(queue_p q, handler_p res, bool volatile * is_idle)
+void queue_send(queue_p q, handler_p res, bool volatile * is_idle)
 {
     sem_wait_log(&q->sem_b, is_idle);
     uint64_t index = q->end;
@@ -63,7 +63,7 @@ void queue_post(queue_p q, handler_p res, bool volatile * is_idle)
     TREAT(sem_post(&q->sem_f));
 }
 
-void queue_get(queue_p q, handler_p out_res, bool volatile * is_idle)
+void queue_recv(queue_p q, handler_p out_res, bool volatile * is_idle)
 {
     sem_wait_log(&q->sem_f, is_idle);
     handler_p res = q->res[q->start];
@@ -79,14 +79,14 @@ bool queue_unstuck(queue_p q, handler_p h)
 {
     if(sem_getvalue_treat(&q->sem_f) == 0)
     {
-        queue_post(q, h, NULL);
+        queue_send(q, h, NULL);
         return false;
     }
-    
+
     if(sem_getvalue_treat(&q->sem_b) == 0)
     {
         q->res_free(h, q->res_size);
-        queue_get(q, h, NULL);
+        queue_recv(q, h, NULL);
         return true;
     }
 
@@ -97,19 +97,19 @@ void queue_free(queue_p q)
 {
     handler_p h = malloc(q->res_size);
     assert(h);
-    
+
     while(queue_get_occupancy(q))
     {
-        queue_get(q, h, NULL);
+        queue_recv(q, h, NULL);
         q->res_free(h, q->res_size);
     }
     free(h);
 
     for(uint64_t i=0; i<q->res_max; i++)
         free(q->res[i]);
-    
+
     free(q->res);
-    
+
     TREAT(sem_destroy(&q->sem_f));
     TREAT(sem_destroy(&q->sem_b));
 }
