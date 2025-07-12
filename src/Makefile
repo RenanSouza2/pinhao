@@ -1,4 +1,4 @@
-FLAGS = -Wall -Wextra -Werror -Wfatal-errors -O3
+FLAGS = -Wall -Wextra -Werror -Wfatal-errors -O3 -lm
 FLAGS_DBG = -D DEBUG -fsanitize=address
 
 LIB = ../lib/lib.o

@@ -54,25 +54,3 @@ handler_p pthread_join_treat(pthread_t thread_id)
     TREAT(pthread_join(thread_id, &h));
     return h;
 }
-
-uint64_t sem_getvalue_treat(sem_t *sem)
-{
-    int value;
-    TREAT(sem_getvalue(sem, &value));
-    return value;
-}
-
-void sem_wait_log(sem_t *sem, bool volatile * is_idle)
-{
-    if(is_idle)
-    {
-        if(sem_trywait(sem))
-        {
-            *is_idle = true;
-            TREAT(sem_wait(sem));
-            *is_idle = false;
-        }
-    } else {
-        TREAT(sem_wait(sem));
-    }
-}

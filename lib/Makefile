@@ -1,3 +1,5 @@
+FLAGS = -lm
+
 DIRS := $(wildcard */.)
 
 CLU_FILE = ../mods/clu/bin/bin.o
@@ -15,11 +17,11 @@ del:
 
 lib.o: $(LIB_FILES)
 	echo " linking object $(DIR)"
-	ld -r -o $@ $^
+	gcc -r -o $@ $^ $(FLAGS)
 
 debug.o: $(DGB_FILES) $(CLU_FILE)
 	echo " linking debug $(DIR)"
-	ld -r -o $@ $^
+	gcc -r -o $@ $^ $(FLAGS)
 
 
 
