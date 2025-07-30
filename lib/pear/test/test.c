@@ -3,7 +3,7 @@
 #include "../../../testrc.h"
 #include "../../../mods/macros/test.h"
 
-#include "../../../mods/macros/U64.h"
+#include "../../../mods/macros/uint.h"
 
 
 

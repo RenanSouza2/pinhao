@@ -1,0 +1,8 @@
+make build --directory=src -s
+ linking num object lib
+ linking object lib
+building exec src
+
+1000	104.02
+2000	459.87
+3000

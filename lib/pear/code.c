@@ -8,7 +8,7 @@
 #include "../../mods/macros/assert.h"
 #include "../../mods/macros/struct.h"
 #include "../../mods/macros/threads.h"
-#include "../../mods/macros/U64.h"
+#include "../../mods/macros/uint.h"
 
 
 

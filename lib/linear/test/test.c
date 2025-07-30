@@ -7,7 +7,7 @@
 
 
 
-void test_pi_hello(bool show)
+void test_linear_hello(bool show)
 {
     TEST_FN_OPEN
 
@@ -21,13 +21,13 @@ void test_pi_hello(bool show)
 
 
 
-void test_pi()
+void test_linear()
 {
     TEST_LIB
 
     bool show = false;
 
-    test_pi_hello(show);
+    test_linear_hello(show);
 
     TEST_ASSERT_MEM_EMPTY
 }
@@ -37,7 +37,7 @@ void test_pi()
 int main()
 {
     setbuf(stdout, NULL);
-    test_pi();
+    test_linear();
     printf("\n\n\tTest successful\n\n");
     return 0;
 }
