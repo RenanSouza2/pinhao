@@ -2,8 +2,8 @@
 #define __PI_H__
 
 #include "../../mods/macros/uint.h"
-#include "../../mods/number/lib/float/header.h"
+#include "../../mods/number/lib/flt/header.h"
 
-float_num_t pi_threads(uint64_t size, uint64_t thread_count, uint64_t thread_0);
+flt_num_t pi_threads(uint64_t size, uint64_t thread_count, uint64_t thread_0);
 
 #endif

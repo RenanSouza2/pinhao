@@ -11,7 +11,8 @@
 #include "../../mods/number/lib/sig/header.h"
 
 #include "../pear/header.h"
-#include "../linear/header.h"
+#include "../bilinear/header.h"
+#include "../union/header.h"
 
 
 
@@ -42,7 +43,7 @@ handler_p thread_pi(handler_p _args)
     union_num_t res[3];
 
     // printf("\nargs: %lu %lu %lu", index_0, index_max, size);
-    binary_splitting(res, size, index_0, index_max, 0, id ? 0 : index_max);
+    binary_splitting(res, size, index_0, index_max);
 
     while(!args->launched);
     for(uint64_t mask = 1; (mask < thread_count) && ((mask & id) == 0); mask *= 2)
@@ -57,7 +58,7 @@ handler_p thread_pi(handler_p _args)
     return NULL;
 }
 
-float_num_t pi_threads(uint64_t size, uint64_t thread_count, uint64_t thread_0)
+flt_num_t pi_threads(uint64_t size, uint64_t thread_count, uint64_t thread_0)
 {
     uint64_t index_max = 32 * size + 4;
     uint64_t index[thread_count + 1];
@@ -67,8 +68,6 @@ float_num_t pi_threads(uint64_t size, uint64_t thread_count, uint64_t thread_0)
     {
         index[i] = index_max * i / thread_count;
     }
-    // for(uint64_t i=0;  i<=thread_count; i++)
-    //     printf("\nindex[%lu]: %lu", i, index[i]);
 
     thread_pi_args_t args[thread_count];
     pthread_t tid[thread_count];
@@ -94,12 +93,12 @@ float_num_t pi_threads(uint64_t size, uint64_t thread_count, uint64_t thread_0)
     union_num_t *res = args[0].res;
     union_num_free(res[0]);
 
-    float_num_t flt_q = union_num_unwrap_float(res[1]);
-    float_num_t flt_r = union_num_unwrap_float(res[2]);
+    flt_num_t flt_q = union_num_unwrap_flt(res[1]);
+    flt_num_t flt_r = union_num_unwrap_flt(res[2]);
 
-    float_num_t flt_pi = flt_r;
-    flt_pi = float_num_mul_sig(flt_pi, sig_num_wrap(6));
-    flt_pi = float_num_div(flt_pi, flt_q);
-    flt_pi = float_num_add(flt_pi, float_num_wrap(3, size));
+    flt_num_t flt_pi = flt_r;
+    flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(6));
+    flt_pi = flt_num_div(flt_pi, flt_q);
+    flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     return flt_pi;
 }

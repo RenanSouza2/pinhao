@@ -1,14 +1,14 @@
 #ifndef __LINEAR_H__
 #define __LINEAR_H__
 
+#include "../../mods/number/header.h"
+#include "../union/struct.h"
+
 #include "struct.h"
 
-fix_num_t pi_v1(uint64_t size);
-fix_num_t pi_v2(uint64_t size);
-float_num_t pi_v3(uint64_t size);
-
-void union_num_free(union_num_t u);
-float_num_t union_num_unwrap_float(union_num_t u);
+fxd_num_t pi_v1(uint64_t size);
+fxd_num_t pi_v2(uint64_t size);
+flt_num_t pi_v3(uint64_t size);
 
 void binary_splitting_join(
     union_num_t out[],
