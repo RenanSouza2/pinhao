@@ -55,4 +55,4 @@ dkms.conf
 .vscode/settings.json
 
 thread_log/*
-numbers/*
+cache*/*

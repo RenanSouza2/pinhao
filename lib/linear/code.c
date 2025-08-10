@@ -8,6 +8,7 @@
 #include "../../mods/number/header.h"
 
 #include"../union/header.h"
+#include"../split/header.h"
 
 
 
@@ -80,7 +81,7 @@ flt_num_t pi_v3(uint64_t size)
     uint64_t index_max = 32 * size + 4;
 
     union_num_t res[3];
-    binary_splitting(res, size, 1, index_max, 0, index_max);
+    split(res, size, 1, index_max);
     union_num_free(res[0]);
 
     flt_num_t flt_q = union_num_unwrap_flt(res[1]);

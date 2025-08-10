@@ -1,5 +1,5 @@
 while [ 1 ]
 do
-    du -sh numbers
+    du -sh cache
     sleep 60
 done

@@ -15,7 +15,7 @@
 
 
 
-void binary_splitting_join(
+void split_join(
     union_num_t out[],
     union_num_t res_1[3],
     union_num_t res_2[3]
@@ -34,19 +34,19 @@ void binary_splitting_join(
 }
 
 // out vector length 3, returns P, Q, R in that order
-void binary_splitting(union_num_t out[], uint64_t size, uint64_t i_0, uint64_t i_max)
+void split(union_num_t out[], uint64_t size, uint64_t i_0, uint64_t i_max)
 {
     assert(i_0 <= i_max);
     if(i_0 == i_max)
     {
-        int64_t p = 2 * i_0 - 3;
-        int64_t q = 8 * i_0;
-        int64_t u = 1 - 2 * i_0;
-        int64_t v = 4 * i_0 + 2;
+        int128_t p = (int128_t)2 * i_0 - 3;
+        int128_t q = (int128_t)8 * i_0;
+        int128_t u = (int128_t)1 - 2 * i_0;
+        int128_t v = (int128_t)4 * i_0 + 2;
 
-        sig_num_t sig_p = sig_num_wrap(p * v);
-        sig_num_t sig_q = sig_num_wrap(q * v);
-        sig_num_t sig_r = sig_num_wrap(p * u);
+        sig_num_t sig_p = sig_num_wrap_int128(p * v);
+        sig_num_t sig_q = sig_num_wrap_int128(q * v);
+        sig_num_t sig_r = sig_num_wrap_int128(p * u);
 
         out[0] = union_num_wrap_sig(sig_p, size);
         out[1] = union_num_wrap_sig(sig_q, size);
@@ -57,7 +57,7 @@ void binary_splitting(union_num_t out[], uint64_t size, uint64_t i_0, uint64_t i
 
     uint64_t i_half = (i_0 + i_max) / 2;
     union_num_t res_1[3], res_2[3];
-    binary_splitting(res_1, size, i_0       , i_half);
-    binary_splitting(res_2, size, i_half + 1, i_max );
-    binary_splitting_join(out, res_1, res_2);
+    split(res_1, size, i_0       , i_half);
+    split(res_2, size, i_half + 1, i_max );
+    split_join(out, res_1, res_2);
 }

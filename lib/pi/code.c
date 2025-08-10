@@ -11,7 +11,7 @@
 #include "../../mods/number/lib/sig/header.h"
 
 #include "../pear/header.h"
-#include "../bilinear/header.h"
+#include "../split/header.h"
 #include "../union/header.h"
 
 
@@ -42,14 +42,13 @@ handler_p thread_pi(handler_p _args)
     uint64_t size = args->size;
     union_num_t res[3];
 
-    // printf("\nargs: %lu %lu %lu", index_0, index_max, size);
-    binary_splitting(res, size, index_0, index_max);
+    split(res, size, index_0, index_max);
 
     while(!args->launched);
     for(uint64_t mask = 1; (mask < thread_count) && ((mask & id) == 0); mask *= 2)
     {
         pthread_join_treat(args->tid[id + mask]);
-        binary_splitting_join(res, res, args[mask].res);
+        split_join(res, res, args[mask].res);
     }
 
     args->res[0] = res[0];

@@ -161,7 +161,7 @@ void union_num_file_write(FILE *fp, union_num_t u)
     }
 }
 
-void union_num_file_read(FILE *fp, union_num_p u)
+union_num_t union_num_file_read(FILE *fp)
 {
     uint64_t type, size;
     assert(fscanf(fp, "%lx %lx", &type, &size) == 2);
@@ -170,15 +170,13 @@ void union_num_file_read(FILE *fp, union_num_p u)
         case SIG:
         {
             sig_num_t sig = sig_num_file_read(fp);
-            *u = union_num_wrap_sig(sig, size);
-            return;
+            return union_num_wrap_sig(sig, size);
         }
 
         case FLT:
         {
             flt_num_t flt = flt_num_file_read(fp);
-            *u = union_num_wrap_flt(flt, size);
-            return;
+            return union_num_wrap_flt(flt, size);
         }
     }
     assert(false);

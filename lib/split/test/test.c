@@ -7,7 +7,7 @@
 
 
 
-void test_bilinear_hello(bool show)
+void test_split_hello(bool show)
 {
     TEST_FN_OPEN
 
@@ -21,13 +21,13 @@ void test_bilinear_hello(bool show)
 
 
 
-void test_bilinear()
+void test_split()
 {
     TEST_LIB
 
     bool show = false;
 
-    test_bilinear_hello(show);
+    test_split_hello(show);
 
     TEST_ASSERT_MEM_EMPTY
 }
@@ -37,7 +37,7 @@ void test_bilinear()
 int main()
 {
     setbuf(stdout, NULL);
-    test_bilinear();
+    test_split();
     printf("\n\n\tTest successful\n\n");
     return 0;
 }
