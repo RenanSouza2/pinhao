@@ -20,7 +20,6 @@
 
 
 #define PIECE_SIZE 16
-
 #define CACHE "cache"
 
 bool file_validate(FILE *fp)
@@ -453,15 +452,12 @@ void split_big(
     tprintf("begin | %lu %lu %lu", i_0, remainder, depth)
 
     if(split_big_res_try_load(out, size, i_0, remainder, depth))
-    {
-        tprintf("loading");
         return;
-    }
 
     uint64_t span = stdc_bit_width(remainder) - 1;
     if(stdc_count_ones(remainder) == 1)
     {
-        split_span(out, size, i_0, span, depth + 1);
+        split_span(out, size, i_0, span, depth);
         return;
     }
 
