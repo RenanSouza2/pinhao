@@ -9,11 +9,11 @@ build: lib.o
 
 
 lib.o: code.c
-	echo "building object $(DIR)"
+	echo "building example object $(DIR)"
 	gcc -o $@ $^ $(FLAGS)
 
 debug.o: code.c
-	echo "building debug $(DIR)"
+	echo "building example debug $(DIR)"
 	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG)
 
 

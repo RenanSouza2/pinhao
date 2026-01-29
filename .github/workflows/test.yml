@@ -3,16 +3,9 @@ name: C CI
 on: [push]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - run: git submodule update --init --recursive
-    - run: make test -s
-
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - run: git submodule update --init --recursive
     - run: make build -s

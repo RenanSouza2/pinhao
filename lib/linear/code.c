@@ -32,14 +32,14 @@ fxd_num_t pi_v1(uint64_t size)
     for(uint64_t i=1; i<index_max; i++)
     {
         fxd_num_t fxd_a = fxd_num_div(
-            fxd_num_wrap(2 * i - 3, size),
-            fxd_num_wrap(8 * i, size)
+            fxd_num_wrap((int64_t)(2 * i) - 3, size),
+            fxd_num_wrap((int64_t)(8 * i), size)
         );
         fxd_b = fxd_num_mul(fxd_b, fxd_a);
 
         fxd_num_t fxd_c = fxd_num_div(
             fxd_num_copy(fxd_1),
-            fxd_num_wrap(2 * i + 1, size)
+            fxd_num_wrap((int64_t)(2 * i) + 1, size)
         );
         fxd_c = fxd_num_add(fxd_c, fxd_num_copy(fxd_m_1_2));
         fxd_num_t fxd_d = fxd_num_mul(fxd_num_copy(fxd_b), fxd_c);
@@ -62,12 +62,12 @@ fxd_num_t pi_v2(uint64_t size)
     fxd_num_t fxd_pi = fxd_num_wrap(3, size);
     for(uint64_t i=1; i<index_max; i++)
     {
-        fxd_a = fxd_num_mul_sig(fxd_a, sig_num_wrap((int64_t)2 * i - 3));
-        fxd_a = fxd_num_div_sig(fxd_a, sig_num_wrap((int64_t)8 * i));
+        fxd_a = fxd_num_mul_sig(fxd_a, sig_num_wrap((int64_t)(2 * i) - 3));
+        fxd_a = fxd_num_div_sig(fxd_a, sig_num_wrap((int64_t)(8 * i)));
 
         fxd_num_t fxd_b = fxd_num_copy(fxd_a);
-        fxd_b = fxd_num_mul_sig(fxd_b, sig_num_wrap((int64_t)1 - 2 * i));
-        fxd_b = fxd_num_div_sig(fxd_b, sig_num_wrap((int64_t)4 * i + 2));
+        fxd_b = fxd_num_mul_sig(fxd_b, sig_num_wrap(1 - (int64_t)(2 * i)));
+        fxd_b = fxd_num_div_sig(fxd_b, sig_num_wrap((int64_t)(4 * i) + 2));
 
         fxd_pi = fxd_num_add(fxd_pi, fxd_b);
     }

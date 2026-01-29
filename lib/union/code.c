@@ -156,9 +156,8 @@ void union_num_file_write(FILE *fp, union_num_t u)
         case FLT:
         flt_num_file_write(fp, u.num.flt);
         break;
-    
-        default: assert(false);
     }
+    exit(EXIT_FAILURE);
 }
 
 union_num_t union_num_file_read(FILE *fp)
@@ -179,7 +178,7 @@ union_num_t union_num_file_read(FILE *fp)
             return union_num_wrap_flt(flt, size);
         }
     }
-    assert(false);
+    exit(EXIT_FAILURE);
 }
 
 
