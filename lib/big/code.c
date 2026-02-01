@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbit.h>
 
 #include "debug.h"
 #include "../../mods/clu/header.h"
 #include "../../mods/macros/assert.h"
+#include "../../mods/macros/stdbit.h"
 #include "../../mods/macros/uint.h"
 #include "../../mods/macros/time.h"
 #include "../../mods/number/lib/num/struct.h"
@@ -40,7 +40,7 @@ bool file_validate_read(FILE *fp)
     
     // couldnt read magic code
     uint64_t magic;
-    if(fscanf(fp, "%lx", &magic) != 1)
+    if(fscanf(fp, "" U64PX "", &magic) != 1)
         return false;
 
     // magic code wrong
@@ -122,7 +122,7 @@ void sig_res_path_set(char path[100], uint64_t i_0, uint64_t span)
 {
     uint64_t i_max = i_0 + B(span) - 1;
     span = span - PIECE_SIZE;
-    snprintf(path, 100, CACHE "/pieces/p_%015ld_%02ld_%015ld.txt", i_0, span, i_max);
+    snprintf(path, 100, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".txt", i_0, span, i_max);
 }
 
 void sig_res_delete(uint64_t i_0, uint64_t span)
@@ -201,8 +201,8 @@ uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
     FILE *fp = sig_res_try_open_read(i_0, span);
 
     uint64_t value;
-    assert(fscanf(fp, " %lx", &value) == 1);
-    assert(fscanf(fp, " %lx", &value) == 1);
+    assert(fscanf(fp, " " U64PX "", &value) == 1);
+    assert(fscanf(fp, " " U64PX "", &value) == 1);
     fclose(fp);
     return value;
 }
@@ -218,7 +218,7 @@ void union_res_path_set(
 )
 {
     uint64_t i_max = i_0 + remainder - 1;
-    snprintf(path, 100, CACHE "/numbers/u_%015ld_%015ld_%02ld_%015ld.txt", size, i_0, depth, i_max);
+    snprintf(path, 100, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".txt", size, i_0, depth, i_max);
 }
 
 void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
@@ -403,7 +403,7 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
 void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     assert(span >= PIECE_SPAN);
-    tprintf("begin | %lu %lu %lu", i_0, span, depth);
+    tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
 
     if(split_span_res_is_stored(size, i_0, span, depth))
         return;
@@ -422,7 +422,7 @@ void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
     split_span(size, i_0              , span - 1, depth + 1);
     split_span(size, i_0 + B(span - 1), span - 1, depth + 1);
 
-    tprintf("joining | %lu %lu %lu", i_0, span, depth);
+    tprintf("joining | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
     TIME_SETUP
     split_span_res_join(size, i_0, span, depth);
     TIME_END(t1)
@@ -502,7 +502,7 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
 // out vector length 3, returns P, Q, R in that order
 void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    tprintf("begin | %lu %lu %lu", i_0, remainder, depth)
+    tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth)
 
     if(split_big_res_is_stored(size, i_0, remainder, depth))
         return;
@@ -517,7 +517,7 @@ void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
     split_span(size, i_0, span, depth + 1);
     split_big(size, i_0 + B(span), remainder - B(span), depth + 1);
 
-    tprintf("joining | %lu %lu %lu", i_0, span, depth);
+    tprintf("joining | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
     TIME_SETUP
     split_big_res_join(size, i_0, remainder, depth);
     TIME_END(t1)
@@ -556,11 +556,11 @@ void prepare(uint64_t size, uint64_t span, uint64_t begin, uint64_t end)
     if(aux)
         i_max += B(PIECE_SIZE) - aux;
 
-    printf("\nspan: %lu\tbegin: %lu\tend: %lu", span, begin, end);
-    printf("\ni_0: %lu\ti_max: %lu", begin * B(span) + 1, (end + 1) * B(span));
+    printf("\nspan: " U64P() "\tbegin: " U64P() "\tend: " U64P() "", span, begin, end);
+    printf("\ni_0: " U64P() "\ti_max: " U64P() "", begin * B(span) + 1, (end + 1) * B(span));
     for(uint64_t i=begin; i<end; i++)
     {
-        printf("\ni: %lu", i);
+        printf("\ni: " U64P() "", i);
 
         uint64_t i_0 = i * B(span) + 1;
         split_span(size, i_0, span, 0);

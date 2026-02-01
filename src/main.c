@@ -16,7 +16,7 @@ void time_1()
 {
     for(uint64_t i=1000; i <= 65000; i+=1000)
     {
-        printf("\n%lu", i);
+        printf("\n" U64P() "", i);
         TIME_SETUP
         fxd_num_t flt = pi_v1(i);
         TIME_END(t3)
