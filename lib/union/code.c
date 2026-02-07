@@ -144,20 +144,21 @@ void union_num_free(union_num_t u)
 
 
 
-void union_num_file_write(FILE *fp, union_num_t u)
+void file_write_union_num_raw(file_p fp, union_num_t u)
 {
-    fprintf(fp, " " U64PX " " U64PX "", u.type, u.size);
+    file_write_uint64(fp, u.type);
+    file_write_uint64(fp, u.size);
     switch (u.type)
     {
         case SIG:
         {
-            sig_num_file_write(fp, u.num.sig);
+            file_write_sig_num_raw(fp, u.num.sig);
         }
         break;
 
         case FLT:
         {
-            flt_num_file_write(fp, u.num.flt);
+            file_write_flt_num_raw(fp, u.num.flt);
         }
         break;
     
@@ -165,27 +166,39 @@ void union_num_file_write(FILE *fp, union_num_t u)
     }
 }
 
-union_num_t union_num_file_read(FILE *fp)
+void file_write_union_num(file_p fp, union_num_t u)
 {
-    uint64_t type, size;
-    assert(fscanf(fp, "" U64PX " " U64PX "", &type, &size) == 2);
+    file_write_start(fp);
+    file_write_union_num_raw(fp, u);
+    file_write_end(fp);
+}
+
+union_num_t file_read_union_num_raw(FILE *fp)
+{
+    uint64_t type = file_read_uint64(fp);
+    uint64_t size = file_read_uint64(fp);
     switch (type)
     {
         case SIG:
         {
-            sig_num_t sig = sig_num_file_read(fp);
+            sig_num_t sig = file_read_sig_num_raw(fp);
             return union_num_wrap_sig(sig, size);
         }
 
         case FLT:
         {
-            flt_num_t flt = flt_num_file_read(fp);
+            flt_num_t flt = file_read_flt_num_raw(fp);
             return union_num_wrap_flt(flt, size);
         }
     }
     exit(EXIT_FAILURE);
 }
 
+union_num_t file_read_union_num(FILE *fp, uint64_t index)
+{
+    file_read_move_to_index(fp, index);
+    return file_read_union_num_raw(fp);
+}
 
 
 union_num_t union_num_add(union_num_t u_1, union_num_t u_2)

@@ -8,6 +8,7 @@
 #include "../../mods/macros/uint.h"
 #include "../../mods/macros/time.h"
 #include "../../mods/number/lib/num/struct.h"
+#include "../../mods/number/header.h"
 
 #include "../union/header.h"
 #include "../split/header.h"
@@ -21,58 +22,6 @@
 
 #define PIECE_SIZE 16
 #define CACHE "cache_del"
-
-bool file_validate_read(FILE *fp)
-{
-    // couldnt jump to end
-    if(fseek(fp, 0, SEEK_END))
-       return false;
-    
-    // file too short
-    int64_t count = 5;
-    int64_t size = ftell(fp);
-    if(size < count)
-        return false;
-    
-    // couldnt jump to position
-    if(fseek(fp, size - count, SEEK_SET))
-        return false;
-    
-    // couldnt read magic code
-    uint64_t magic;
-    if(fscanf(fp, "" U64PX "", &magic) != 1)
-        return false;
-
-    // magic code wrong
-    if(magic != 0xd0bbe)
-        return false;
-
-    //couldnt jump to begining
-    if(fseek(fp, 0, SEEK_SET))
-        return false;
-
-    return true;
-}
-
-FILE* file_try_open_read(char path[100])
-{
-    FILE *fp = fopen(path, "r");
-    if(fp == NULL)
-        return NULL;
-
-    if(file_validate_read(fp))
-        return fp;
-
-    fclose(fp);
-    return NULL;
-}
-
-FILE* file_open_write(char path[100])
-{
-    FILE *fp = fopen(path, "w");
-    assert(fp)
-    return fp;
-}
 
 
 
@@ -136,26 +85,23 @@ FILE* sig_res_try_open_read(uint64_t i_0, uint64_t span)
 {
     char path[100];
     sig_res_path_set(path, i_0, span);
-    return file_try_open_read(path);
+    return file_read_open(path);
 }
 
-FILE* sig_res_open_write(uint64_t i_0, uint64_t span)
+file_t sig_res_open_write(uint64_t i_0, uint64_t span)
 {
     char path[100];
     sig_res_path_set(path, i_0, span);
-    return file_open_write(path);
+    return file_write_open(path, 3);
 }
 
 void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
 {
-    FILE *fp = sig_res_open_write(i_0, span);
+    file_t fp = sig_res_open_write(i_0, span);
     for(uint64_t i=0; i<3; i++)
-    {
-        sig_num_file_write(fp, res[i]);
-        fprintf(fp, "\n");
-    }
-    fprintf(fp, " D0BBE");
-    fclose(fp);
+        file_write_sig_num(&fp, res[i]);
+
+    file_write_close(&fp);
 
     sig_num_free(res[0]);
     sig_num_free(res[1]);
@@ -168,13 +114,7 @@ bool sig_res_try_load(sig_num_p out, uint64_t i_0, uint64_t span, uint64_t index
     if(fp == NULL)
         return false;
 
-    for(uint64_t i=0; i<index; i++)
-    {
-        sig_num_t sig = sig_num_file_read(fp);
-        assert(fscanf(fp, "\n") == 0);
-        sig_num_free(sig);
-    }
-    *out = sig_num_file_read(fp);
+    *out = file_read_sig_num(fp, index);
     fclose(fp);
     return true;
 }
@@ -196,15 +136,18 @@ bool sig_res_is_stored(uint64_t i_0, uint64_t span)
     return true;
 }
 
+// Get the size of the first number
 uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
 {
     FILE *fp = sig_res_try_open_read(i_0, span);
+    assert(fp);
 
-    uint64_t value;
-    assert(fscanf(fp, " " U64PX "", &value) == 1);
-    assert(fscanf(fp, " " U64PX "", &value) == 1);
+    file_read_move_to_index(fp, 0);
+    file_read_uint64(fp);
+    uint64_t size = file_read_uint64(fp);
     fclose(fp);
-    return value;
+
+    return size;
 }
 
 
@@ -232,14 +175,14 @@ FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remainder, u
 {
     char path[100];
     union_res_path_set(path, size, i_0, remainder, depth);
-    return file_try_open_read(path);
+    return file_read_open(path);
 }
 
-FILE* union_res_open_write(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+file_t union_res_open_write(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     char path[100];
     union_res_path_set(path, size, i_0, remainder, depth);
-    return file_open_write(path);
+    return file_write_open(path, 3);
 }
 
 union_num_t union_res_load(
@@ -254,14 +197,7 @@ union_num_t union_res_load(
     FILE *fp = union_res_try_open_read(size, i_0, remainder, depth + del);
     assert(fp);
 
-    union_num_t u;
-    for(uint64_t i=0; i<index; i++)
-    {
-        u = union_num_file_read(fp);
-        assert(fscanf(fp, "\n") == 0);
-        union_num_free(u);
-    }
-    u = union_num_file_read(fp);
+    union_num_t u = file_read_union_num(fp, index);
     fclose(fp);
     return u;
 }
@@ -338,15 +274,14 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
 {
     if(split_span_res_is_sig(size, i_0, span))
     {
-        FILE* fp = sig_res_open_write(i_0, span);
+        file_t fp = sig_res_open_write(i_0, span);
         for(uint64_t i=0; i<2; i++)
         {
             sig_num_t sig_1 = sig_res_load(i_0, span - 1, i);
             sig_num_t sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, i);
             sig_num_t sig = sig_num_mul(sig_1, sig_2);
-            sig_num_file_write(fp, sig);
+            file_write_sig_num(&fp, sig);
             sig_num_free(sig);
-            fprintf(fp,"\n");
         }
 
         sig_num_t sig_1 = sig_res_load(i_0, span - 1, 0);
@@ -358,26 +293,24 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
         sig_num_t sig_r_2 = sig_num_mul(sig_1, sig_2);
 
         sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
-        sig_num_file_write(fp, sig_r_1);
+        file_write_sig_num(&fp, sig_r_1);
         sig_num_free(sig_r_1);
         
-        fprintf(fp,"\n D0BBE");
-        fclose(fp);
+        file_write_close(&fp);
 
         sig_res_delete(i_0, span - 1);
         sig_res_delete(i_0 + B(span - 1), span - 1);
         return;
     }
 
-    FILE* fp = union_res_open_write(size, i_0, B(span), depth);
+    file_t fp = union_res_open_write(size, i_0, B(span), depth);
     for(uint64_t i=0; i<2; i++)
     {
         union_num_t u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
         union_num_t u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, i);
         union_num_t u = union_num_mul(u_1, u_2);
-        union_num_file_write(fp, u);
+        file_write_union_num(&fp, u);
         union_num_free(u);
-        fprintf(fp,"\n");
     }
 
     union_num_t u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
@@ -389,11 +322,10 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
     union_num_t u_r_2 = union_num_mul(u_1, u_2);
     
     u_r_1 = union_num_add(u_r_1, u_r_2);
-    union_num_file_write(fp, u_r_1);
+    file_write_union_num(&fp, u_r_1);
     union_num_free(u_r_1);
 
-    fprintf(fp,"\n D0BBE");
-    fclose(fp);
+    file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span - 1, depth + 1);
     split_span_res_delete(size, i_0 + B(span - 1), span - 1, depth + 1);
@@ -466,7 +398,7 @@ bool split_big_res_is_stored(
 
 void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    FILE* fp = union_res_open_write(size, i_0, remainder, depth);
+    file_t fp = union_res_open_write(size, i_0, remainder, depth);
     
     uint64_t span = stdc_bit_width(remainder) - 1;
     for(uint64_t i=0; i<2; i++)
@@ -475,9 +407,8 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
         union_num_t u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, i);
         union_num_t u = union_num_mul(u_1, u_2);
 
-        union_num_file_write(fp, u);
+        file_write_union_num(&fp, u);
         union_num_free(u);
-        fprintf(fp,"\n");
     }
 
     union_num_t u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
@@ -488,12 +419,11 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
     u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
     union_num_t u_r_2 = union_num_mul(u_1, u_2);
 
-    u_r_1 = union_num_add(u_r_1, u_r_2);
-    union_num_file_write(fp, u_r_1);
-    union_num_free(u_r_1);
+    union_num_t u = union_num_add(u_r_1, u_r_2);
+    file_write_union_num(&fp, u);
+    union_num_free(u);
 
-    fprintf(fp,"\n D0BBE");
-    fclose(fp);
+    file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span, depth + 1);
     union_res_delete(size, i_0 + B(span), remainder - B(span), depth + 1);

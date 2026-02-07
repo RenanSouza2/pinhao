@@ -12,8 +12,8 @@ flt_num_t union_num_unwrap_flt(union_num_t u);
 union_num_t union_num_copy(union_num_t u);
 void union_num_free(union_num_t u);
 
-void union_num_file_write(FILE *fp, union_num_t u);
-union_num_t union_num_file_read(FILE *fp);
+void file_write_union_num(file_p fp, union_num_t u);
+union_num_t file_read_union_num(FILE *fp, uint64_t index);
 
 union_num_t union_num_add(union_num_t u_1, union_num_t u_2);
 union_num_t union_num_mul(union_num_t u_1, union_num_t u_2);
