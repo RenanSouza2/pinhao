@@ -190,11 +190,10 @@ union_num_t union_res_load(
     uint64_t i_0,
     uint64_t remainder,
     uint64_t depth,
-    uint64_t index,
-    uint64_t del
+    uint64_t index
 )
 {
-    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth + del);
+    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
     assert(fp);
 
     union_num_t u = file_read_union_num(fp, index);
@@ -202,9 +201,9 @@ union_num_t union_res_load(
     return u;
 }
 
-bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    FILE *fp = union_res_try_open_read(size, i_0, span, depth);
+    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
     if(fp == NULL)
         return false;
         
@@ -244,13 +243,16 @@ union_num_t split_span_res_load(
     if(sig_res_try_load(&sig, i_0, span, index))
         return union_num_wrap_sig(sig, size);
 
-    return union_res_load(size, i_0, B(span), depth, index, 0);
+    return union_res_load(size, i_0, B(span), depth, index);
 }
 
 bool split_span_res_is_stored(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
-    return sig_res_is_stored(i_0, span) ||
-        union_res_try_open_read(size, i_0, span, depth);
+    if(sig_res_is_stored(i_0, span))
+        return true;
+
+    uint64_t remainder = B(span);
+    return union_res_is_stored(size, i_0, remainder, depth);
 }
 
 bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
@@ -268,8 +270,6 @@ bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 }
 
 
-
-#define PIECE_SPAN 16
 
 void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
@@ -335,13 +335,13 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
 // out vector length 3, returns P, Q, R in that order
 void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
-    assert(span >= PIECE_SPAN);
+    assert(span >= PIECE_SIZE);
     tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
 
     if(split_span_res_is_stored(size, i_0, span, depth))
         return;
 
-    if(span == PIECE_SPAN)
+    if(span == PIECE_SIZE)
     {
         sig_num_t res[3];
         TIME_SETUP
@@ -378,7 +378,7 @@ union_num_t split_big_res_load(
         return split_span_res_load(size, i_0, span, depth, index);
     }
 
-    return union_res_load(size, i_0, remainder, depth, index, 0);
+    return union_res_load(size, i_0, remainder, depth, index);
 }
 
 bool split_big_res_is_stored(
