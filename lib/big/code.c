@@ -71,7 +71,7 @@ void sig_res_path_set(char path[100], uint64_t i_0, uint64_t span)
 {
     uint64_t i_max = i_0 + B(span) - 1;
     span = span - PIECE_SIZE;
-    snprintf(path, 100, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".txt", i_0, span, i_max);
+    snprintf(path, 100, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
 }
 
 void sig_res_delete(uint64_t i_0, uint64_t span)
@@ -161,7 +161,7 @@ void union_res_path_set(
 )
 {
     uint64_t i_max = i_0 + remainder - 1;
-    snprintf(path, 100, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".txt", size, i_0, depth, i_max);
+    snprintf(path, 100, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
 }
 
 void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
@@ -249,7 +249,8 @@ union_num_t split_span_res_load(
 
 bool split_span_res_is_stored(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
-    return sig_res_is_stored(i_0, span) || union_res_try_open_read(size, i_0, span, depth);
+    return sig_res_is_stored(i_0, span) ||
+        union_res_try_open_read(size, i_0, span, depth);
 }
 
 bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
