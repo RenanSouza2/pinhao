@@ -487,13 +487,14 @@ STRUCT(handler_prepare_args)
     uint64_t span;
     uint64_t begin;
     uint64_t end;
+    uint64_t n_threads;
 };
 
 handler_p prepare_thread(handler_p _args)
 {
     handler_prepare_args_t args = *(handler_prepare_args_p)_args;
 
-    for(uint64_t i=args.begin; i<args.end; i++)
+    for(uint64_t i=args.begin; i<args.end; i += args.n_threads)
     {
         printf("\ni: " U64P() " / " U64P() "", i, args.end);
 
@@ -528,8 +529,9 @@ void prepare(
         args[i] = (handler_prepare_args_t){
             .size = size,
             .span = span,
-            .begin = begin + i * (end - begin) / n_threads,
-            .end = begin + (i + 1) * (end - begin) / n_threads
+            .begin = begin + i,
+            .end = end,
+            .n_threads = n_threads
         };
         TREAT(pthread_create(&tid[i], NULL, prepare_thread, &args[i]));
     }
