@@ -25,6 +25,13 @@ void time_1(void)
     }
 }
 
+void pi(uint64_t size)
+{
+    flt_num_t flt_pi = pi_big(size);
+    printf("\n\n");flt_num_display_dec(flt_pi);
+    flt_num_free(flt_pi);
+}
+
 // int main(int argc, char** argv)
 int main(void)
 {
@@ -32,9 +39,11 @@ int main(void)
 
     // uint64_t size = 100 * 1000 * 1000;
     uint64_t size = 100 * 1000 * 1000;
-    flt_num_t flt_pi = pi_big(size);
-    printf("\n\n");flt_num_display_dec(flt_pi);
-    flt_num_free(flt_pi);
+
+    // pi(size);
+
+    prepare(size, 16, 30000, 48000, 8);
+    // prepare(size, 20, 1000, 3000);
 
     printf("\n");
     return 0;

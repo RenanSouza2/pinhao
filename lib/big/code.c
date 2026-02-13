@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #include "debug.h"
 #include "../../mods/clu/header.h"
@@ -7,6 +8,7 @@
 #include "../../mods/macros/stdbit.h"
 #include "../../mods/macros/uint.h"
 #include "../../mods/macros/time.h"
+#include "../../mods/macros/threads.h"
 #include "../../mods/number/lib/num/struct.h"
 #include "../../mods/number/header.h"
 
@@ -479,7 +481,36 @@ flt_num_t pi_big(uint64_t size)
     return flt_pi;
 }
 
-void prepare(uint64_t size, uint64_t span, uint64_t begin, uint64_t end)
+STRUCT(handler_prepare_args)
+{
+    uint64_t size;
+    uint64_t span;
+    uint64_t begin;
+    uint64_t end;
+};
+
+handler_p prepare_thread(handler_p _args)
+{
+    handler_prepare_args_t args = *(handler_prepare_args_p)_args;
+
+    for(uint64_t i=args.begin; i<args.end; i++)
+    {
+        printf("\ni: " U64P() " / " U64P() "", i, args.end);
+
+        uint64_t i_0 = i * B(args.span) + 1;
+        split_span(args.size, i_0, args.span, 0);
+    }
+
+    return NULL;
+}
+
+void prepare(
+    uint64_t size,
+    uint64_t span,
+    uint64_t begin,
+    uint64_t end,
+    uint64_t n_threads
+)
 {
     uint64_t i_max = 32 * size + 4;
 
@@ -489,11 +520,20 @@ void prepare(uint64_t size, uint64_t span, uint64_t begin, uint64_t end)
 
     printf("\nspan: " U64P() "\tbegin: " U64P() "\tend: " U64P() "", span, begin, end);
     printf("\ni_0: " U64P() "\ti_max: " U64P() "", begin * B(span) + 1, (end + 1) * B(span));
-    for(uint64_t i=begin; i<end; i++)
+    
+    pthread_t tid[n_threads];
+    handler_prepare_args_t args[n_threads];
+    for(uint64_t i=0; i<n_threads; i++)
     {
-        printf("\ni: " U64P() "", i);
-
-        uint64_t i_0 = i * B(span) + 1;
-        split_span(size, i_0, span, 0);
+        args[i] = (handler_prepare_args_t){
+            .size = size,
+            .span = span,
+            .begin = begin + i * (end - begin) / n_threads,
+            .end = begin + (i + 1) * (end - begin) / n_threads
+        };
+        TREAT(pthread_create(&tid[i], NULL, prepare_thread, &args[i]));
     }
+
+    for(uint64_t i=0; i<n_threads; i++)
+        TREAT(pthread_join(tid[i], NULL));
 }
