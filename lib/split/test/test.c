@@ -21,7 +21,7 @@ void test_split_hello(bool show)
 
 
 
-void test_split()
+void test_split(void)
 {
     TEST_LIB
 
@@ -34,7 +34,7 @@ void test_split()
 
 
 
-int main()
+int main(void)
 {
     setbuf(stdout, NULL);
     test_split();

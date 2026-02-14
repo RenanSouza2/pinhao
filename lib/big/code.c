@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
 
 #include "debug.h"
 #include "../../mods/clu/header.h"
 #include "../../mods/macros/assert.h"
+#include "../../mods/macros/fork.h"
 #include "../../mods/macros/stdbit.h"
 #include "../../mods/macros/uint.h"
 #include "../../mods/macros/time.h"

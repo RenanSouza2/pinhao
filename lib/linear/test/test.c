@@ -21,7 +21,7 @@ void test_linear_hello(bool show)
 
 
 
-void test_linear()
+void test_linear(void)
 {
     TEST_LIB
 
@@ -34,7 +34,7 @@ void test_linear()
 
 
 
-int main()
+int main(void)
 {
     setbuf(stdout, NULL);
     test_linear();

@@ -40,9 +40,9 @@ int main(void)
     // uint64_t size = 100 * 1000 * 1000;
     uint64_t size = 100 * 1000 * 1000;
 
-    // pi(size);
+    pi(size);
 
-    prepare(size, 16, 30000, 48000, 8);
+    // prepare(size, 16, 30000, 48000, 8);
     // prepare(size, 20, 1000, 3000);
 
     printf("\n");
