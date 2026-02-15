@@ -481,30 +481,6 @@ flt_num_t pi_big(uint64_t size)
     return flt_pi;
 }
 
-STRUCT(handler_prepare_args)
-{
-    uint64_t size;
-    uint64_t span;
-    uint64_t begin;
-    uint64_t end;
-    uint64_t n_threads;
-};
-
-handler_p prepare_thread(handler_p _args)
-{
-    handler_prepare_args_t args = *(handler_prepare_args_p)_args;
-
-    for(uint64_t i=args.begin; i<args.end; i += args.n_threads)
-    {
-        printf("\ni: " U64P() " / " U64P() "", i, args.end);
-
-        uint64_t i_0 = i * B(args.span) + 1;
-        split_span(args.size, i_0, args.span, 0);
-    }
-
-    return NULL;
-}
-
 void prepare(
     uint64_t size,
     uint64_t span,
@@ -528,15 +504,14 @@ void prepare(
         pid[i] = fork_safe();
         if(pid[i])
             continue;
+        
+        for(uint64_t j=begin + i; j<end; j += n_process)
+        {
+            printf("\ni: " U64P() " / " U64P() "", j, end);
 
-        handler_prepare_args_t args = (handler_prepare_args_t){
-            .size = size,
-            .span = span,
-            .begin = begin + i,
-            .end = end,
-            .n_threads = n_process
-        };
-        prepare_thread(&args);
+            uint64_t i_0 = j * B(span) + 1;
+            split_span(size, i_0, span, 0);
+        }
 
         fprintf(stderr, "\nprocess " U64P() " finished\n", i);
         exit(EXIT_SUCCESS);
