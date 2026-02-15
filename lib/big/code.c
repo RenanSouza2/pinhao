@@ -510,7 +510,7 @@ void prepare(
     uint64_t span,
     uint64_t begin,
     uint64_t end,
-    uint64_t n_threads
+    uint64_t n_process
 )
 {
     uint64_t i_max = 32 * size + 4;
@@ -522,20 +522,28 @@ void prepare(
     printf("\nspan: " U64P() "\tbegin: " U64P() "\tend: " U64P() "", span, begin, end);
     printf("\ni_0: " U64P() "\ti_max: " U64P() "", begin * B(span) + 1, (end + 1) * B(span));
     
-    pthread_t tid[n_threads];
-    handler_prepare_args_t args[n_threads];
-    for(uint64_t i=0; i<n_threads; i++)
+    pid_t pid[n_process];
+    for(uint64_t i=0; i<n_process; i++)
     {
-        args[i] = (handler_prepare_args_t){
+        pid[i] = fork_safe();
+        if(pid[i])
+            continue;
+
+        handler_prepare_args_t args = (handler_prepare_args_t){
             .size = size,
             .span = span,
             .begin = begin + i,
             .end = end,
-            .n_threads = n_threads
+            .n_threads = n_process
         };
-        TREAT(pthread_create(&tid[i], NULL, prepare_thread, &args[i]));
+        prepare_thread(&args);
+
+        fprintf(stderr, "\nprocess " U64P() " finished\n", i);
+        exit(EXIT_SUCCESS);
     }
 
-    for(uint64_t i=0; i<n_threads; i++)
-        TREAT(pthread_join(tid[i], NULL));
+    for(uint64_t i=0; i<n_process; i++)
+    {
+        waitpid_safe(pid[i], NULL);
+    }
 }

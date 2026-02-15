@@ -37,13 +37,22 @@ int main(void)
 {
     setbuf(stdout, NULL);
 
-    // uint64_t size = 100 * 1000 * 1000;
     uint64_t size = 100 * 1000 * 1000;
 
-    pi(size);
+    // pi(size);
 
-    // prepare(size, 16, 30000, 48000, 8);
-    // prepare(size, 20, 1000, 3000);
+    // prepare(size, 16, 48000, 48829, 6);
+    // prepare(size, 17, 24408, 24414, 6);
+    // prepare(size, 18, 12204, 12207, 6);
+    // prepare(size, 19, 6102, 6103, 6);
+    // prepare(size, 20, 3000, 3051, 6);
+    // prepare(size, 21, 1520, 1525, 6);
+    // prepare(size, 22, 760, 762, 6);
+    // prepare(size, 23, 380, 381, 6);
+    // prepare(size, 24, 192, 1904, 12);
+    // prepare(size, 25, 94, 95, 6);
+    // prepare(size, 26, 20, 47, 8);
+    prepare(size, 27, 14, 23, 2);
 
     printf("\n");
     return 0;
