@@ -51,8 +51,9 @@ int main(void)
     // prepare(size, 23, 380, 381, 6);
     // prepare(size, 24, 192, 1904, 12);
     // prepare(size, 25, 94, 95, 6);
-    // prepare(size, 26, 20, 47, 8);
-    prepare(size, 27, 14, 23, 2);
+    // prepare(size, 26, 48, 476, 2);
+    // prepare(size, 27, 14, 23, 2);
+    // prepare(2 * size, 28, 0, 12, 1);
 
     printf("\n");
     return 0;

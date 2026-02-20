@@ -459,14 +459,51 @@ void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 
 
 
+void pi_path_set(char path[100], uint64_t size)
+{
+    snprintf(path, 100, CACHE "/res/pi_" U64P(015) ".bin", size);
+}
+
+void pi_save(uint64_t size, flt_num_t flt_pi)
+{
+    char name[100];
+    pi_path_set(name, size);
+    flt_num_save(name, flt_pi);
+}
+
+bool pi_is_stored(uint64_t size)
+{
+    char name[100];
+    pi_path_set(name, size);
+    FILE *fp = file_read_open(name);
+    if(fp == NULL)
+        return false;
+
+    fclose(fp);
+    return true;
+}
+
+flt_num_t pi_load(uint64_t size)
+{
+    char name[100];
+    pi_path_set(name, size);
+    return flt_num_load(name);
+}
+
 flt_num_t pi_big(uint64_t size)
 {
+    if(pi_is_stored(size))
+    {
+        tprintf("pi already stored");
+        return pi_load(size);
+    }
+
     uint64_t index_max = 32 * size + 4;
     uint64_t aux = index_max & (B(PIECE_SIZE) - 1);
     if(aux) index_max += B(PIECE_SIZE) - aux;
 
     split_big(size, 1, index_max, 0);
-    tprintf("solved");
+    tprintf("binary split solved");
 
     union_num_t u_q = split_big_res_load(size, 1, index_max, 0, 1);
     union_num_t u_r = split_big_res_load(size, 1, index_max, 0, 2);
@@ -476,8 +513,15 @@ flt_num_t pi_big(uint64_t size)
     
     flt_num_t flt_pi = flt_r;
     flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(6));
+
+    tprintf("dividing");
+    TIME_SETUP
     flt_pi = flt_num_div(flt_pi, flt_q);
+    TIME_END(t1)
+    fprintf(stderr, "\t\t%.1f", (double)t1 / 1e9);
+
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
+    pi_save(size, flt_pi);
     return flt_pi;
 }
 
