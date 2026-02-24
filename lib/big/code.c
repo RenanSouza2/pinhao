@@ -24,6 +24,7 @@
 
 #define PIECE_SIZE 20
 #define CACHE "/mnt/wsl/wsl_data/cache"
+#define PATH_MAX_LEN 256
 
 
 
@@ -69,30 +70,30 @@ void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 
 
 
-void sig_res_path_set(char path[100], uint64_t i_0, uint64_t span)
+void sig_res_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
     uint64_t i_max = i_0 + B(span) - 1;
     span = span - PIECE_SIZE;
-    snprintf(path, 100, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
+    snprintf(path, PATH_MAX_LEN, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
 }
 
 void sig_res_delete(uint64_t i_0, uint64_t span)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     remove(path);
 }
 
 FILE* sig_res_try_open_read(uint64_t i_0, uint64_t span)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     return file_read_open(path);
 }
 
 file_t sig_res_open_write(uint64_t i_0, uint64_t span)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     return file_write_open(path, 3);
 }
@@ -155,7 +156,7 @@ uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
 
 
 void union_res_path_set(
-    char path[100],
+    char path[PATH_MAX_LEN],
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
@@ -163,26 +164,26 @@ void union_res_path_set(
 )
 {
     uint64_t i_max = i_0 + remainder - 1;
-    snprintf(path, 100, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
+    snprintf(path, PATH_MAX_LEN, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
 }
 
 void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
     remove(path);
 }
 
 FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
     return file_read_open(path);
 }
 
 file_t union_res_open_write(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
     return file_write_open(path, 3);
 }
@@ -216,7 +217,7 @@ bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64
 
 
 void split_span_res_path_set(
-    char path[100],
+    char path[PATH_MAX_LEN],
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
@@ -228,7 +229,7 @@ void split_span_res_path_set(
 
 void split_span_res_delete(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
-    char path[100];
+    char path[PATH_MAX_LEN];
     split_span_res_path_set(path, size, i_0, span, depth);
     remove(path);
 }
@@ -459,21 +460,21 @@ void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 
 
 
-void pi_path_set(char path[100], uint64_t size)
+void pi_path_set(char path[PATH_MAX_LEN], uint64_t size)
 {
-    snprintf(path, 100, CACHE "/res/pi_" U64P(015) ".bin", size);
+    snprintf(path, PATH_MAX_LEN, CACHE "/res/pi_" U64P(015) ".bin", size);
 }
 
 void pi_save(uint64_t size, flt_num_t flt_pi)
 {
-    char name[100];
+    char name[PATH_MAX_LEN];
     pi_path_set(name, size);
     flt_num_save(name, flt_pi);
 }
 
 bool pi_is_stored(uint64_t size)
 {
-    char name[100];
+    char name[PATH_MAX_LEN];
     pi_path_set(name, size);
     FILE *fp = file_read_open(name);
     if(fp == NULL)
@@ -485,7 +486,7 @@ bool pi_is_stored(uint64_t size)
 
 flt_num_t pi_load(uint64_t size)
 {
-    char name[100];
+    char name[PATH_MAX_LEN];
     pi_path_set(name, size);
     return flt_num_load(name);
 }
@@ -583,10 +584,10 @@ void prepare(
         
 //         printf("\ninit: %lu\tdepth: %lu\tend: %lu", init, depth, end);
 
-//         char path_old[100];
-//         snprintf(path_old, 100, "%s/%s", folder, dir->d_name);
+//         char path_old[PATH_MAX_LEN];
+//         snprintf(path_old, PATH_MAX_LEN, "%s/%s", folder, dir->d_name);
 
-//         char path_new[100];
+//         char path_new[PATH_MAX_LEN];
 //         sig_res_path_set(path_new, init, depth + 16);
 //         printf("\nold path: %s", path_old);
 //         printf("\nnew path: %s", path_new);

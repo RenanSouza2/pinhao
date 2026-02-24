@@ -106,10 +106,10 @@ int main(void)
 {
     setbuf(stdout, NULL);
     
-    use();
+    // use();
 
-    // uint64_t size = 1000 * 1000 * 1000;
-    // pi(size);
+    uint64_t size = 1000 * 1000 * 1000;
+    pi(size);
 
     // prepare(16, 48000, 48829, 6);
     // prepare(17, 24408, 24414, 6);
@@ -123,7 +123,7 @@ int main(void)
     // prepare(25, 94, 95, 6);
     // prepare(26, 48, 476, 2);
     // prepare(27, 24, 238, 1);
-    prepare(28, 1, 119, 12);
+    // prepare(28, 1, 119, 12);
 
     printf("\n");
     return 0;
