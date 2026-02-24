@@ -121,7 +121,7 @@ int main(void)
     // prepare(23, 380, 381, 6);
     // prepare(24, 230, 1907, 12);
     // prepare(25, 94, 95, 6);
-    // prepare(26, 48, 476, 2);
+    // prepare(26, 60, 476, 12);
     // prepare(27, 24, 238, 1);
     // prepare(28, 1, 119, 12);
 

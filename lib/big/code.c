@@ -560,38 +560,3 @@ void prepare(
         waitpid_safe(pid[i], NULL);
     }
 }
-
-// #include <dirent.h>
-
-// void a(void)
-// {
-//     char folder[] = "cache_del/pieces";
-//     printf("\n%s", folder);
-//     printf("\n");
-    
-//     DIR *d = opendir(folder);
-//     assert(d);
-
-//     printf("\n---------");
-//     struct dirent *dir;
-//     while ((dir = readdir(d)) != NULL) {
-//         if(dir->d_name[0] != 'p')
-//             continue;
-
-//         printf("\n%s", dir->d_name);
-//         uint64_t init, end, depth;
-//         assert(sscanf(dir->d_name, "p_%lu_%lu_%lu", &init, &depth, &end) == 3);
-        
-//         printf("\ninit: %lu\tdepth: %lu\tend: %lu", init, depth, end);
-
-//         char path_old[PATH_MAX_LEN];
-//         snprintf(path_old, PATH_MAX_LEN, "%s/%s", folder, dir->d_name);
-
-//         char path_new[PATH_MAX_LEN];
-//         sig_res_path_set(path_new, init, depth + 16);
-//         printf("\nold path: %s", path_old);
-//         printf("\nnew path: %s", path_new);
-
-//         assert(rename(path_old, path_new) == 0);
-//     }
-// }
