@@ -22,8 +22,8 @@
 
 
 
-#define PIECE_SIZE 16
-#define CACHE "cache_del"
+#define PIECE_SIZE 20
+#define CACHE "/mnt/wsl/wsl_data/cache"
 
 
 
@@ -526,19 +526,12 @@ flt_num_t pi_big(uint64_t size)
 }
 
 void prepare(
-    uint64_t size,
     uint64_t span,
     uint64_t begin,
     uint64_t end,
     uint64_t n_process
 )
 {
-    uint64_t i_max = 32 * size + 4;
-
-    uint64_t aux = i_max & (B(PIECE_SIZE) - 1);
-    if(aux)
-        i_max += B(PIECE_SIZE) - aux;
-
     printf("\nspan: " U64P() "\tbegin: " U64P() "\tend: " U64P() "", span, begin, end);
     printf("\ni_0: " U64P() "\ti_max: " U64P() "", begin * B(span) + 1, (end + 1) * B(span));
     
@@ -554,7 +547,7 @@ void prepare(
             printf("\ni: " U64P() " / " U64P() "", j, end);
 
             uint64_t i_0 = j * B(span) + 1;
-            split_span(size, i_0, span, 0);
+            split_span(UINT64_MAX, i_0, span, 0);
         }
 
         fprintf(stderr, "\nprocess " U64P() " finished\n", i);
@@ -566,3 +559,38 @@ void prepare(
         waitpid_safe(pid[i], NULL);
     }
 }
+
+// #include <dirent.h>
+
+// void a(void)
+// {
+//     char folder[] = "cache_del/pieces";
+//     printf("\n%s", folder);
+//     printf("\n");
+    
+//     DIR *d = opendir(folder);
+//     assert(d);
+
+//     printf("\n---------");
+//     struct dirent *dir;
+//     while ((dir = readdir(d)) != NULL) {
+//         if(dir->d_name[0] != 'p')
+//             continue;
+
+//         printf("\n%s", dir->d_name);
+//         uint64_t init, end, depth;
+//         assert(sscanf(dir->d_name, "p_%lu_%lu_%lu", &init, &depth, &end) == 3);
+        
+//         printf("\ninit: %lu\tdepth: %lu\tend: %lu", init, depth, end);
+
+//         char path_old[100];
+//         snprintf(path_old, 100, "%s/%s", folder, dir->d_name);
+
+//         char path_new[100];
+//         sig_res_path_set(path_new, init, depth + 16);
+//         printf("\nold path: %s", path_old);
+//         printf("\nnew path: %s", path_new);
+
+//         assert(rename(path_old, path_new) == 0);
+//     }
+// }
