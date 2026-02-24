@@ -1,38 +1,37 @@
-FLAGS = -std=c11 -Wall -Wextra -Werror -Wfatal-errors -Wpedantic -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes -Wformat=2 -Wnull-dereference -Wconversion -Wsign-conversion -D_POSIX_C_SOURCE=200809L
-FLAGS_PRD = -O2 -march=native -fstack-protector-strong
-FLAGS_DBG = -D DEBUG -O0 -g3 -ggdb -fno-omit-frame-pointer -fsanitize=address,undefined
-
-ifeq ($(shell uname -s),Linux)
-    FLAGS_PRD += -fstack-clash-protection
-	FLAGS_DBG += -fsanitize=leak
-endif
+PRJ_DIR = $(shell git rev-parse --show-toplevel)
+include $(PRJ_DIR)/makefiles/flags.mk
+include $(PRJ_DIR)/makefiles/vars.mk
 
 
 
 DIRS := $(wildcard */.)
 
 LIB_FILES = $(foreach DIR,$(DIRS),$(dir $(DIR))lib.o)
-DGB_FILES = $(foreach DIR,$(DIRS),$(dir $(DIR))debug.o)
-CLU_FILE = ../mods/clu/bin/clu.o
-NUM_FILE = ../mods/number/lib/lib.o
-
-DIR = $(shell basename $(CURDIR))
+DBG_FILES = $(foreach DIR,$(DIRS),$(dir $(DIR))debug.o)
 
 
 
-build: lib.o
+build b: $(LIB_FULL_FILE)
 
-dbg: debug.o
+dbg d: $(DBG_FULL_FILE)
 
 
 
-lib.o: $(LIB_FILES) $(NUM_FILE)
+$(LIB_FULL_FILE): $(LIB_FILE) $(NUM_FILE)
+	echo " linking pi full object $(DIR)"
+	gcc -r $(FLAGS) $(FLAGS_PRD) -o $@ $^ -nostdlib
+
+$(LIB_FILE): $(LIB_FILES)
 	echo " linking pi object $(DIR)"
-	gcc -r $(FLAGS) $(FLAGS_PRD) -o $@ $^ -flto -nostdlib
+	gcc -r $(FLAGS) $(FLAGS_PRD) -o $@ $^ -nostdlib
 
-debug.o: $(DGB_FILES) $(NUM_FILE) $(CLU_FILE)
+$(DBG_FULL_FILE): $(DBG_FILE) $(NUM_DBG_FILE)  $(CLU_FILE)
+	echo " linking pi full debug $(DIR)"
+	gcc -r $(FLAGS) $(FLAGS_DBG)  -o $@ $^ -nostdlib
+
+$(DBG_FILE): $(DBG_FILES)
 	echo " linking pi debug $(DIR)"
-	gcc -r $(FLAGS) $(FLAGS_DBG)  -o $@ $^ -flto -nostdlib
+	gcc -r $(FLAGS) $(FLAGS_DBG)  -o $@ $^ -nostdlib
 
 
 
@@ -40,8 +39,8 @@ debug.o: $(DGB_FILES) $(NUM_FILE) $(CLU_FILE)
 $(LIB_FILES) $(NUM_FILE) $(CLU_FILE):
 	$(MAKE) --directory=$(dir $@)
 
-.PHONY: $(DGB_FILES)
-$(DGB_FILES):
+.PHONY: $(DBG_FILES) $(NUM_DBG_FILE)
+$(DBG_FILES) $(NUM_DBG_FILE):
 	$(MAKE) dbg --directory=$(dir $@)
 
 
