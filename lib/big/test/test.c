@@ -21,7 +21,7 @@ void test_example_hello(bool show)
 
 
 
-void test_example()
+void test_example(void)
 {
     TEST_LIB
 
@@ -34,7 +34,7 @@ void test_example()
 
 
 
-int main()
+int main(void)
 {
     setbuf(stdout, NULL);
     test_example();

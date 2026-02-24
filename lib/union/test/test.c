@@ -21,7 +21,7 @@ void test_union_hello(bool show)
 
 
 
-void test_union()
+void test_union(void)
 {
     TEST_LIB
 
@@ -34,7 +34,7 @@ void test_union()
 
 
 
-int main()
+int main(void)
 {
     setbuf(stdout, NULL);
     test_union();
