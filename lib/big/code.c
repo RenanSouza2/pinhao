@@ -22,8 +22,9 @@
 
 
 
-#define PIECE_SIZE 20
-#define CACHE "/mnt/wsl/wsl_data/cache"
+#define PIECE_SIZE 16
+// #define CACHE "/mnt/wsl/wsl_data/cache"
+#define CACHE "cache"
 #define PATH_MAX_LEN 256
 
 

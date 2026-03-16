@@ -40,7 +40,7 @@ int main(void)
     
     // use();
 
-    uint64_t size = 1000 * 1000 * 1000;
+    uint64_t size = 100 * 1000;
     pi(size);
 
     // prepare(16, 48000, 48829, 6);
