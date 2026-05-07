@@ -29,7 +29,7 @@
 
 
 
-void split_sig_join(
+static void split_sig_join(
     sig_num_t out[3],
     sig_num_t res_1[3],
     sig_num_t res_2[3]
@@ -48,7 +48,7 @@ void split_sig_join(
 }
 
 // out vector length 3, returns P, Q, R in that order
-void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
+static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 {
     if(span == 0)
     {
@@ -71,35 +71,35 @@ void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 
 
 
-void sig_res_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
+static void sig_res_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
     uint64_t i_max = i_0 + B(span) - 1;
     span = span - PIECE_SIZE;
     snprintf(path, PATH_MAX_LEN, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
 }
 
-void sig_res_delete(uint64_t i_0, uint64_t span)
+static void sig_res_delete(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     remove(path);
 }
 
-FILE* sig_res_try_open_read(uint64_t i_0, uint64_t span)
+static FILE* sig_res_try_open_read(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     return file_read_open(path);
 }
 
-file_t sig_res_open_write(uint64_t i_0, uint64_t span)
+static file_t sig_res_open_write(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     return file_write_open(path, 3);
 }
 
-void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
+static void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
 {
     file_t fp = sig_res_open_write(i_0, span);
     for(uint64_t i=0; i<3; i++)
@@ -112,7 +112,7 @@ void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
     sig_num_free(res[2]);
 }
 
-bool sig_res_try_load(sig_num_p out, uint64_t i_0, uint64_t span, uint64_t index)
+static bool sig_res_try_load(sig_num_p out, uint64_t i_0, uint64_t span, uint64_t index)
 {
     FILE *fp = sig_res_try_open_read(i_0, span);
     if(fp == NULL)
@@ -123,14 +123,14 @@ bool sig_res_try_load(sig_num_p out, uint64_t i_0, uint64_t span, uint64_t index
     return true;
 }
 
-sig_num_t sig_res_load(uint64_t i_0, uint64_t span, uint64_t index)
+static sig_num_t sig_res_load(uint64_t i_0, uint64_t span, uint64_t index)
 {
     sig_num_t res;
     assert(sig_res_try_load(&res, i_0, span, index));
     return res;
 }
 
-bool sig_res_is_stored(uint64_t i_0, uint64_t span)
+static bool sig_res_is_stored(uint64_t i_0, uint64_t span)
 {
     FILE *fp = sig_res_try_open_read(i_0, span);
     if(fp == NULL)
@@ -141,7 +141,7 @@ bool sig_res_is_stored(uint64_t i_0, uint64_t span)
 }
 
 // Get the size of the first number
-uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
+static uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
 {
     FILE *fp = sig_res_try_open_read(i_0, span);
     assert(fp);
@@ -156,7 +156,7 @@ uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
 
 
 
-void union_res_path_set(
+static void union_res_path_set(
     char path[PATH_MAX_LEN],
     uint64_t size,
     uint64_t i_0,
@@ -168,28 +168,28 @@ void union_res_path_set(
     snprintf(path, PATH_MAX_LEN, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
 }
 
-void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
     remove(path);
 }
 
-FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
     return file_read_open(path);
 }
 
-file_t union_res_open_write(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static file_t union_res_open_write(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
     return file_write_open(path, 3);
 }
 
-union_num_t union_res_load(
+static union_num_t union_res_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
@@ -205,7 +205,7 @@ union_num_t union_res_load(
     return u;
 }
 
-bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
     if(fp == NULL)
@@ -217,7 +217,7 @@ bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64
 
 
 
-void split_span_res_path_set(
+static void split_span_res_path_set(
     char path[PATH_MAX_LEN],
     uint64_t size,
     uint64_t i_0,
@@ -228,14 +228,14 @@ void split_span_res_path_set(
     union_res_path_set(path, size, i_0, B(span), depth);
 }
 
-void split_span_res_delete(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+static void split_span_res_delete(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     char path[PATH_MAX_LEN];
     split_span_res_path_set(path, size, i_0, span, depth);
     remove(path);
 }
 
-union_num_t split_span_res_load(
+static union_num_t split_span_res_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
@@ -250,7 +250,7 @@ union_num_t split_span_res_load(
     return union_res_load(size, i_0, B(span), depth, index);
 }
 
-bool split_span_res_is_stored(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+static bool split_span_res_is_stored(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     if(sig_res_is_stored(i_0, span))
         return true;
@@ -259,7 +259,7 @@ bool split_span_res_is_stored(uint64_t size, uint64_t i_0, uint64_t span, uint64
     return union_res_is_stored(size, i_0, remainder, depth);
 }
 
-bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
+static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 {
     // size, i_0 , span - 1, depth + 1
     if(!sig_res_is_stored(i_0, span - 1))
@@ -275,7 +275,7 @@ bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 
 
 
-void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+static void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     if(split_span_res_is_sig(size, i_0, span))
     {
@@ -337,7 +337,7 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
 }
 
 // out vector length 3, returns P, Q, R in that order
-void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+static void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     assert(span >= PIECE_SIZE);
     tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
@@ -368,7 +368,7 @@ void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 
 
 
-union_num_t split_big_res_load(
+static union_num_t split_big_res_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
@@ -385,7 +385,7 @@ union_num_t split_big_res_load(
     return union_res_load(size, i_0, remainder, depth, index);
 }
 
-bool split_big_res_is_stored(
+static bool split_big_res_is_stored(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
@@ -401,7 +401,7 @@ bool split_big_res_is_stored(
     return union_res_is_stored(size, i_0, remainder, depth);
 }
 
-void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     file_t fp = union_res_open_write(size, i_0, remainder, depth);
     
@@ -435,7 +435,7 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
 }
 
 // out vector length 3, returns P, Q, R in that order
-void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth)
 
@@ -461,19 +461,19 @@ void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 
 
 
-void pi_path_set(char path[PATH_MAX_LEN], uint64_t size)
+static void pi_path_set(char path[PATH_MAX_LEN], uint64_t size)
 {
     snprintf(path, PATH_MAX_LEN, CACHE "/res/pi_" U64P(015) ".bin", size);
 }
 
-void pi_save(uint64_t size, flt_num_t flt_pi)
+static void pi_save(uint64_t size, flt_num_t flt_pi)
 {
     char name[PATH_MAX_LEN];
     pi_path_set(name, size);
     flt_num_save(name, flt_pi);
 }
 
-bool pi_is_stored(uint64_t size)
+static bool pi_is_stored(uint64_t size)
 {
     char name[PATH_MAX_LEN];
     pi_path_set(name, size);
@@ -485,7 +485,7 @@ bool pi_is_stored(uint64_t size)
     return true;
 }
 
-flt_num_t pi_load(uint64_t size)
+static flt_num_t pi_load(uint64_t size)
 {
     char name[PATH_MAX_LEN];
     pi_path_set(name, size);

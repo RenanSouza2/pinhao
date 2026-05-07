@@ -11,7 +11,7 @@
 
 
 
-void pi(uint64_t size)
+static void pi(uint64_t size)
 {
     flt_num_t flt_pi = pi_big(size);
     printf("\n\n");flt_num_display_dec(flt_pi);
@@ -58,3 +58,7 @@ int main(void)
 // v10, new lib: 34m32.111s
 // v9, old lib: 35m42.555s
 // v9: new lib: 32m55.631s
+
+// gcc 15
+
+// v9: new lib: 33m26.197s

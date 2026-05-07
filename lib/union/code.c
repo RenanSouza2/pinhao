@@ -144,7 +144,7 @@ void union_num_free(union_num_t u)
 
 
 
-void file_write_union_num_raw(file_p fp, union_num_t u)
+static void file_write_union_num_raw(file_p fp, union_num_t u)
 {
     file_write_uint64(fp, u.type);
     file_write_uint64(fp, u.size);
@@ -173,7 +173,7 @@ void file_write_union_num(file_p fp, union_num_t u)
     file_write_end(fp);
 }
 
-union_num_t file_read_union_num_raw(FILE *fp)
+static union_num_t file_read_union_num_raw(FILE *fp)
 {
     uint64_t type = file_read_uint64(fp);
     uint64_t size = file_read_uint64(fp);
