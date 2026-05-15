@@ -7,7 +7,7 @@
 
 
 
-void test_union_hello(bool show)
+static void test_union_hello(bool show)
 {
     TEST_FN_OPEN
 
@@ -21,7 +21,7 @@ void test_union_hello(bool show)
 
 
 
-void test_union(void)
+static void test_union(void)
 {
     TEST_LIB
 

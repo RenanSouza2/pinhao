@@ -502,7 +502,10 @@ flt_num_t pi_big(uint64_t size)
 
     uint64_t index_max = 32 * size + 4;
     uint64_t aux = index_max & (B(PIECE_SIZE) - 1);
-    if(aux) index_max += B(PIECE_SIZE) - aux;
+    if(aux)
+    {
+        index_max += B(PIECE_SIZE) - aux;
+    }
 
     split_big(size, 1, index_max, 0);
     tprintf("binary split solved");
@@ -542,7 +545,9 @@ void prepare(
     {
         pid[i] = fork_safe();
         if(pid[i])
+        {
             continue;
+        }
         
         for(uint64_t j=begin + i; j<end; j += n_process)
         {
@@ -558,6 +563,6 @@ void prepare(
 
     for(uint64_t i=0; i<n_process; i++)
     {
-        waitpid_safe(pid[i], NULL);
+        (void)waitpid_safe(pid[i], NULL);
     }
 }

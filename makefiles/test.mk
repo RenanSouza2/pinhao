@@ -2,9 +2,13 @@ test: runner
 	echo "running test $(DIR)"
 	./runner
 
-runner: test.c $(DBG_FULL_FILE)
+runner: test.o $(DBG_FULL_FILE)
 	echo "building test $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_EXE)
+
+test.o: test.c
+	echo "building test object $(DIR)"
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
 
 clean:
-	rm -rf runner
+	rm -rf test.o runner
