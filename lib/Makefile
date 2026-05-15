@@ -54,8 +54,8 @@ _clean:
 	for DIR in $(DIRS) ; do \
 		( $(MAKE) _clean --directory=$$DIR ) || exit $$? ; \
 	done
-	$(MAKE) clean --directory $(dir ${CLU_FILE}) 
-	$(MAKE) clean --directory $(dir ${NUM_FILE}) 
+	$(MAKE) clean --directory $(dir ${CLU_FILE})
+	$(MAKE) clean --directory $(dir ${NUM_FILE})
 
 
 

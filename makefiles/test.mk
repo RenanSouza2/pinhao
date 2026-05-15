@@ -1,3 +1,5 @@
+.PHONY: test clean
+
 test: runner
 	echo "running test $(DIR)"
 	./runner

@@ -19,7 +19,7 @@ Based on the contents of the `diff.txt` file, here is everything implemented and
 - **Math Reductions**:
   - The calculation in `split_union` and `split` now uses the multiplier factor `(int128_t)2 * i_0 + 1` (previously `4 * i_0 + 2`), reducing by a factor of 2.
   - The final scaling of Pi now multiplies by 3 instead of 6 to account for the reduction in the split phase.
-- **Cache & Terminology Update**: 
+- **Cache & Terminology Update**:
   - Renamed internal functions related to saving and loading chunked results: `sig_res` -> `piece` and `union_res` -> `term`.
   - Renamed the cache subdirectories correspondingly: `cache/numbers` -> `cache/pi`, `cache/pieces` -> `cache/piece`, and `cache/res` -> `cache/term`.
 - **Logic Improvements**:

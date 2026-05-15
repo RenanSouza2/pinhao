@@ -210,7 +210,7 @@ static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder,
     FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
     if(fp == NULL)
         return false;
-        
+
     fclose(fp);
     return true;
 }
@@ -300,7 +300,7 @@ static void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint
         sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
         file_write_sig_num(&fp, sig_r_1);
         sig_num_free(sig_r_1);
-        
+
         file_write_close(&fp);
 
         sig_res_delete(i_0, span - 1);
@@ -325,7 +325,7 @@ static void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint
     u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
     u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
     union_num_t u_r_2 = union_num_mul(u_1, u_2);
-    
+
     u_r_1 = union_num_add(u_r_1, u_r_2);
     file_write_union_num(&fp, u_r_1);
     union_num_free(u_r_1);
@@ -404,7 +404,7 @@ static bool split_big_res_is_stored(
 static void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     file_t fp = union_res_open_write(size, i_0, remainder, depth);
-    
+
     uint64_t span = stdc_bit_width(remainder) - 1;
     for(uint64_t i=0; i<2; i++)
     {
@@ -515,7 +515,7 @@ flt_num_t pi_big(uint64_t size)
 
     flt_num_t flt_q = union_num_unwrap_flt(u_q);
     flt_num_t flt_r = union_num_unwrap_flt(u_r);
-    
+
     flt_num_t flt_pi = flt_r;
     flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(6));
 
@@ -539,7 +539,7 @@ void prepare(
 {
     printf("\nspan: " U64P() "\tbegin: " U64P() "\tend: " U64P() "", span, begin, end);
     printf("\ni_0: " U64P() "\ti_max: " U64P() "", begin * B(span) + 1, (end + 1) * B(span));
-    
+
     pid_t pid[n_process];
     for(uint64_t i=0; i<n_process; i++)
     {
@@ -548,7 +548,7 @@ void prepare(
         {
             continue;
         }
-        
+
         for(uint64_t j=begin + i; j<end; j += n_process)
         {
             printf("\ni: " U64P() " / " U64P() "", j, end);

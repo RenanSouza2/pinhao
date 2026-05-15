@@ -23,7 +23,7 @@ void split_join(
 {
     union_num_t u_r_1 = union_num_mul(res_1[2], union_num_copy(res_2[1]));
     union_num_t u_r_2 = union_num_mul(res_2[2], union_num_copy(res_1[0]));
-    
+
     union_num_t out_0 = union_num_mul(res_1[0], res_2[0]);
     union_num_t out_1 = union_num_mul(res_1[1], res_2[1]);
     union_num_t out_2 = union_num_add(u_r_1, u_r_2);
