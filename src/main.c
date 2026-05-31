@@ -1,10 +1,10 @@
 #include <stdio.h>
 
-#include "../mods/clu/header.h"
-#include "../mods/macros/assert.h"
-#include "../mods/macros/fork.h"
-#include "../mods/macros/time.h"
-#include "../mods/number/lib/num/struct.h"
+#include "../mods/clu/header.h" // IWYU pragma: keep
+// #include "../mods/macros/assert.h"
+// #include "../mods/macros/fork.h"
+// #include "../mods/macros/time.h"
+// #include "../mods/number/lib/num/struct.h"
 
 #include "../lib/big/header.h"
 // #include "../lib/linear/linear/header.h"
@@ -21,12 +21,13 @@ static void pi(uint64_t size)
 // int main(int argc, char** argv)
 int main(void)
 {
-    setbuf(stdout, NULL);
+    setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
     // clu_log_level_set(CLU_LOG_DYNAMIC);
 
-    pi(1024 * 1024);
+    pi(10'000);
+    // pi(1'000'000);
 
     // prepare(16, 48000, 48829, 6);
     // prepare(17, 24408, 24414, 6);

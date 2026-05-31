@@ -54,7 +54,7 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
         int128_t p = ((int128_t)2 * i_0) - 3;
         int128_t q = ((int128_t)8 * i_0);
         int128_t u = (int128_t)1 - ((int128_t)2 * i_0);
-        int128_t v = ((int128_t)4 * i_0) + 2;
+        int128_t v = ((int128_t)2 * i_0) + 1;
 
         out[0] = sig_num_wrap_int128(p * v);
         out[1] = sig_num_wrap_int128(q * v);
@@ -541,7 +541,7 @@ flt_num_t pi_big(uint64_t size)
     flt_num_t flt_r = union_num_unwrap_flt(u_r);
 
     flt_num_t flt_pi = flt_r;
-    flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(6));
+    flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(3));
 
     tprintf("dividing");
     TIME_SETUP
