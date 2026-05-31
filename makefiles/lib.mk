@@ -5,7 +5,6 @@ include $(PRJ_DIR)/makefiles/vars.mk
 
 
 build b: lib.o
-
 dbg d: debug.o
 
 

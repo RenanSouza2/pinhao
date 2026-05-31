@@ -5,18 +5,18 @@ include $(PRJ_DIR)/makefiles/vars.mk
 
 
 build b: main.o
-
 dbg d: debug.o
 
 
 
 main.o: main.c $(LIB_FULL_FILE)
 	echo "building pi exec $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE)
+	echo "finished $(PRJ_NAME) exec $(DIR)"
 
 debug.o: main.c $(DBG_FULL_FILE)
 	echo "building pi debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_EXE)
 
 
 
