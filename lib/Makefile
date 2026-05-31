@@ -6,11 +6,11 @@ dbg: $(DBG_FULL_FILE)
 
 
 
-$(LIB_FULL_FILE): $(LIB_FILE) $(NUM_FILE)
+$(LIB_FULL_FILE): lib.o $(NUM_FILE)
 	echo " linking $(PRJ_NAME) full object $(DIR)"
 	gcc $(FLAGS) $(FLAGS_PRD) $(FLAGS_LNK) -o $@ $^
 
-$(DBG_FULL_FILE): $(DBG_FILE) $(NUM_DBG_FILE) $(CLU_FILE)
+$(DBG_FULL_FILE): debug.o $(NUM_DBG_FILE) $(CLU_FILE)
 	echo " linking $(PRJ_NAME) full debug $(DIR)"
 	gcc $(FLAGS) $(FLAGS_DBG) $(FLAGS_LNK) -o $@ $^
 

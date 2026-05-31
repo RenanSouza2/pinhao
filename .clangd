@@ -1,0 +1,21 @@
+CompileFlags:
+  Add:
+    - "-std=c23"
+    - "-DDEBUG"
+    - "-D_GNU_SOURCE"
+    - "-Wall"
+    - "-Wextra"
+    - "-Werror"
+    - "-fsanitize=address"
+    - "-xc"
+
+Diagnostics:
+  ClangTidy:
+    Add: [bugprone-*, clang-analyzer-*, performance-*, readability-*]
+    Remove: [abseil-*, llvm-*, readability-identifier-length, bugprone-easily-swappable-parameters]
+
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: No

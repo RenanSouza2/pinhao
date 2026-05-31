@@ -9,7 +9,7 @@ void prepare(
     uint64_t span,
     uint64_t begin,
     uint64_t end,
-    uint64_t n_threads
+    uint64_t n_process
 );
 
 #endif
