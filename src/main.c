@@ -11,6 +11,7 @@
 
 
 
+[[maybe_unused]]
 static void pi(uint64_t size)
 {
     flt_num_t flt_pi = pi_big(size);
@@ -27,18 +28,14 @@ int main(void)
     // clu_log_level_set(CLU_LOG_DYNAMIC);
 
     pi(10'000);
-    // pi(1'000'000);
+    // pi(200'000'000);
 
-    // prepare(16, 48000, 48829, 6);
-    // prepare(17, 24408, 24414, 6);
-    // prepare(18, 12204, 12207, 6);
-    // prepare(19, 6102, 6103, 6);
     // prepare(20, 0, 30, 6);
     // prepare(21, 2, 15, 6);
     // prepare(22, 0, 76, 6);
-    // prepare(23, 4, 38, 6);
-    // prepare(24, 0, 19, 6);
-    // prepare(25, 94, 95, 6);
+    // prepare(23, 663, 762, 12);
+    // prepare(24, 8, 380, 1);
+    // prepare(25, 16, 190, 3);
     // prepare(26, 60, 476, 12);
     // prepare(27, 24, 238, 1);
     // prepare(28, 1, 119, 12);
@@ -53,13 +50,3 @@ int main(void)
     printf("\n");
     return 0;
 }
-
-// gcc 13
-
-// v10, new lib: 34m32.111s
-// v9, old lib: 35m42.555s
-// v9: new lib: 32m55.631s
-
-// gcc 15
-
-// v9: new lib: 33m26.197s

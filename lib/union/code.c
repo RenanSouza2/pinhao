@@ -1,9 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "debug.h"
-#include "../../mods/clu/header.h"
-#include "../../mods/macros/assert.h"
+#include "debug.h" // IWYU pragma: keep
+#include "../../mods/clu/header.h" // IWYU pragma: keep
 #include "../../mods/macros/uint.h"
 #include "../../mods/number/lib/num/struct.h"
 

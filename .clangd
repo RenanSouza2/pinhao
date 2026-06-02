@@ -5,14 +5,27 @@ CompileFlags:
     - "-D_GNU_SOURCE"
     - "-Wall"
     - "-Wextra"
-    - "-Werror"
-    - "-fsanitize=address"
+    - "-Wpedantic"
     - "-xc"
+  Remove:
+    - "-Werror"
 
 Diagnostics:
   ClangTidy:
-    Add: [bugprone-*, clang-analyzer-*, performance-*, readability-*]
-    Remove: [abseil-*, llvm-*, readability-identifier-length, bugprone-easily-swappable-parameters]
+    Add:
+      - "bugprone-*"
+      - "clang-analyzer-*"
+      - "performance-*"
+      - "readability-*"
+      - "cert-*"
+    CheckOptions:
+      cert-err33-c.CheckedFunctions: "-::fprintf;-::printf;-::sprintf"
+    Remove:
+      - "abseil-*"
+      - "llvm-*"
+      - "readability-identifier-length"
+      - "readability-isolate-declaration"
+      - "bugprone-easily-swappable-parameters"
 
 Index:
   Background: Build

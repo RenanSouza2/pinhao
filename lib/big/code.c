@@ -20,7 +20,7 @@
 
 
 
-#define PIECE_SIZE 16
+#define PIECE_SIZE 20
 // #define CACHE "/mnt/wsl/wsl_data/cache"
 #define CACHE "cache"
 #define PATH_MAX_LEN 256
@@ -62,7 +62,6 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
         return;
     }
 
-    // NOLINTNEXTLINE(readability-isolate-declaration)
     sig_num_t res_1[3], res_2[3];
     split_sig(res_1, i_0              , span - 1);
     split_sig(res_2, i_0 + B(span - 1), span - 1);
@@ -75,7 +74,6 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 static void sig_res_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
     uint64_t i_max = i_0 + B(span) - 1;
-    span = span - PIECE_SIZE;
     snprintf(path, PATH_MAX_LEN, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
 }
 
@@ -551,6 +549,7 @@ flt_num_t pi_big(uint64_t size)
 
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     pi_save(size, flt_pi);
+    union_res_delete(size, 1, index_max, 0);
     return flt_pi;
 }
 
