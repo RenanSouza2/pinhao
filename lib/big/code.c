@@ -21,7 +21,7 @@
 
 
 #define PIECE_SIZE 20
-// #define CACHE "/mnt/wsl/wsl_data/cache"
+// #define CACHE "/mnt/wsl/external_workspace/cache"
 #define CACHE "cache"
 #define PATH_MAX_LEN 256
 
@@ -49,6 +49,7 @@ static void split_sig_join(
 // NOLINTBEGIN(readability-magic-numbers)
 static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 {
+    printf("\nOPOHA");
     if(span == 0)
     {
         int128_t p = ((int128_t)2 * i_0) - 3;

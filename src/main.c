@@ -25,9 +25,16 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
+    num_config_t config = {
+        .disk_path = "./tmp",
+        .disk_threshold = 0
+    };
+    num_config_set(&config);
+
     // clu_log_level_set(CLU_LOG_DYNAMIC);
 
     pi(10'000);
+    // pi(1'000'000);
     // pi(200'000'000);
 
     // prepare(20, 0, 30, 6);
