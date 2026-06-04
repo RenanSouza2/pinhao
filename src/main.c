@@ -25,25 +25,27 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
+    // char disk_path[] = "./cache/tmp";
+    char disk_path[] = "/mnt/wsl/external_workspace/cache/tmp";
     num_config_t config = {
-        .disk_path = "./tmp",
-        .disk_threshold = 0
+        .disk_path = disk_path,
+        .disk_threshold = (uint64_t)1024 * 1024 * 1024
     };
     num_config_set(&config);
 
     // clu_log_level_set(CLU_LOG_DYNAMIC);
 
-    pi(10'000);
+    // pi(10'000);
     // pi(1'000'000);
-    // pi(200'000'000);
+    pi(200'000'000);
 
     // prepare(20, 0, 30, 6);
     // prepare(21, 2, 15, 6);
     // prepare(22, 0, 76, 6);
     // prepare(23, 663, 762, 12);
     // prepare(24, 8, 380, 1);
-    // prepare(25, 16, 190, 3);
-    // prepare(26, 60, 476, 12);
+    // prepare(25, 16, 190, 4);
+    // prepare(26, 10, 95, 4);
     // prepare(27, 24, 238, 1);
     // prepare(28, 1, 119, 12);
 

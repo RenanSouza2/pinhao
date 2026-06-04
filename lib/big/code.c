@@ -21,8 +21,8 @@
 
 
 #define PIECE_SIZE 20
-// #define CACHE "/mnt/wsl/external_workspace/cache"
-#define CACHE "cache"
+#define CACHE "/mnt/wsl/external_workspace/cache"
+// #define CACHE "cache"
 #define PATH_MAX_LEN 256
 
 
@@ -49,7 +49,6 @@ static void split_sig_join(
 // NOLINTBEGIN(readability-magic-numbers)
 static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 {
-    printf("\nOPOHA");
     if(span == 0)
     {
         int128_t p = ((int128_t)2 * i_0) - 3;
@@ -369,7 +368,7 @@ static void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t dept
         TIME_SETUP
         split_sig(res, i_0, span);
         TIME_END(t1)
-        fprintf(stderr, "\t\t%.1f", (double)t1 / nanosecs_in_sec);
+        fprintf(stderr, "\t\t%.1f", dtime(t1));
         sig_res_save(res, i_0, span);
         return;
     }
@@ -381,7 +380,7 @@ static void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t dept
     TIME_SETUP
     split_span_res_join(size, i_0, span, depth);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", (double)t1 / nanosecs_in_sec);
+    fprintf(stderr, "\t\t%.1f", dtime(t1));
 }
 
 
@@ -476,7 +475,7 @@ static void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t 
     TIME_SETUP
     split_big_res_join(size, i_0, remainder, depth);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", (double)t1 / nanosecs_in_sec);
+    fprintf(stderr, "\t\t%.1f", dtime(t1));
 }
 
 
@@ -546,7 +545,7 @@ flt_num_t pi_big(uint64_t size)
     TIME_SETUP
     flt_pi = flt_num_div(flt_pi, flt_q);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", (double)t1 / nanosecs_in_sec);
+    fprintf(stderr, "\t\t%.1f", dtime(t1));
 
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     pi_save(size, flt_pi);
