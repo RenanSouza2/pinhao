@@ -1,5 +1,5 @@
-#ifndef __LINEAR_H__
-#define __LINEAR_H__
+#ifndef LINEAR_H
+#define LINEAR_H
 
 #include "../../mods/number/header.h"
 #include "../union/struct.h"

@@ -1,4 +1,4 @@
-#ifndef __EXAMPLE_STRUCT_H__
-#define __EXAMPLE_STRUCT_H__
+#ifndef BIG_STRUCT_H
+#define BIG_STRUCT_H
 
 #endif

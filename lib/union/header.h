@@ -1,5 +1,5 @@
-#ifndef __UNION_H__
-#define __UNION_H__
+#ifndef UNION_H
+#define UNION_H
 
 #include "struct.h"
 

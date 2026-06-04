@@ -1,5 +1,5 @@
-#ifndef __UNION_STRUCT_H__
-#define __UNION_STRUCT_H__
+#ifndef UNION_STRUCT_H
+#define UNION_STRUCT_H
 
 #include "../../mods/number/header.h"
 

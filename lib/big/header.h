@@ -1,5 +1,5 @@
-#ifndef __EXAMPLE_H__
-#define __EXAMPLE_H__
+#ifndef BIG_H
+#define BIG_H
 
 #include "../../mods/number/header.h"
 #include "../union/struct.h"
