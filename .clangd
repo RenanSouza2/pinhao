@@ -26,6 +26,7 @@ Diagnostics:
       - "readability-identifier-length"
       - "readability-isolate-declaration"
       - "bugprone-easily-swappable-parameters"
+      - "readability-implicit-bool-conversion"
 
 Index:
   Background: Build

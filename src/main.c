@@ -26,18 +26,18 @@ int main(void)
     printf("\nbegin");
 
     // char disk_path[] = "./cache/tmp";
-    char disk_path[] = "/mnt/wsl/external_workspace/cache/tmp";
-    num_config_t config = {
-        .disk_path = disk_path,
-        .disk_threshold = (uint64_t)1024 * 1024 * 1024
-    };
-    num_config_set(&config);
+    // char disk_path[] = "/mnt/wsl/external_workspace/cache/tmp";
+    // num_config_t config = {
+    //     .disk_path = disk_path,
+    //     .disk_threshold = (uint64_t)1024 * 1024 * 1024
+    // };
+    // num_config_set(&config);
 
     // clu_log_level_set(CLU_LOG_DYNAMIC);
 
     // pi(10'000);
-    // pi(1'000'000);
-    pi(200'000'000);
+    pi(1'000'000);
+    // pi(200'000'000);
 
     // prepare(20, 0, 30, 6);
     // prepare(21, 2, 15, 6);
@@ -59,3 +59,5 @@ int main(void)
     printf("\n");
     return 0;
 }
+
+// 14m33.453s

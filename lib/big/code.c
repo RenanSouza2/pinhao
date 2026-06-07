@@ -21,8 +21,8 @@
 
 
 #define PIECE_SIZE 20
-#define CACHE "/mnt/wsl/external_workspace/cache"
-// #define CACHE "cache"
+// #define CACHE "/mnt/wsl/external_workspace/cache"
+#define CACHE "cache"
 #define PATH_MAX_LEN 256
 
 
