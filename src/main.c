@@ -6,6 +6,7 @@
 // #include "../mods/macros/time.h"
 // #include "../mods/number/lib/num/struct.h"
 
+// #define CACHE "/mnt/wsl/external_workspace/cache"
 #include "../lib/big/header.h"
 // #include "../lib/linear/linear/header.h"
 

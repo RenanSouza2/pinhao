@@ -21,10 +21,11 @@
 
 
 #define PIECE_SIZE 20
-// #define CACHE "/mnt/wsl/external_workspace/cache"
-#define CACHE "cache"
 #define PATH_MAX_LEN 256
 
+#ifndef CACHE
+#define CACHE "cache"
+#endif
 
 
 static void split_sig_join(
