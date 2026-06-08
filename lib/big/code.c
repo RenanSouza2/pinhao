@@ -60,6 +60,7 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
         out[0] = sig_num_wrap_int128(p * v);
         out[1] = sig_num_wrap_int128(q * v);
         out[2] = sig_num_wrap_int128(p * u);
+
         return;
     }
 
