@@ -1,8 +1,7 @@
 #ifndef BIG_H
 #define BIG_H
 
-#include "../../mods/number/header.h"
-#include "../union/struct.h"
+#include "../../mods/araucaria/header.h"
 
 flt_num_t pi_big(uint64_t size);
 void prepare(

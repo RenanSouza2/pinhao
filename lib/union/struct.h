@@ -1,7 +1,7 @@
 #ifndef UNION_STRUCT_H
 #define UNION_STRUCT_H
 
-#include "../../mods/number/header.h"
+#include "../../mods/araucaria/header.h"
 
 #define SIG 0
 #define FLT 1
