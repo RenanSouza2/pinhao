@@ -338,6 +338,7 @@ static void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint
     union_num_t u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
     union_num_t u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
     union_num_t u_r_1 = union_num_mul(u_1, u_2);
+    u_r_1 = union_num_realloc_disk(u_r_1);
 
     u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
     u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
@@ -438,6 +439,7 @@ static void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, 
     union_num_t u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
     union_num_t u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
     union_num_t u_r_1 = union_num_mul(u_1, u_2);
+    u_r_1 = union_num_realloc_disk(u_r_1);
 
     u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
     u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);

@@ -112,6 +112,25 @@ union_num_t union_num_copy(union_num_t u)
     exit(EXIT_FAILURE);
 }
 
+union_num_t union_num_realloc_disk(union_num_t u)
+{
+    switch (u.type)
+    {
+        case SIG:
+        {
+            sig_num_t sig = sig_num_realloc_disk(u.num.sig);
+            return union_num_wrap_sig(sig, u.size);
+        }
+
+        case FLT:
+        {
+            flt_num_t flt = flt_num_realloc_disk(u.num.flt);
+            return union_num_wrap_flt(flt, u.size);
+        }
+    }
+    exit(EXIT_FAILURE);
+}
+
 void union_num_free(union_num_t u)
 {
     switch (u.type)
