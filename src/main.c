@@ -60,7 +60,3 @@ int main(void)
     printf("\n");
     return 0;
 }
-
-// 14m33.453s
-// 11m23.939s
-// 8m38.423s
