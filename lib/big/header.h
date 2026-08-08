@@ -1,15 +1,14 @@
-#ifndef __EXAMPLE_H__
-#define __EXAMPLE_H__
+#ifndef BIG_H
+#define BIG_H
 
-#include "../../mods/number/header.h"
-#include "../union/struct.h"
+#include "../../mods/araucaria/header.h"
 
 flt_num_t pi_big(uint64_t size);
 void prepare(
     uint64_t span,
     uint64_t begin,
     uint64_t end,
-    uint64_t n_threads
+    uint64_t n_process
 );
 
 #endif

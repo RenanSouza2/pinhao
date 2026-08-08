@@ -1,11 +1,37 @@
-name: C CI
-
 on: [push]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - run: git submodule update --init --recursive
+    - name: Install GCC 15
+      run: |
+        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+        sudo apt-get update
+        sudo apt-get install -y gcc-15 g++-15
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
+    - run: make test -s
+
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
     - run: git submodule update --init --recursive
-    - run: make build -s
+    - name: Install GCC 15
+      run: |
+        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+        sudo apt-get update
+        sudo apt-get install -y gcc-15 g++-15
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
+    - run: make build -s 
+
+  build_mac:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v6
+    - run: git submodule update --init --recursive
+    - run: make build -s 

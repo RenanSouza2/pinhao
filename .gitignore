@@ -57,3 +57,5 @@ dkms.conf
 thread_log/*
 cache*/*
 runner
+
+**/out*.txt

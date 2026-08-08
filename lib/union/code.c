@@ -1,11 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "debug.h"
-#include "../../mods/clu/header.h"
-#include "../../mods/macros/assert.h"
+#include "debug.h" // IWYU pragma: keep
+#include "../../mods/clu/header.h" // IWYU pragma: keep
 #include "../../mods/macros/uint.h"
-#include "../../mods/number/lib/num/struct.h"
+#include "../../mods/araucaria/lib/num/struct.h"
 
 
 
@@ -23,14 +22,12 @@ void union_num_display(union_num_t u)
             printf("SIG | ");sig_num_display_dec(u.num.sig);
             return;
         }
-        break;
 
         case FLT:
         {
             printf("FLT | ");flt_num_display_dec(u.num.flt);
             return;
         }
-        break;
     }
     exit(EXIT_FAILURE);
 }
@@ -46,7 +43,6 @@ void union_num_display_full(char tag[], union_num_t u)
             num_display_opts(u.num.sig.num, NULL, true, true);
             return;
         }
-        break;
 
         case FLT:
         {
@@ -54,7 +50,6 @@ void union_num_display_full(char tag[], union_num_t u)
             num_display_opts(u.num.flt.sig.num, NULL, true, true);
             return;
         }
-        break;
     }
     exit(EXIT_FAILURE);
 }
@@ -100,7 +95,6 @@ flt_num_t union_num_unwrap_flt(union_num_t u)
 
 union_num_t union_num_copy(union_num_t u)
 {
-    
     switch (u.type)
     {
         case SIG:
@@ -108,21 +102,37 @@ union_num_t union_num_copy(union_num_t u)
             sig_num_t sig = sig_num_copy(u.num.sig);
             return union_num_wrap_sig(sig, u.size);
         }
-        break;
 
         case FLT:
         {
             flt_num_t flt = flt_num_copy(u.num.flt);
             return union_num_wrap_flt(flt, u.size);
         }
-        break;
+    }
+    exit(EXIT_FAILURE);
+}
+
+union_num_t union_num_realloc_disk(union_num_t u)
+{
+    switch (u.type)
+    {
+        case SIG:
+        {
+            sig_num_t sig = sig_num_realloc_disk(u.num.sig);
+            return union_num_wrap_sig(sig, u.size);
+        }
+
+        case FLT:
+        {
+            flt_num_t flt = flt_num_realloc_disk(u.num.flt);
+            return union_num_wrap_flt(flt, u.size);
+        }
     }
     exit(EXIT_FAILURE);
 }
 
 void union_num_free(union_num_t u)
 {
-    
     switch (u.type)
     {
         case SIG:
@@ -130,21 +140,19 @@ void union_num_free(union_num_t u)
             sig_num_free(u.num.sig);
             return;
         }
-        break;
 
         case FLT:
         {
             flt_num_free(u.num.flt);
             return;
         }
-        break;
     }
     exit(EXIT_FAILURE);
 }
 
 
 
-void file_write_union_num_raw(file_p fp, union_num_t u)
+static void file_write_union_num_raw(file_p fp, union_num_t u)
 {
     file_write_uint64(fp, u.type);
     file_write_uint64(fp, u.size);
@@ -161,7 +169,7 @@ void file_write_union_num_raw(file_p fp, union_num_t u)
             file_write_flt_num_raw(fp, u.num.flt);
         }
         break;
-    
+
         default: exit(EXIT_FAILURE);
     }
 }
@@ -173,7 +181,7 @@ void file_write_union_num(file_p fp, union_num_t u)
     file_write_end(fp);
 }
 
-union_num_t file_read_union_num_raw(FILE *fp)
+static union_num_t file_read_union_num_raw(FILE *fp)
 {
     uint64_t type = file_read_uint64(fp);
     uint64_t size = file_read_uint64(fp);
@@ -214,14 +222,12 @@ union_num_t union_num_add(union_num_t u_1, union_num_t u_2)
                     sig_num_t sig = sig_num_add(u_1.num.sig, u_2.num.sig);
                     return union_num_wrap_sig(sig, u_1.size);
                 }
-                break;
 
                 case FLT:
                 {
                     flt_num_t flt = flt_num_add(flt_num_wrap_sig(u_1.num.sig, u_1.size), u_2.num.flt);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
-                break;
             }
         }
         break;
@@ -235,14 +241,12 @@ union_num_t union_num_add(union_num_t u_1, union_num_t u_2)
                     flt_num_t flt = flt_num_add(u_1.num.flt, flt_num_wrap_sig(u_2.num.sig, u_1.size));
                     return union_num_wrap_flt(flt, u_1.size);
                 }
-                break;
 
                 case FLT:
                 {
                     flt_num_t flt = flt_num_add(u_1.num.flt, u_2.num.flt);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
-                break;
             }
         }
         break;
@@ -263,14 +267,12 @@ union_num_t union_num_mul(union_num_t u_1, union_num_t u_2)
                     sig_num_t sig = sig_num_mul(u_1.num.sig, u_2.num.sig);
                     return union_num_wrap_sig(sig, u_1.size);
                 }
-                break;
 
                 case FLT:
                 {
                     flt_num_t flt = flt_num_mul_sig(u_2.num.flt, u_1.num.sig);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
-                break;
             }
         }
         break;
@@ -284,14 +286,12 @@ union_num_t union_num_mul(union_num_t u_1, union_num_t u_2)
                     flt_num_t flt = flt_num_mul_sig(u_1.num.flt, u_2.num.sig);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
-                break;
 
                 case FLT:
                 {
                     flt_num_t flt = flt_num_mul(u_1.num.flt, u_2.num.flt);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
-                break;
             }
         }
         break;

@@ -5,7 +5,7 @@
 #include "../../mods/clu/header.h"
 #include "../../mods/macros/assert.h"
 #include "../../mods/macros/uint.h"
-#include "../../mods/number/header.h"
+#include "../../mods/araucaria/header.h"
 
 #include"../union/header.h"
 #include"../split/header.h"

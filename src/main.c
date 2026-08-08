@@ -1,32 +1,19 @@
 #include <stdio.h>
 
-#include "../mods/clu/header.h"
-#include "../mods/macros/assert.h"
-#include "../mods/macros/fork.h"
-#include "../mods/macros/time.h"
-#include "../mods/number/lib/num/struct.h"
+#include "../mods/clu/header.h" // IWYU pragma: keep
+// #include "../mods/macros/assert.h"
+// #include "../mods/macros/fork.h"
+// #include "../mods/macros/time.h"
+// #include "../mods/araucaria/lib/num/struct.h"
 
+// #define CACHE "/mnt/wsl/external_workspace/cache"
 #include "../lib/big/header.h"
-#include "../lib/split/header.h"
-#include "../lib/linear/header.h"
-#include "../lib/union/header.h"
+// #include "../lib/linear/linear/header.h"
 
 
 
-void time_1(void)
-{
-    for(uint64_t i=1000; i <= 65000; i+=1000)
-    {
-        printf("\n" U64P() "", i);
-        TIME_SETUP
-        fxd_num_t flt = pi_v1(i);
-        TIME_END(t3)
-        printf("\t%.2f", (double)t3 / 1e9);
-        fxd_num_free(flt);
-    }
-}
-
-void pi(uint64_t size)
+[[maybe_unused]]
+static void pi(uint64_t size)
 {
     flt_num_t flt_pi = pi_big(size);
     printf("\n\n");flt_num_display_dec(flt_pi);
@@ -36,26 +23,39 @@ void pi(uint64_t size)
 // int main(int argc, char** argv)
 int main(void)
 {
-    setbuf(stdout, NULL);
-    
-    // use();
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    printf("\nbegin");
 
-    uint64_t size = 1000 * 1000 * 1000;
-    pi(size);
+    // char disk_path[] = "./cache/tmp";
+    // char disk_path[] = "/mnt/wsl/external_workspace/cache/tmp";
+    // num_config_t config = {
+    //     .disk_path = disk_path,
+    //     .disk_threshold = (uint64_t)1024 * 1024 * 1024
+    // };
+    // num_config_set(&config);
 
-    // prepare(16, 48000, 48829, 6);
-    // prepare(17, 24408, 24414, 6);
-    // prepare(18, 12204, 12207, 6);
-    // prepare(19, 6102, 6103, 6);
-    // prepare(20, 3000, 3051, 6);
-    // prepare(21, 1520, 1525, 6);
-    // prepare(22, 760, 762, 6);
-    // prepare(23, 380, 381, 6);
-    // prepare(24, 230, 1907, 12);
-    // prepare(25, 94, 95, 6);
-    // prepare(26, 60, 476, 12);
+    // clu_log_level_set(CLU_LOG_DYNAMIC);
+
+    // pi(10'000);
+    pi(1'000'000);
+    // pi(200'000'000);
+
+    // prepare(20, 0, 30, 6);
+    // prepare(21, 2, 15, 6);
+    // prepare(22, 0, 76, 6);
+    // prepare(23, 663, 762, 12);
+    // prepare(24, 8, 380, 1);
+    // prepare(25, 16, 190, 4);
+    // prepare(26, 10, 95, 4);
     // prepare(27, 24, 238, 1);
     // prepare(28, 1, 119, 12);
+
+    // printf("\n\nmax_occupancy: : " U64P() "", clu_get_max_occupancy());
+    // assert(clu_mem_is_empty());
+
+    // flt_num_t flt_pi = pi_v3(1024 * 1024);
+    // flt_num_display_dec(flt_pi);
+    // flt_num_free(flt_pi);
 
     printf("\n");
     return 0;

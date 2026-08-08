@@ -1,0 +1,5 @@
+Diagnostics:
+  ClangTidy:
+    Remove:
+      - "readability-magic-numbers"
+      - "readability-named-parameter"

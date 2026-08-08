@@ -1,5 +1,5 @@
-#ifndef __SPLIT_H__
-#define __SPLIT_H__
+#ifndef SPLIT_H
+#define SPLIT_H
 
 #include "../union/struct.h"
 
