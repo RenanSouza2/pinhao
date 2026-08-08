@@ -107,7 +107,7 @@ void split_piece(uint64_t i_0, uint64_t span)
     TIME_SETUP
     split_sig(res, i_0, span);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", dtime(t1));
+    tprintf("piece | " U64P() " " U64P() " \t\t%.1f", i_0, span, dtime(t1));
     sig_res_save(res, i_0, span);
 }
 
@@ -565,7 +565,7 @@ flt_num_t pi_finish(uint64_t size, uint64_t piece_size)
     TIME_SETUP
     flt_pi = flt_num_div(flt_pi, flt_q);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", dtime(t1));
+    tprintf("divided \t\t%.1f", dtime(t1));
 
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     pi_save(size, flt_pi);

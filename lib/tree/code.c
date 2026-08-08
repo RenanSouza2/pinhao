@@ -187,18 +187,17 @@ static bool node_is_ready(node_p n)
     return true;
 }
 
-static bool get_next_node(node_p *out_n, node_p n)
+static node_p get_next_node(node_p n)
 {
     if(n->processing)
     {
-        return false;
+        return NULL;
     }
 
     if(node_is_ready(n))
     {
         n->processing = true;
-        *out_n = n;
-        return true;
+        return n;
     }
 
     for(uint64_t i=0; i<2; i++)
@@ -213,13 +212,14 @@ static bool get_next_node(node_p *out_n, node_p n)
             n->children[i].n = node_expand(n, i);
         }
 
-        if(get_next_node(out_n, n->children[i].n))
+        node_p n_next = get_next_node(n->children[i].n);
+        if(n_next)
         {
-            return true;
+            return n_next;
         }
     }
 
-    return false;
+    return NULL;
 }
 
 static void node_process(node_p n, uint64_t index)
@@ -365,8 +365,8 @@ static void scheduler(uint64_t size, uint64_t n_process)
     {
         for(; i<n_process; i++)
         {
-            node_p n;
-            if(!get_next_node(&n, n_root))
+            node_p n = get_next_node(n_root);
+            if(n == NULL)
             {
                 break;
             }
