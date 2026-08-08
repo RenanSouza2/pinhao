@@ -224,8 +224,6 @@ static bool get_next_node(node_p *out_n, node_p n)
 
 static void node_process(node_p n)
 {
-    int pid = (int)getpid();
-
     switch(n->type)
     {
         case NODE_BIG:
@@ -235,14 +233,15 @@ static void node_process(node_p n)
             uint64_t remainder = n->a.b.remainder;
             uint64_t depth = n->a.b.depth;
 
-            tprintf("[%d] begin | " U64P() " " U64P() " " U64P() "", pid, i_0, remainder, depth);
+            tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth);
 
             if(split_big_res_is_stored(size, i_0, remainder, depth))
             {
+                tprintf("already stored | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth);
                 return;
             }
 
-            tprintf("[%d] joining | " U64P() " " U64P() " " U64P() "", pid, i_0, remainder, depth);
+            tprintf("joining | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth);
             TIME_SETUP
             split_big_res_join(size, i_0, remainder, depth);
             TIME_END(t1)
@@ -257,10 +256,11 @@ static void node_process(node_p n)
             uint64_t span = n->a.s.span;
             uint64_t depth = n->a.s.depth;
 
-            tprintf("[%d] begin | " U64P() " " U64P() " " U64P() "", pid, i_0, span, depth);
+            tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
 
             if(split_span_res_is_stored(size, i_0, span, depth))
             {
+                tprintf("already stored | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
                 return;
             }
 
@@ -270,7 +270,7 @@ static void node_process(node_p n)
                 return;
             }
 
-            tprintf("[%d] joining | " U64P() " " U64P() " " U64P() "", pid, i_0, span, depth);
+            tprintf("joining | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
             TIME_SETUP
             split_span_res_join(size, i_0, span, depth);
             TIME_END(t1)
@@ -296,7 +296,7 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
         exit(EXIT_SUCCESS);
     }
 
-    tprintf("task start | pid %d", (int)pid);
+    tprintf("task start");
 
     tasks[index] = (tree_task_t){
         .pid = pid,
@@ -324,7 +324,7 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
     node_p n = tasks[index].n;
     uint64_t time_start = tasks[index].time_start;
 
-    tprintf("task end | pid %d", (int)pid);
+    tprintf("task end");
     fprintf(stderr, "\t\t%.1f", dtime(get_time() - time_start));
 
     if(index < max - 1)

@@ -16,7 +16,7 @@
 [[maybe_unused]]
 static void pi(uint64_t size)
 {
-    flt_num_t flt_pi = pi_tree(size, 1);
+    flt_num_t flt_pi = pi_tree(size, 2);
     printf("\n\n");flt_num_display_dec(flt_pi);
     flt_num_free(flt_pi);
 }
