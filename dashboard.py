@@ -19,7 +19,9 @@ import argparse
 import collections
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import time
 
@@ -33,7 +35,7 @@ DEFAULT_MAIN_C = os.path.join(REPO_ROOT, "src", "main.c")
 # node_process/task_start/task_end/split_piece all log "[idx][pid]" - idx is
 # the scheduler's reused array slot (see lib/tree/code.c), pid is this task's
 # stable identity for its whole lifetime. We key everything off pid.
-_TASK_ID = r"\[\s*\d+\]\[\s*(?P<pid>\d+)\]"
+_TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]"
 
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
@@ -96,6 +98,121 @@ def leaves_covered(n2):
     return 1 << (n2 - TREE_PIECE_SIZE)
 
 
+# The log only ever tells us which nodes were *touched*, never the tree's
+# shape - but the shape is fully deterministic from index_max alone (same
+# recursion as node_big_create/node_span_create/node_expand in
+# lib/tree/code.c), so we replicate it here once and overlay live status
+# from the log onto it by key, rather than trying to infer structure from
+# the log's begin/joining/joined lines.
+TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
+
+
+class TreeNode:
+    __slots__ = (
+        "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
+        "own_done", "in_progress", "task_idx", "active_count", "parent", "children",
+    )
+
+    def __init__(self, i0, depth, kind, n2, parent):
+        self.i0 = i0
+        self.depth = depth
+        self.kind = kind  # "BIG" or "SPAN"
+        self.n2 = n2  # remainder (BIG) or span (SPAN)
+        self.leaves_total = (n2 // PIECES_PER_LEAF) if kind == "BIG" else (1 << (n2 - TREE_PIECE_SIZE))
+        self.leaves_done = 0
+        # leaves_done reaching leaves_total only means every *leaf*
+        # underneath is computed - the "joining" steps that actually
+        # combine them into THIS node's own result run afterward, and can
+        # take a while. own_done is set only by this exact node's own
+        # completion event (piece/already-stored/joined) and is the real
+        # "collapse this subtree" signal for the tree view.
+        self.own_done = False
+        self.in_progress = False
+        # the scheduler's array slot ([idx] in the log) currently working
+        # this node - only meaningful while in_progress; set at "begin",
+        # cleared once this node's own completion event fires.
+        self.task_idx = None
+        # count of currently-running tasks anywhere in this node's subtree
+        # (itself included). get_next_node descends silently to find a
+        # ready node before logging anything, so an ancestor sits at
+        # "pending" - no begin/joined line of its own - for the node's
+        # entire lifetime; without this, the tree view has no way to tell
+        # "pending, nothing happening below" apart from "pending, but N
+        # tasks are actively working several levels down" and collapses
+        # both the same way.
+        self.active_count = 0
+        self.parent = parent
+        self.children = []
+
+
+def _build_span(i0, span, depth, parent, by_key):
+    node = TreeNode(i0, depth, "SPAN", span, parent)
+    by_key[(i0, depth)] = node
+    if span > TREE_PIECE_SIZE:
+        half = span - 1
+        node.children = [
+            _build_span(i0, half, depth + 1, node, by_key),
+            _build_span(i0 + (1 << half), half, depth + 1, node, by_key),
+        ]
+    return node
+
+
+def _build_big(i0, remainder, depth, parent, by_key):
+    if bin(remainder).count("1") == 1:
+        return _build_span(i0, remainder.bit_length() - 1, depth, parent, by_key)
+
+    node = TreeNode(i0, depth, "BIG", remainder, parent)
+    by_key[(i0, depth)] = node
+    span = remainder.bit_length() - 1
+    node.children = [
+        _build_span(i0, span, depth + 1, node, by_key),
+        _build_big(i0 + (1 << span), remainder - (1 << span), depth + 1, node, by_key),
+    ]
+    return node
+
+
+def build_tree(index_max):
+    """Returns (root, by_key) where by_key maps (i0, depth) -> TreeNode, or
+    (None, None) if the tree is too large to materialize/render sanely."""
+    total_pieces = index_max // PIECES_PER_LEAF
+    if 2 * total_pieces - 1 > TREE_NODE_CAP:
+        return None, None
+    by_key = {}
+    root = _build_big(1, index_max, 0, None, by_key)
+    return root, by_key
+
+
+def mark_leaves_done(node, leaves):
+    """Credit a completed leaf count up through every ancestor, purely for
+    the "X/Y leaves done" partial-progress number - this alone does NOT
+    mean an ancestor's own combine step has run, so it must never by
+    itself cause a node to collapse as done in the tree view."""
+    n = node
+    while n is not None:
+        n.leaves_done = min(n.leaves_done + leaves, n.leaves_total)
+        n = n.parent
+
+
+def mark_active(node, delta):
+    """Propagate a task starting (+1) or finishing (-1) up through every
+    ancestor's active_count, so an ancestor that hasn't logged anything of
+    its own yet still knows work is happening in its subtree."""
+    n = node
+    while n is not None:
+        n.active_count += delta
+        n = n.parent
+
+
+def mark_node_done(node):
+    """This exact node's own result just completed (piece / already stored
+    / joined) - only this node collapses; ancestors still need their own
+    completion event before they do too."""
+    node.own_done = True
+    node.in_progress = False
+    node.task_idx = None
+    mark_active(node, -1)
+
+
 def pid_alive(pid):
     """Best-effort OS-level liveness check, since the log alone can't tell
     us a task's process was killed mid-flight - it would just go silent."""
@@ -107,6 +224,23 @@ def pid_alive(pid):
         # e.g. PermissionError: process exists, we just can't signal it
         return True
     return True
+
+
+def pi_process_running():
+    """True if a pi_tree binary (src/main.o or src/debug.o) is currently
+    running. thread_log/run.log from a finished run looks byte-for-byte
+    identical whether it's from a live run that just wrapped up or a stale
+    leftover from an earlier one with nothing running right now - only the
+    OS can tell those apart."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"src/(main|debug)\.o"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except OSError:
+        return False  # no pgrep available - fail closed rather than false-claim "running"
 
 
 class State:
@@ -131,6 +265,11 @@ class State:
         self.crashed = collections.deque(maxlen=10)  # (pid, depth, i0, ran_for)
         self.crashed_total = 0
         self.suspected_dead = {}  # pid -> time first seen not-alive
+        self.tree_root = None
+        self.tree_by_key = None  # (i0, depth) -> TreeNode
+        self.tree_skipped_reason = None
+        self.process_running = False
+        self.ever_saw_process = False
         self.done = False
 
     def touch(self):
@@ -146,16 +285,29 @@ class State:
 def handle_node_process(state, content):
     m = RE_NODE_PROCESS.match(content)
     if not m:
+        # split_piece's "piece" line is logged by tprintf from inside
+        # node_process (case NODE_SPAN, right after calling split_piece()),
+        # so its __func__ - and thus its log func field - is "node_process",
+        # not "split_piece"; RE_NODE_PROCESS doesn't match it because it has
+        # no depth field. Route it to handle_piece instead of dropping it.
+        handle_piece(state, content)
         return
     pid = int(m.group("pid"))
+    idx = int(m.group("idx"))
     action = m.group("action").strip()
     i0 = int(m.group("i0"))
     depth = int(m.group("depth"))
+
+    tree_node = state.tree_by_key.get((i0, depth)) if state.tree_by_key else None
 
     if action == "begin":
         entry = state.active.setdefault(pid, {"start": time.time()})
         entry["depth"] = depth
         entry["i0"] = i0
+        if tree_node is not None:
+            tree_node.in_progress = True
+            tree_node.task_idx = idx
+            mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
         state.suspected_dead.pop(pid, None)
@@ -169,8 +321,13 @@ def handle_node_process(state, content):
         joins_covered = covered - 1  # a subtree of L leaves has L-1 joins
         state.joins_done += joins_covered
         state.joins_from_cache += joins_covered
+        if tree_node is not None:
+            mark_leaves_done(tree_node, covered)
+            mark_node_done(tree_node)  # cached result stands in for this node's own join
     elif action == "joined":
         state.joins_done += 1
+        if tree_node is not None:
+            mark_node_done(tree_node)
 
 
 def handle_piece(state, content):
@@ -180,6 +337,18 @@ def handle_piece(state, content):
     dur = float(m.group("dur"))
     state.pieces_done += 1
     state.piece_events.append((time.time(), dur))
+
+    if state.tree_by_key:
+        # split_piece's own log line has no depth field (only i0/span) -
+        # the "begin" line the same pid logged moments earlier does, so
+        # pull it from there.
+        i0 = int(m.group("i0"))
+        entry = state.active.get(int(m.group("pid")))
+        depth = entry["depth"] if entry else None
+        tree_node = state.tree_by_key.get((i0, depth)) if depth is not None else None
+        if tree_node is not None:
+            mark_leaves_done(tree_node, 1)
+            mark_node_done(tree_node)  # a leaf has no separate join step - computing it is completing it
 
 
 def handle_task_start(state, content):
@@ -228,7 +397,9 @@ def handle_phase(state, content):
             state.pieces_done = state.total_pieces
             state.joins_from_cache += state.total_joins - state.joins_done
             state.joins_done = state.total_joins
-            state.pieces_done = state.total_pieces
+        if state.tree_root is not None:
+            mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
+            mark_node_done(state.tree_root)
 
 
 DISPATCH = {
@@ -303,7 +474,57 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+def render_tree(node, lines, prefix="", is_last=True, is_root=True):
+    if node.own_done:
+        mark, state, status = "✓", "done", "process done"
+    elif node.in_progress:
+        mark, state, status = "▸", "in_progress", f"task {node.task_idx}"
+    elif node.leaves_done > 0:
+        mark, state, status = "·", "in_progress", "partial"
+    elif node.active_count > 0:
+        # this node itself hasn't been scheduled yet (no begin/joined line
+        # of its own), but a descendant has - don't collapse it away.
+        mark, state, status = "·", "in_progress", "active below"
+    else:
+        mark, state, status = "·", "pending", "waiting process"
+
+    connector = "" if is_root else ("└─ " if is_last else "├─ ")
+    label = f"depth={node.depth} i0={node.i0:,} [{status}]"
+    lines.append(f"{prefix}{connector}{mark} {label}")
+
+    if state in ("done", "pending"):
+        return  # collapse: a done subtree needs no detail, a pending one has none yet
+
+    child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
+    for i, child in enumerate(node.children):
+        render_tree(child, lines, child_prefix, i == len(node.children) - 1, is_root=False)
+
+
+def render_status_screen(state):
+    """A stale thread_log/run.log from a previous run reads identically to
+    a live one that just finished, so `state.done` alone can't be trusted
+    here - trust the OS (state.ever_saw_process/process_running) instead:
+    with no pi_tree process ever actually seen running this session, show
+    what's really going on rather than a full dashboard built from
+    leftover/misleading numbers."""
+    lines = []
+    lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
+    lines.append("")
+    if not state.ever_saw_process:
+        lines.append("  waiting for process...")
+        lines.append("  (no pi_tree process detected - start it with ./run.sh or ./run_debug.sh)")
+    elif state.done:
+        lines.append("  process finished.")
+    else:
+        lines.append("  WARNING: process is no longer running, but never finished")
+        lines.append("  (it may have crashed - check thread_log/run.log for the last lines)")
+    return "\n".join(lines)
+
+
 def render(state):
+    if not state.ever_saw_process or (not state.process_running and not state.done):
+        return render_status_screen(state)
+
     lines = []
     lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
     lines.append("")
@@ -363,6 +584,13 @@ def render(state):
             i0 = f"{i0:,}" if i0 is not None else "-"
             lines.append(f"  {pid:<7} depth={depth!s:<3} i0={i0:<14} {fmt_duration(ran_for)}")
 
+    lines.append("")
+    if state.tree_root is not None:
+        lines.append("tree (finished/pending subtrees collapsed):")
+        render_tree(state.tree_root, lines)
+    elif state.tree_skipped_reason:
+        lines.append(f"tree: {state.tree_skipped_reason}")
+
     return "\n".join(lines)
 
 
@@ -399,11 +627,16 @@ def main():
     total_pieces = get_index_max(size) // PIECES_PER_LEAF if size is not None else None
     state = State(total_pieces=total_pieces, n_process=n_process)
 
+    if size is not None:
+        state.tree_root, state.tree_by_key = build_tree(get_index_max(size))
+        if state.tree_root is None:
+            state.tree_skipped_reason = f"tree too large to display ({2 * total_pieces - 1} nodes > {TREE_NODE_CAP})"
+
     # draw in the terminal's alternate screen buffer (like htop/less) so
     # repeated redraws overwrite in place instead of scrolling into history -
     # a plain "\x1b[2J\x1b[H" only clears the visible screen, not scrollback,
     # so fast redraws pile up into a wall of stacked frames there.
-    sys.stdout.write("\x1b[?1049h\x1b[?25l")
+    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[48;2;10;20;60m")
     sys.stdout.flush()
     try:
         last_render = 0.0
@@ -413,18 +646,28 @@ def main():
 
             now = time.time()
             if now - last_render >= 1.0:
+                state.process_running = pi_process_running()
+                if state.process_running:
+                    state.ever_saw_process = True
                 sweep_dead(state)
+                cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+                # pad every row out to the full pane size ourselves rather
+                # than relying on \x1b[2J to fill erased cells with the
+                # active background color - not all terminals honor that
+                # ("back color erase"), so unpainted cells would otherwise
+                # show through as the terminal's default background.
+                content = [line[:cols].ljust(cols) for line in render(state).split("\n")][:rows]
+                content += [" " * cols] * (rows - len(content))
                 sys.stdout.write("\x1b[H\x1b[2J")
-                sys.stdout.write(render(state))
-                sys.stdout.write("\n")
+                sys.stdout.write("\n".join(content))
                 sys.stdout.flush()
                 last_render = now
 
-            if state.done:
+            if state.done and state.ever_saw_process:
                 time.sleep(1.0)
                 break
     finally:
-        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
 
 

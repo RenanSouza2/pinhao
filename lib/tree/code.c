@@ -242,19 +242,19 @@ static void node_process(node_p n, uint64_t index)
             uint64_t remainder = n->a.b.remainder;
             uint64_t depth = n->a.b.depth;
 
-            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, remainder, depth);
+            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, remainder, depth);
 
             if(split_big_res_is_stored(size, i_0, remainder, depth))
             {
-                tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, remainder, depth);
+                tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, remainder, depth);
                 return;
             }
 
-            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, remainder, depth);
+            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, remainder, depth);
             TIME_SETUP
             split_big_res_join(size, i_0, remainder, depth);
             TIME_END(t1)
-            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, remainder, depth, dtime(t1));
+            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, remainder, depth, dtime(t1));
         }
         break;
 
@@ -265,11 +265,11 @@ static void node_process(node_p n, uint64_t index)
             uint64_t span = n->a.s.span;
             uint64_t depth = n->a.s.depth;
 
-            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, span, depth);
+            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, span, depth);
 
             if(split_span_res_is_stored(size, i_0, span, depth))
             {
-                tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, span, depth);
+                tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, span, depth);
                 return;
             }
 
@@ -278,15 +278,15 @@ static void node_process(node_p n, uint64_t index)
                 TIME_SETUP
                 split_piece(i_0, span);
                 TIME_END(t1)
-                tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, "piece", i_0, span, "", dtime(t1));
+                tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, "piece", i_0, span, "", dtime(t1));
                 return;
             }
 
-            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, span, depth);
+            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, span, depth);
             TIME_SETUP
             split_span_res_join(size, i_0, span, depth);
             TIME_END(t1)
-            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
+            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
         }
         break;
     }
@@ -308,7 +308,7 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
         exit(EXIT_SUCCESS);
     }
 
-    tprintf("[" U64P(2) "][%7d] %-16s|", index, (int)pid, "task start");
+    tprintf("[" U64P(2) "][%7d] %-20s|", index, (int)pid, "task start");
 
     tasks[index] = (tree_task_t){
         .pid = pid,
@@ -336,7 +336,7 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
     node_p n = tasks[index].n;
     uint64_t time_start = tasks[index].time_start;
 
-    tprintf("[" U64P(2) "][%7d] %-16s| %25s | %7.1f", index, (int)pid, "task end", "", dtime(get_time() - time_start));
+    tprintf("[" U64P(2) "][%7d] %-20s| %25s | %7.1f", index, (int)pid, "task end", "", dtime(get_time() - time_start));
 
     if(index < max - 1)
     {
@@ -386,7 +386,7 @@ static void scheduler(uint64_t size, uint64_t n_process)
             task_start(tasks, i, n);
         }
 
-        tprintf("              %-16s| " U64P(2) "", "active processes", i);
+        tprintf("              %-20s| " U64P(2) "", "active processes", i);
         pid_t pid = waitpid_safe(0, NULL);
 
         if(task_end(tasks, pid, i))
@@ -403,12 +403,12 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 {
     if(pi_is_stored(size))
     {
-        tprintf("              %-16s|", "pi already stored");
+        tprintf("              %-20s|", "pi already stored");
         return pi_load(size);
     }
 
     scheduler(size, n_process);
-    tprintf("              %-16s|", "binary split solved");
+    tprintf("              %-20s|", "binary split solved");
 
     return pi_finish(size, TREE_PIECE_SIZE);
 }
