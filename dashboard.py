@@ -19,6 +19,7 @@ import argparse
 import collections
 import os
 import re
+import signal
 import sys
 import time
 
@@ -29,16 +30,21 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
 DEFAULT_MAIN_C = os.path.join(REPO_ROOT, "src", "main.c")
 
+# node_process/task_start/task_end/split_piece all log "[idx][pid]" - idx is
+# the scheduler's reused array slot (see lib/tree/code.c), pid is this task's
+# stable identity for its whole lifetime. We key everything off pid.
+_TASK_ID = r"\[\s*\d+\]\[\s*(?P<pid>\d+)\]"
+
 RE_NODE_PROCESS = re.compile(
-    r"\[\s*(?P<idx>\d+)\]\s*(?P<action>.{1,16}?)\s*\|\s*"
+    _TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
     r"(?:\s*\|\s*(?P<dur>[\d.]+))?"
 )
 RE_PIECE = re.compile(
-    r"(?P<action>.{1,16}?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
+    _TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
 )
-RE_TASK_START = re.compile(r"\[\s*(?P<idx>\d+)\]\s*(?P<action>.{1,16}?)\s*\|")
-RE_TASK_END = re.compile(r"\[\s*(?P<idx>\d+)\]\s*(?P<action>.{1,16}?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
+RE_TASK_START = re.compile(_TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|")
+RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
 RE_SCHEDULER = re.compile(r"(?P<action>.{1,16}?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.{1,16}?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
@@ -79,7 +85,7 @@ class State:
         self.n_process = n_process
         self.pieces_done = 0
         self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
-        self.workers = {}  # idx -> dict(desc, start)
+        self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
         self.recent_pieces = collections.deque(maxlen=10)
@@ -95,18 +101,17 @@ def handle_node_process(state, content):
     m = RE_NODE_PROCESS.match(content)
     if not m:
         return
-    idx = int(m.group("idx"))
+    pid = int(m.group("pid"))
     action = m.group("action").strip()
     i0 = int(m.group("i0"))
     depth = int(m.group("depth"))
 
     if action == "begin":
-        state.workers[idx] = {
-            "desc": f"i0={i0} depth={depth}",
-            "start": state.workers.get(idx, {}).get("start", time.time()),
-        }
+        entry = state.active.setdefault(pid, {"start": time.time()})
+        entry["depth"] = depth
+        entry["i0"] = i0
     elif action == "already stored":
-        state.workers.pop(idx, None)
+        state.active.pop(pid, None)
 
 
 def handle_piece(state, content):
@@ -124,19 +129,18 @@ def handle_task_start(state, content):
     m = RE_TASK_START.match(content)
     if not m:
         return
-    idx = int(m.group("idx"))
-    state.workers.setdefault(idx, {"desc": "starting...", "start": time.time()})
-    state.active_max = max(state.active_max, idx + 1)
+    pid = int(m.group("pid"))
+    state.active.setdefault(pid, {"start": time.time(), "depth": None, "i0": None})
 
 
 def handle_task_end(state, content):
     m = RE_TASK_END.match(content)
     if not m:
         return
-    idx = int(m.group("idx"))
+    pid = int(m.group("pid"))
     dur = float(m.group("dur"))
-    state.workers.pop(idx, None)
-    state.recent_task_ends.append((idx, dur))
+    state.active.pop(pid, None)
+    state.recent_task_ends.append((pid, dur))
 
 
 def handle_scheduler(state, content):
@@ -238,14 +242,15 @@ def render(state):
     lines.append(f"rate:    {rate:5.2f} pieces/s        eta: {fmt_duration(eta)}")
     lines.append("")
 
-    n_workers = state.n_process or max(state.active_max, len(state.workers))
-    lines.append(f"active workers ({len(state.workers)}/{n_workers or '?'}):")
-    lines.append(f"  {'#':>3} {'elapsed':>8}  detail")
+    n_workers = state.n_process or state.active_max
+    lines.append(f"active workers ({len(state.active)}/{n_workers or '?'}):")
+    lines.append(f"  {'pid':>7}  {'elapsed':>8}  {'depth':>5}  {'i0':>14}")
     now = time.time()
-    for idx in sorted(state.workers):
-        w = state.workers[idx]
-        lines.append(f"  {idx:>3} {fmt_duration(now - w['start']):>8}  {w['desc']}")
-    if not state.workers:
+    for pid, w in sorted(state.active.items()):  # ordered by task id (pid)
+        depth = w["depth"] if w["depth"] is not None else "-"
+        i0 = f"{w['i0']:,}" if w["i0"] is not None else "-"
+        lines.append(f"  {pid:>7}  {fmt_duration(now - w['start']):>8}  {depth:>5}  {i0:>14}")
+    if not state.active:
         lines.append("  (none)")
     lines.append("")
 
@@ -257,10 +262,10 @@ def render(state):
         lines.append("  (none yet)")
     lines.append("")
 
-    lines.append("recent task ends (worker, seconds):")
+    lines.append("recent task ends (pid, seconds):")
     if state.recent_task_ends:
-        for idx, dur in list(state.recent_task_ends)[-10:]:
-            lines.append(f"  #{idx:<3} {dur:7.1f}s")
+        for pid, dur in list(state.recent_task_ends)[-10:]:
+            lines.append(f"  {pid:<7} {dur:7.1f}s")
     else:
         lines.append("  (none yet)")
 
@@ -300,24 +305,43 @@ def main():
     total_pieces = get_index_max(size) // PIECES_PER_LEAF if size is not None else None
     state = State(total_pieces=total_pieces, n_process=n_process)
 
-    last_render = 0.0
-    for line in tail(args.log_path):
-        if line is not None:
-            feed_line(state, line)
+    # draw in the terminal's alternate screen buffer (like htop/less) so
+    # repeated redraws overwrite in place instead of scrolling into history -
+    # a plain "\x1b[2J\x1b[H" only clears the visible screen, not scrollback,
+    # so fast redraws pile up into a wall of stacked frames there.
+    sys.stdout.write("\x1b[?1049h\x1b[?25l")
+    sys.stdout.flush()
+    try:
+        last_render = 0.0
+        for line in tail(args.log_path):
+            if line is not None:
+                feed_line(state, line)
 
-        now = time.time()
-        if now - last_render >= 0.25:
-            sys.stdout.write("\x1b[2J\x1b[H")
-            sys.stdout.write(render(state))
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            last_render = now
+            now = time.time()
+            if now - last_render >= 1.0:
+                sys.stdout.write("\x1b[H\x1b[2J")
+                sys.stdout.write(render(state))
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                last_render = now
 
-        if state.done:
-            break
+            if state.done:
+                time.sleep(1.0)
+                break
+    finally:
+        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+
+
+def _raise_keyboard_interrupt(signum, frame):
+    raise KeyboardInterrupt
 
 
 if __name__ == "__main__":
+    # SIGTERM bypasses Python's finally blocks by default; route it through
+    # the same cleanup path as Ctrl+C so a `kill` or supervisor stop still
+    # restores the terminal out of the alternate screen buffer.
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     try:
         main()
     except KeyboardInterrupt:

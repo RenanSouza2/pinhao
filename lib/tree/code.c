@@ -224,6 +224,15 @@ static node_p get_next_node(node_p n)
 
 static void node_process(node_p n, uint64_t index)
 {
+    // index is the scheduler slot this task was spawned into, captured
+    // at fork time: the scheduler's array slot gets reassigned behind
+    // this task's back once some other task finishes (see task_end's
+    // tasks[index] = tasks[max-1] swap), but that reassignment happens
+    // in the parent's copy of the array, not in this child's local
+    // variable, so it's still safe to log here. pid is what actually
+    // ties a line to a unique task for the process's whole lifetime.
+    int pid = (int)getpid();
+
     switch(n->type)
     {
         case NODE_BIG:
@@ -233,19 +242,19 @@ static void node_process(node_p n, uint64_t index)
             uint64_t remainder = n->a.b.remainder;
             uint64_t depth = n->a.b.depth;
 
-            tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, "begin", i_0, remainder, depth);
+            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, remainder, depth);
 
             if(split_big_res_is_stored(size, i_0, remainder, depth))
             {
-                tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, "already stored", i_0, remainder, depth);
+                tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, remainder, depth);
                 return;
             }
 
-            tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, "joining", i_0, remainder, depth);
+            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, remainder, depth);
             TIME_SETUP
             split_big_res_join(size, i_0, remainder, depth);
             TIME_END(t1)
-            tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, "joined", i_0, remainder, depth, dtime(t1));
+            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, remainder, depth, dtime(t1));
         }
         break;
 
@@ -256,25 +265,28 @@ static void node_process(node_p n, uint64_t index)
             uint64_t span = n->a.s.span;
             uint64_t depth = n->a.s.depth;
 
-            tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, "begin", i_0, span, depth);
+            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, span, depth);
 
             if(split_span_res_is_stored(size, i_0, span, depth))
             {
-                tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, "already stored", i_0, span, depth);
+                tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, span, depth);
                 return;
             }
 
             if(span == TREE_PIECE_SIZE)
             {
+                TIME_SETUP
                 split_piece(i_0, span);
+                TIME_END(t1)
+                tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, "piece", i_0, span, "", dtime(t1));
                 return;
             }
 
-            tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, "joining", i_0, span, depth);
+            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, span, depth);
             TIME_SETUP
             split_span_res_join(size, i_0, span, depth);
             TIME_END(t1)
-            tprintf("[" U64P(2) "] %-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, "joined", i_0, span, depth, dtime(t1));
+            tprintf("[" U64P(2) "][%7d] %-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
         }
         break;
     }
@@ -296,7 +308,7 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
         exit(EXIT_SUCCESS);
     }
 
-    tprintf("[" U64P(2) "] %-16s|", index, "task start");
+    tprintf("[" U64P(2) "][%7d] %-16s|", index, (int)pid, "task start");
 
     tasks[index] = (tree_task_t){
         .pid = pid,
@@ -324,7 +336,7 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
     node_p n = tasks[index].n;
     uint64_t time_start = tasks[index].time_start;
 
-    tprintf("[" U64P(2) "] %-16s| %25s | %7.1f", index, "task end", "", dtime(get_time() - time_start));
+    tprintf("[" U64P(2) "][%7d] %-16s| %25s | %7.1f", index, (int)pid, "task end", "", dtime(get_time() - time_start));
 
     if(index < max - 1)
     {

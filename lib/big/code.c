@@ -104,10 +104,7 @@ static void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
 void split_piece(uint64_t i_0, uint64_t span)
 {
     sig_num_t res[3];
-    TIME_SETUP
     split_sig(res, i_0, span);
-    TIME_END(t1)
-    tprintf("%-16s| " U64P(10) " " U64P(10) " | %7.1f", "piece", i_0, span, dtime(t1));
     sig_res_save(res, i_0, span);
 }
 
