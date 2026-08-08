@@ -1,5 +1,5 @@
-#ifndef __LINEAR_DEBUG_H__
-#define __LINEAR_DEBUG_H__
+#ifndef LINEAR_DEBUG_H
+#define LINEAR_DEBUG_H
 
 #include "header.h"
 

@@ -1,5 +1,5 @@
-#ifndef __UNION_DEBUG_H__
-#define __UNION_DEBUG_H__
+#ifndef UNION_DEBUG_H
+#define UNION_DEBUG_H
 
 #include "header.h"
 

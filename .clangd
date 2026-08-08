@@ -1,0 +1,35 @@
+CompileFlags:
+  Add:
+    - "-std=c23"
+    - "-DDEBUG"
+    - "-D_GNU_SOURCE"
+    - "-Wall"
+    - "-Wextra"
+    - "-Wpedantic"
+    - "-xc"
+  Remove:
+    - "-Werror"
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - "bugprone-*"
+      - "clang-analyzer-*"
+      - "performance-*"
+      - "readability-*"
+      - "cert-*"
+    CheckOptions:
+      cert-err33-c.CheckedFunctions: "-::fprintf;-::printf;-::sprintf"
+    Remove:
+      - "abseil-*"
+      - "llvm-*"
+      - "readability-identifier-length"
+      - "readability-isolate-declaration"
+      - "bugprone-easily-swappable-parameters"
+      - "readability-implicit-bool-conversion"
+
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: No

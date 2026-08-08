@@ -7,7 +7,7 @@
 
 
 
-void test_linear_hello(bool show)
+static void test_linear_hello(bool show)
 {
     TEST_FN_OPEN
 
@@ -21,7 +21,7 @@ void test_linear_hello(bool show)
 
 
 
-void test_linear(void)
+static void test_linear(void)
 {
     TEST_LIB
 

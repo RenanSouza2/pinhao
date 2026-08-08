@@ -1,12 +1,12 @@
 PRJ_NAME = pi
 PRJ_DIR ?= $(shell git rev-parse --show-toplevel)
 LIB_DIR = $(PRJ_DIR)/lib
-NUM_DIR = $(PRJ_DIR)/mods/number/lib
+AUC_DIR = $(PRJ_DIR)/mods/araucaria/lib
 DBG_FILE = $(LIB_DIR)/debug.o
 LIB_FILE = $(LIB_DIR)/lib.o
-NUM_FILE = $(NUM_DIR)/lib.o
+AUC_FILE = $(AUC_DIR)/lib.o
 CLU_FILE = $(PRJ_DIR)/mods/clu/bin/clu.o
-NUM_DBG_FILE = $(NUM_DIR)/debug.o
+AUC_DBG_FILE = $(AUC_DIR)/debug.o
 DBG_FULL_FILE = $(LIB_DIR)/debug_full.o
 LIB_FULL_FILE = $(LIB_DIR)/lib_full.o
 DIR = $(shell basename $(CURDIR))

@@ -7,7 +7,7 @@
 
 
 
-void test_example_hello(bool show)
+static void test_example_hello(bool show)
 {
     TEST_FN_OPEN
 
@@ -21,7 +21,7 @@ void test_example_hello(bool show)
 
 
 
-void test_example(void)
+static void test_example(void)
 {
     TEST_LIB
 

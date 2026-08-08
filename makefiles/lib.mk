@@ -5,18 +5,17 @@ include $(PRJ_DIR)/makefiles/vars.mk
 
 
 build b: lib.o
-
 dbg d: debug.o
 
 
 
 lib.o: code.c
 	echo "building $(PRJ_NAME) object $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) -c
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP)
 
 debug.o: code.c
 	echo "building $(PRJ_NAME) debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) -c
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
 
 
 

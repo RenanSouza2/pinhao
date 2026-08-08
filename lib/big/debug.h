@@ -1,5 +1,5 @@
-#ifndef __EXAMPLE_DEBUG_H__
-#define __EXAMPLE_DEBUG_H__
+#ifndef BIG_DEBUG_H
+#define BIG_DEBUG_H
 
 #include "header.h"
 #include "struct.h"

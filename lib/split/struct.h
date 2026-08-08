@@ -1,4 +1,4 @@
-#ifndef __SPLIT_STRUCT_H__
-#define __SPLIT_STRUCT_H__
+#ifndef SPLIT_STRUCT_H
+#define SPLIT_STRUCT_H
 
 #endif

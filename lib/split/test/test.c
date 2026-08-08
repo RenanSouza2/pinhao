@@ -7,7 +7,7 @@
 
 
 
-void test_split_hello(bool show)
+static void test_split_hello(bool show)
 {
     TEST_FN_OPEN
 
@@ -21,7 +21,7 @@ void test_split_hello(bool show)
 
 
 
-void test_split(void)
+static void test_split(void)
 {
     TEST_LIB
 
