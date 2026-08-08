@@ -398,7 +398,7 @@ static void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t dept
     TIME_SETUP
     split_span_res_join(size, i_0, span, depth);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", dtime(t1));
+    tprintf("joined | " U64P() " " U64P() " " U64P() " \t\t%.1f", i_0, span, depth, dtime(t1));
 }
 
 
@@ -476,7 +476,7 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
 // out vector length 3, returns P, Q, R in that order
 static void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth)
+    tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth);
 
     if(split_big_res_is_stored(size, i_0, remainder, depth))
     {
@@ -497,7 +497,7 @@ static void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t 
     TIME_SETUP
     split_big_res_join(size, i_0, remainder, depth);
     TIME_END(t1)
-    fprintf(stderr, "\t\t%.1f", dtime(t1));
+    tprintf("joined | " U64P() " " U64P() " " U64P() " \t\t%.1f", i_0, span, depth, dtime(t1));
 }
 
 

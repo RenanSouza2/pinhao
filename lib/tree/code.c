@@ -245,7 +245,7 @@ static void node_process(node_p n, uint64_t index)
             TIME_SETUP
             split_big_res_join(size, i_0, remainder, depth);
             TIME_END(t1)
-            fprintf(stderr, "\t\t%.1f", dtime(t1));
+            tprintf("[" U64P() "] joined | " U64P() " " U64P() " " U64P() " \t\t%.1f", index, i_0, remainder, depth, dtime(t1));
         }
         break;
 
@@ -274,7 +274,7 @@ static void node_process(node_p n, uint64_t index)
             TIME_SETUP
             split_span_res_join(size, i_0, span, depth);
             TIME_END(t1)
-            fprintf(stderr, "\t\t%.1f", dtime(t1));
+            tprintf("[" U64P() "] joined | " U64P() " " U64P() " " U64P() " \t\t%.1f", index, i_0, span, depth, dtime(t1));
         }
         break;
     }
@@ -324,8 +324,7 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
     node_p n = tasks[index].n;
     uint64_t time_start = tasks[index].time_start;
 
-    tprintf("[" U64P() "] task end", index);
-    fprintf(stderr, "\t\t%.1f", dtime(get_time() - time_start));
+    tprintf("[" U64P() "] task end \t\t%.1f", index, dtime(get_time() - time_start));
 
     if(index < max - 1)
     {
@@ -357,14 +356,11 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
 static void scheduler(uint64_t size, uint64_t n_process)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
-
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-
     tree_task_p tasks = malloc(n_process * sizeof(tree_task_t));
     assert(tasks);
 
     uint64_t i = 0;
-
     for(;;)
     {
         for(; i<n_process; i++)
@@ -386,7 +382,6 @@ static void scheduler(uint64_t size, uint64_t n_process)
         }
         i--;
     }
-
     free(tasks);
 }
 

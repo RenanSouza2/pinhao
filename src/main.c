@@ -14,9 +14,9 @@
 
 
 [[maybe_unused]]
-static void pi(uint64_t size)
+static void pi(uint64_t size, uint64_t n_process)
 {
-    flt_num_t flt_pi = pi_tree(size, 2);
+    flt_num_t flt_pi = pi_tree(size, n_process);
     printf("\n\n");flt_num_display_dec(flt_pi);
     flt_num_free(flt_pi);
 }
@@ -35,7 +35,7 @@ int main(void)
     // };
     // num_config_set(&config);
 
-    pi(1'000'000);
+    pi(4'000'000, 1);
 
     printf("\n");
     return 0;
