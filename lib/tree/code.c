@@ -132,7 +132,9 @@ static node_p node_expand(node_p n, uint64_t index)
                     return node_big_create(n, size, i_0 + B(span), remainder - B(span), depth + 1);
                 }
             }
+            assert(false);
         }
+        break;
 
         case NODE_SPAN:
         {
@@ -144,6 +146,7 @@ static node_p node_expand(node_p n, uint64_t index)
             return node_span_create(n, size, i_0 + offset, span - 1, depth + 1);
         }
     }
+    assert(false);
 }
 
 static bool node_is_ready(node_p n)
@@ -325,8 +328,12 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
     assert(false);
 }
 
-static void scheduler(node_p n_root, uint64_t n_process)
+static void scheduler(uint64_t size, uint64_t n_process)
 {
+    uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
+
+    node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
+
     tree_task_p tasks = malloc(n_process * sizeof(tree_task_t));
     assert(tasks);
 
@@ -353,14 +360,19 @@ static void scheduler(node_p n_root, uint64_t n_process)
         }
         i--;
     }
+
+    free(tasks);
 }
 
 [[maybe_unused]]
-static void pi_tree(uint64_t size, uint64_t n_process)
+flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 {
-    uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
+    if(pi_is_stored(size))
+    {
+        tprintf("pi already stored");
+        return pi_load(size);
+    }
 
-
-    node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    scheduler(n_root, n_process);
+    scheduler(size, n_process);
+    return pi_finish(size);
 }

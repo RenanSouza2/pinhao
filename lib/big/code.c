@@ -514,7 +514,7 @@ static void pi_save(uint64_t size, flt_num_t flt_pi)
     flt_num_save(name, flt_pi);
 }
 
-static bool pi_is_stored(uint64_t size)
+bool pi_is_stored(uint64_t size)
 {
     char name[PATH_MAX_LEN];
     pi_path_set(name, size);
@@ -528,7 +528,7 @@ static bool pi_is_stored(uint64_t size)
     return true;
 }
 
-static flt_num_t pi_load(uint64_t size)
+flt_num_t pi_load(uint64_t size)
 {
     char name[PATH_MAX_LEN];
     pi_path_set(name, size);
@@ -548,18 +548,9 @@ uint64_t get_index_max(uint64_t size, uint64_t piece_size)
     return index_max + B(piece_size) - aux;
 }
 
-flt_num_t pi_big(uint64_t size)
+flt_num_t pi_finish(uint64_t size)
 {
-    if(pi_is_stored(size))
-    {
-        tprintf("pi already stored");
-        return pi_load(size);
-    }
-
     uint64_t index_max = get_index_max(size, PIECE_SIZE);
-
-    split_big(size, 1, index_max, 0);
-    tprintf("binary split solved");
 
     union_num_t u_q = split_big_res_load(size, 1, index_max, 0, 1);
     union_num_t u_r = split_big_res_load(size, 1, index_max, 0, 2);
@@ -580,6 +571,21 @@ flt_num_t pi_big(uint64_t size)
     pi_save(size, flt_pi);
     union_res_delete(size, 1, index_max, 0);
     return flt_pi;
+}
+
+flt_num_t pi_big(uint64_t size)
+{
+    if(pi_is_stored(size))
+    {
+        tprintf("pi already stored");
+        return pi_load(size);
+    }
+
+    uint64_t index_max = get_index_max(size, PIECE_SIZE);
+    split_big(size, 1, index_max, 0);
+    tprintf("binary split solved");
+
+    return pi_finish(size);
 }
 
 void prepare(
