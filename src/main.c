@@ -1,9 +1,9 @@
 #include <stdio.h>
 
 #include "../mods/clu/header.h" // IWYU pragma: keep
-// #include "../mods/macros/assert.h"
+#include "../mods/macros/assert.h" // IWYU pragma: keep
 // #include "../mods/macros/fork.h"
-// #include "../mods/macros/time.h"
+#include "../mods/macros/time.h"
 // #include "../mods/araucaria/lib/num/struct.h"
 
 // #define CACHE "/mnt/wsl/external_workspace/cache"
@@ -17,7 +17,12 @@
 static void pi(uint64_t size, uint64_t n_process)
 {
     flt_num_t flt_pi = pi_tree(size, n_process);
-    printf("\n\n");flt_num_display_dec(flt_pi);
+    printf("\n\n");
+    tprintf("              %-16s|", "display begin");
+    TIME_SETUP
+    flt_num_display_dec(flt_pi);
+    TIME_END(t1)
+    tprintf("              %-16s| %7.1f", "display end", dtime(t1));
     flt_num_free(flt_pi);
 }
 

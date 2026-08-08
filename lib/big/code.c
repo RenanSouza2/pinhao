@@ -558,11 +558,11 @@ flt_num_t pi_finish(uint64_t size, uint64_t piece_size)
     flt_num_t flt_pi = flt_r;
     flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(3));
 
-    tprintf("%-16s|", "dividing");
+    tprintf("              %-16s|", "dividing");
     TIME_SETUP
     flt_pi = flt_num_div(flt_pi, flt_q);
     TIME_END(t1)
-    tprintf("%-16s| %7.1f", "divided", dtime(t1));
+    tprintf("              %-16s| %7.1f", "divided", dtime(t1));
 
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     pi_save(size, flt_pi);

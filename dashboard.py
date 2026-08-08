@@ -117,20 +117,30 @@ class State:
         self.n_process = n_process
         self.pieces_done = 0
         self.pieces_from_cache = 0
+        # a tree that reduces N leaves down to one root result always does
+        # exactly N-1 join operations, regardless of its shape (each join
+        # merges two components into one, starting from N components and
+        # ending at 1) - so total joins is derived from total_pieces, no
+        # separate simulation of the BIG/SPAN tree shape needed.
+        self.joins_done = 0
+        self.joins_from_cache = 0
         self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
-        self.recent_pieces = collections.deque(maxlen=10)
-        self.recent_task_ends = collections.deque(maxlen=10)
         self.crashed = collections.deque(maxlen=10)  # (pid, depth, i0, ran_for)
         self.crashed_total = 0
+        self.suspected_dead = {}  # pid -> time first seen not-alive
         self.done = False
 
     def touch(self):
         if self.start_time is None:
             self.start_time = time.time()
         self.last_line_time = time.time()
+
+    @property
+    def total_joins(self):
+        return self.total_pieces - 1 if self.total_pieces else None
 
 
 def handle_node_process(state, content):
@@ -148,12 +158,19 @@ def handle_node_process(state, content):
         entry["i0"] = i0
     elif action == "already stored":
         state.active.pop(pid, None)
+        state.suspected_dead.pop(pid, None)
         # this whole subtree was cached from an earlier (possibly
-        # interrupted) run, so it never produces its own "piece" lines -
-        # credit its leaves now or the progress count would silently stall.
+        # interrupted) run, so it never produces its own "piece"/"joined"
+        # lines - credit its leaves *and* the joins that combined them, or
+        # the progress count would silently stall on a resumed run.
         covered = leaves_covered(int(m.group("n2")))
         state.pieces_done += covered
         state.pieces_from_cache += covered
+        joins_covered = covered - 1  # a subtree of L leaves has L-1 joins
+        state.joins_done += joins_covered
+        state.joins_from_cache += joins_covered
+    elif action == "joined":
+        state.joins_done += 1
 
 
 def handle_piece(state, content):
@@ -162,9 +179,7 @@ def handle_piece(state, content):
         return
     dur = float(m.group("dur"))
     state.pieces_done += 1
-    now = time.time()
-    state.piece_events.append((now, dur))
-    state.recent_pieces.append((int(m.group("i0")), int(m.group("span")), dur))
+    state.piece_events.append((time.time(), dur))
 
 
 def handle_task_start(state, content):
@@ -180,9 +195,8 @@ def handle_task_end(state, content):
     if not m:
         return
     pid = int(m.group("pid"))
-    dur = float(m.group("dur"))
     state.active.pop(pid, None)
-    state.recent_task_ends.append((pid, dur))
+    state.suspected_dead.pop(pid, None)
 
 
 def handle_scheduler(state, content):
@@ -211,6 +225,9 @@ def handle_phase(state, content):
         state.done = True
         if state.total_pieces:
             state.pieces_from_cache += state.total_pieces - state.pieces_done
+            state.pieces_done = state.total_pieces
+            state.joins_from_cache += state.total_joins - state.joins_done
+            state.joins_done = state.total_joins
             state.pieces_done = state.total_pieces
 
 
@@ -244,27 +261,35 @@ def feed_line(state, line):
     handler(state, content)
 
 
+# A task's process legitimately disappears (gets reaped by the parent's
+# waitpid()) an instant *before* the parent's own "task_end" log line for it
+# is written and flows through the tee pipe to this file - so "not found by
+# pid_alive()" is also exactly what a completely normal finish looks like
+# for a brief moment, not just a crash. Debounce past that window before
+# believing it, or every successful completion would flash as a false
+# "crashed" that then never gets reclaimed once task_end no-ops on it.
+DEAD_GRACE_SECONDS = 3.0
+
+
 def sweep_dead(state):
-    """Move tasks whose process is no longer running out of `active` and
-    into `crashed`, since the log itself never tells us a task was killed -
-    it would otherwise sit in the active table forever looking healthy."""
+    """Move tasks whose process has been gone for longer than the log could
+    plausibly still catch up on into `crashed`, since the log itself never
+    tells us a task was killed - it would otherwise sit in `active` forever
+    looking healthy."""
     now = time.time()
     for pid in list(state.active):
         if pid_alive(pid):
+            state.suspected_dead.pop(pid, None)
             continue
+
+        first_seen = state.suspected_dead.setdefault(pid, now)
+        if now - first_seen < DEAD_GRACE_SECONDS:
+            continue
+
         w = state.active.pop(pid)
+        state.suspected_dead.pop(pid, None)
         state.crashed.append((pid, w["depth"], w["i0"], now - w["start"]))
         state.crashed_total += 1
-
-
-def pieces_per_sec(state, window=15.0):
-    now = time.time()
-    cutoff = now - window
-    recent = [d for (t, d) in state.piece_events if t >= cutoff]
-    if len(recent) < 2:
-        return 0.0
-    span = now - next(t for (t, d) in state.piece_events if t >= cutoff)
-    return len(recent) / max(span, 1.0)
 
 
 def fmt_duration(seconds):
@@ -302,21 +327,21 @@ def render(state):
 
     lines.append("")
 
-    cache_note = f"  ({state.pieces_from_cache} from cache)" if state.pieces_from_cache else ""
+    cached_units = state.pieces_from_cache + state.joins_from_cache
+    cache_note = f"  ({cached_units} from cache)" if cached_units else ""
     if state.total_pieces:
-        pct = min(100.0, 100.0 * state.pieces_done / state.total_pieces)
+        total_joins = state.total_joins
+        total_units = state.total_pieces + total_joins
+        done_units = min(state.pieces_done + state.joins_done, total_units)
+        pct = 100.0 * done_units / total_units
         bar_width = 40
-        filled = int(bar_width * min(state.pieces_done, state.total_pieces) / state.total_pieces)
+        filled = int(bar_width * done_units / total_units)
         bar = "#" * filled + "-" * (bar_width - filled)
-        lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}  ({pct:5.1f}%){cache_note}")
+        lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
+        lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         lines.append(f"         [{bar}]")
     else:
-        lines.append(f"pieces:  {state.pieces_done} / ? (pass --size to compute a total){cache_note}")
-
-    rate = pieces_per_sec(state)
-    remaining = max(0, state.total_pieces - state.pieces_done) if state.total_pieces else None
-    eta = (remaining / rate) if (rate and remaining) else None
-    lines.append(f"rate:    {rate:5.2f} pieces/s        eta: {fmt_duration(eta)}")
+        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (pass --size for totals){cache_note}")
     lines.append("")
 
     n_workers = state.n_process or state.active_max
@@ -329,30 +354,14 @@ def render(state):
         lines.append(f"  {pid:>7}  {fmt_duration(now - w['start']):>8}  {depth:>5}  {i0:>14}")
     if not state.active:
         lines.append("  (none)")
-    lines.append("")
 
     if state.crashed:
+        lines.append("")
         lines.append("crashed workers (pid, depth, i0, ran for):")
         for pid, depth, i0, ran_for in state.crashed:
             depth = depth if depth is not None else "-"
             i0 = f"{i0:,}" if i0 is not None else "-"
             lines.append(f"  {pid:<7} depth={depth!s:<3} i0={i0:<14} {fmt_duration(ran_for)}")
-        lines.append("")
-
-    lines.append("recent pieces (i0, span, seconds):")
-    if state.recent_pieces:
-        for i0, span, dur in list(state.recent_pieces)[-10:]:
-            lines.append(f"  i0={i0:<12} span={span:<3} {dur:7.1f}s")
-    else:
-        lines.append("  (none yet)")
-    lines.append("")
-
-    lines.append("recent task ends (pid, seconds):")
-    if state.recent_task_ends:
-        for pid, dur in list(state.recent_task_ends)[-10:]:
-            lines.append(f"  {pid:<7} {dur:7.1f}s")
-    else:
-        lines.append("  (none yet)")
 
     return "\n".join(lines)
 

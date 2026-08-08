@@ -386,7 +386,7 @@ static void scheduler(uint64_t size, uint64_t n_process)
             task_start(tasks, i, n);
         }
 
-        tprintf("     %-16s| " U64P(2) "", "active processes", i);
+        tprintf("              %-16s| " U64P(2) "", "active processes", i);
         pid_t pid = waitpid_safe(0, NULL);
 
         if(task_end(tasks, pid, i))
@@ -403,12 +403,12 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 {
     if(pi_is_stored(size))
     {
-        tprintf("     %-16s|", "pi already stored");
+        tprintf("              %-16s|", "pi already stored");
         return pi_load(size);
     }
 
     scheduler(size, n_process);
-    tprintf("     %-16s|", "binary split solved");
+    tprintf("              %-16s|", "binary split solved");
 
     return pi_finish(size, TREE_PIECE_SIZE);
 }
