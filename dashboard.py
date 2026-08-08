@@ -36,17 +36,17 @@ DEFAULT_MAIN_C = os.path.join(REPO_ROOT, "src", "main.c")
 _TASK_ID = r"\[\s*\d+\]\[\s*(?P<pid>\d+)\]"
 
 RE_NODE_PROCESS = re.compile(
-    _TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|\s*"
+    _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
     r"(?:\s*\|\s*(?P<dur>[\d.]+))?"
 )
 RE_PIECE = re.compile(
-    _TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
+    _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
 )
-RE_TASK_START = re.compile(_TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|")
-RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.{1,16}?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
-RE_SCHEDULER = re.compile(r"(?P<action>.{1,16}?)\s*\|\s*(?P<val>\d+)")
-RE_PHASE = re.compile(r"(?P<action>.{1,16}?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
+RE_TASK_START = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|")
+RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
+RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
+RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 # matches e.g. "pi(4'000'000, 16);" - digit-separator quotes allowed per C23
 RE_MAIN_C_CALL = re.compile(r"\bpi\(\s*([\d']+)\s*,\s*([\d']+)\s*\)\s*;")
@@ -78,23 +78,59 @@ def parse_main_c(path):
     return None
 
 
+# A BIG node's "remainder" and a SPAN node's "span" share the same log field
+# (n2) with no tag saying which. But remainder is always a multiple of
+# PIECES_PER_LEAF (>> 64), while span is a bit-width (<= 64) - the piece-size
+# alignment invariant in get_index_max() makes that gap absolute, at any
+# depth, so the magnitude alone tells them apart.
+SPAN_VS_REMAINDER_CUTOFF = 64
+
+
+def leaves_covered(n2):
+    """How many leaf pieces an "already stored"/"begin" node_process line
+    for this n2 value represents - used to credit pieces that were already
+    on disk from an earlier run, which never individually log split_piece's
+    "piece" line and would otherwise be invisible to the progress count."""
+    if n2 > SPAN_VS_REMAINDER_CUTOFF:
+        return n2 // PIECES_PER_LEAF
+    return 1 << (n2 - TREE_PIECE_SIZE)
+
+
+def pid_alive(pid):
+    """Best-effort OS-level liveness check, since the log alone can't tell
+    us a task's process was killed mid-flight - it would just go silent."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # e.g. PermissionError: process exists, we just can't signal it
+        return True
+    return True
+
+
 class State:
     def __init__(self, total_pieces=None, n_process=None):
         self.start_time = None
+        self.last_line_time = None
         self.total_pieces = total_pieces
         self.n_process = n_process
         self.pieces_done = 0
+        self.pieces_from_cache = 0
         self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
         self.recent_pieces = collections.deque(maxlen=10)
         self.recent_task_ends = collections.deque(maxlen=10)
+        self.crashed = collections.deque(maxlen=10)  # (pid, depth, i0, ran_for)
+        self.crashed_total = 0
         self.done = False
 
     def touch(self):
         if self.start_time is None:
             self.start_time = time.time()
+        self.last_line_time = time.time()
 
 
 def handle_node_process(state, content):
@@ -112,6 +148,12 @@ def handle_node_process(state, content):
         entry["i0"] = i0
     elif action == "already stored":
         state.active.pop(pid, None)
+        # this whole subtree was cached from an earlier (possibly
+        # interrupted) run, so it never produces its own "piece" lines -
+        # credit its leaves now or the progress count would silently stall.
+        covered = leaves_covered(int(m.group("n2")))
+        state.pieces_done += covered
+        state.pieces_from_cache += covered
 
 
 def handle_piece(state, content):
@@ -163,6 +205,13 @@ def handle_phase(state, content):
         state.phase = action
     if action == "divided":
         state.done = True
+    if action == "pi already stored":
+        # pi_tree() short-circuits here without ever running the scheduler -
+        # the whole result was already on disk from an earlier run.
+        state.done = True
+        if state.total_pieces:
+            state.pieces_from_cache += state.total_pieces - state.pieces_done
+            state.pieces_done = state.total_pieces
 
 
 DISPATCH = {
@@ -195,6 +244,19 @@ def feed_line(state, line):
     handler(state, content)
 
 
+def sweep_dead(state):
+    """Move tasks whose process is no longer running out of `active` and
+    into `crashed`, since the log itself never tells us a task was killed -
+    it would otherwise sit in the active table forever looking healthy."""
+    now = time.time()
+    for pid in list(state.active):
+        if pid_alive(pid):
+            continue
+        w = state.active.pop(pid)
+        state.crashed.append((pid, w["depth"], w["i0"], now - w["start"]))
+        state.crashed_total += 1
+
+
 def pieces_per_sec(state, window=15.0):
     now = time.time()
     cutoff = now - window
@@ -221,31 +283,46 @@ def render(state):
     lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
     lines.append("")
 
-    elapsed = time.time() - state.start_time if state.start_time else 0
+    now = time.time()
+    elapsed = now - state.start_time if state.start_time else 0
     lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
+
+    if state.last_line_time is not None and not state.done:
+        since_last_line = now - state.last_line_time
+        recent_durs = [d for _, d in state.piece_events]
+        # a lull up to one full task duration is normal (e.g. only one slow
+        # task left running); only warn once we're well past that.
+        stall_threshold = max(60.0, 2 * max(recent_durs)) if recent_durs else 60.0
+        if since_last_line > stall_threshold:
+            lines.append(
+                f"WARNING: no log activity for {fmt_duration(since_last_line)} "
+                "- the run may have stopped or crashed"
+            )
+
     lines.append("")
 
+    cache_note = f"  ({state.pieces_from_cache} from cache)" if state.pieces_from_cache else ""
     if state.total_pieces:
-        pct = 100.0 * state.pieces_done / state.total_pieces
+        pct = min(100.0, 100.0 * state.pieces_done / state.total_pieces)
         bar_width = 40
         filled = int(bar_width * min(state.pieces_done, state.total_pieces) / state.total_pieces)
         bar = "#" * filled + "-" * (bar_width - filled)
-        lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}  ({pct:5.1f}%)")
+        lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}  ({pct:5.1f}%){cache_note}")
         lines.append(f"         [{bar}]")
     else:
-        lines.append(f"pieces:  {state.pieces_done} / ? (pass --size to compute a total)")
+        lines.append(f"pieces:  {state.pieces_done} / ? (pass --size to compute a total){cache_note}")
 
     rate = pieces_per_sec(state)
-    remaining = (state.total_pieces - state.pieces_done) if state.total_pieces else None
-    eta = (remaining / rate) if (rate > 0 and remaining is not None) else None
+    remaining = max(0, state.total_pieces - state.pieces_done) if state.total_pieces else None
+    eta = (remaining / rate) if (rate and remaining) else None
     lines.append(f"rate:    {rate:5.2f} pieces/s        eta: {fmt_duration(eta)}")
     lines.append("")
 
     n_workers = state.n_process or state.active_max
-    lines.append(f"active workers ({len(state.active)}/{n_workers or '?'}):")
+    crashed_note = f"  ({state.crashed_total} crashed total)" if state.crashed_total else ""
+    lines.append(f"active workers ({len(state.active)}/{n_workers or '?'}){crashed_note}:")
     lines.append(f"  {'pid':>7}  {'elapsed':>8}  {'depth':>5}  {'i0':>14}")
-    now = time.time()
     for pid, w in sorted(state.active.items()):  # ordered by task id (pid)
         depth = w["depth"] if w["depth"] is not None else "-"
         i0 = f"{w['i0']:,}" if w["i0"] is not None else "-"
@@ -253,6 +330,14 @@ def render(state):
     if not state.active:
         lines.append("  (none)")
     lines.append("")
+
+    if state.crashed:
+        lines.append("crashed workers (pid, depth, i0, ran for):")
+        for pid, depth, i0, ran_for in state.crashed:
+            depth = depth if depth is not None else "-"
+            i0 = f"{i0:,}" if i0 is not None else "-"
+            lines.append(f"  {pid:<7} depth={depth!s:<3} i0={i0:<14} {fmt_duration(ran_for)}")
+        lines.append("")
 
     lines.append("recent pieces (i0, span, seconds):")
     if state.recent_pieces:
@@ -319,6 +404,7 @@ def main():
 
             now = time.time()
             if now - last_render >= 1.0:
+                sweep_dead(state)
                 sys.stdout.write("\x1b[H\x1b[2J")
                 sys.stdout.write(render(state))
                 sys.stdout.write("\n")
