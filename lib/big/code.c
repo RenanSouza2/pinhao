@@ -548,9 +548,9 @@ uint64_t get_index_max(uint64_t size, uint64_t piece_size)
     return index_max + B(piece_size) - aux;
 }
 
-flt_num_t pi_finish(uint64_t size)
+flt_num_t pi_finish(uint64_t size, uint64_t piece_size)
 {
-    uint64_t index_max = get_index_max(size, PIECE_SIZE);
+    uint64_t index_max = get_index_max(size, piece_size);
 
     union_num_t u_q = split_big_res_load(size, 1, index_max, 0, 1);
     union_num_t u_r = split_big_res_load(size, 1, index_max, 0, 2);
@@ -585,7 +585,7 @@ flt_num_t pi_big(uint64_t size)
     split_big(size, 1, index_max, 0);
     tprintf("binary split solved");
 
-    return pi_finish(size);
+    return pi_finish(size, PIECE_SIZE);
 }
 
 void prepare(

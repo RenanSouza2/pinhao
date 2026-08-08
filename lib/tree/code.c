@@ -1,9 +1,13 @@
+#include <stdio.h>
+
 #include "debug.h"
 #include "../big/internal.h"
 
 #include "../../mods/macros/assert.h"
 #include "../../mods/macros/stdbit.h"
 #include "../../mods/macros/fork.h"
+#include "../../mods/macros/uint.h"
+#include "../../mods/macros/time.h"
 
 #ifdef DEBUG
 #endif
@@ -220,6 +224,8 @@ static bool get_next_node(node_p *out_n, node_p n)
 
 static void node_process(node_p n)
 {
+    int pid = (int)getpid();
+
     switch(n->type)
     {
         case NODE_BIG:
@@ -229,12 +235,18 @@ static void node_process(node_p n)
             uint64_t remainder = n->a.b.remainder;
             uint64_t depth = n->a.b.depth;
 
+            tprintf("[%d] begin | " U64P() " " U64P() " " U64P() "", pid, i_0, remainder, depth);
+
             if(split_big_res_is_stored(size, i_0, remainder, depth))
             {
                 return;
             }
 
+            tprintf("[%d] joining | " U64P() " " U64P() " " U64P() "", pid, i_0, remainder, depth);
+            TIME_SETUP
             split_big_res_join(size, i_0, remainder, depth);
+            TIME_END(t1)
+            fprintf(stderr, "\t\t%.1f", dtime(t1));
         }
         break;
 
@@ -244,6 +256,8 @@ static void node_process(node_p n)
             uint64_t i_0 = n->a.s.i_0;
             uint64_t span = n->a.s.span;
             uint64_t depth = n->a.s.depth;
+
+            tprintf("[%d] begin | " U64P() " " U64P() " " U64P() "", pid, i_0, span, depth);
 
             if(split_span_res_is_stored(size, i_0, span, depth))
             {
@@ -256,7 +270,11 @@ static void node_process(node_p n)
                 return;
             }
 
+            tprintf("[%d] joining | " U64P() " " U64P() " " U64P() "", pid, i_0, span, depth);
+            TIME_SETUP
             split_span_res_join(size, i_0, span, depth);
+            TIME_END(t1)
+            fprintf(stderr, "\t\t%.1f", dtime(t1));
         }
         break;
     }
@@ -266,6 +284,7 @@ STRUCT(tree_task)
 {
     pid_t pid;
     node_p n;
+    uint64_t time_start;
 };
 
 static void task_start(tree_task_p tasks, uint64_t index, node_p n)
@@ -277,9 +296,12 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
         exit(EXIT_SUCCESS);
     }
 
+    tprintf("task start | pid %d", (int)pid);
+
     tasks[index] = (tree_task_t){
         .pid = pid,
-        .n = n
+        .n = n,
+        .time_start = get_time()
     };
 }
 
@@ -300,6 +322,10 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
 {
     uint64_t index = get_task_index(tasks, pid, max);
     node_p n = tasks[index].n;
+    uint64_t time_start = tasks[index].time_start;
+
+    tprintf("task end | pid %d", (int)pid);
+    fprintf(stderr, "\t\t%.1f", dtime(get_time() - time_start));
 
     if(index < max - 1)
     {
@@ -374,5 +400,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process)
     }
 
     scheduler(size, n_process);
-    return pi_finish(size);
+    tprintf("binary split solved");
+
+    return pi_finish(size, TREE_PIECE_SIZE);
 }
