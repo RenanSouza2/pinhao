@@ -478,18 +478,22 @@ def render_tree(node, lines, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", "process done"
     elif node.in_progress:
-        mark, state, status = "▸", "in_progress", f"task {node.task_idx}"
+        mark, state, status = "▸", "in_progress", str(node.task_idx)
     elif node.leaves_done > 0:
         mark, state, status = "·", "in_progress", "partial"
     elif node.active_count > 0:
         # this node itself hasn't been scheduled yet (no begin/joined line
-        # of its own), but a descendant has - don't collapse it away.
-        mark, state, status = "·", "in_progress", "active below"
+        # of its own) - a descendant mark (▸ N) already shows what's
+        # actually running, so this one just needs a mark distinct from
+        # "pending" to say "don't collapse me, there's activity below".
+        mark, state, status = "○", "in_progress", None
     else:
         mark, state, status = "·", "pending", "waiting process"
 
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
-    label = f"depth={node.depth} i0={node.i0:,} [{status}]"
+    label = f"depth={node.depth} i0={node.i0:,}"
+    if status is not None:
+        label += f" [{status}]"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):
@@ -594,19 +598,49 @@ def render(state):
     return "\n".join(lines)
 
 
-def tail(path):
-    while not os.path.exists(path):
-        yield None
-        time.sleep(0.3)
+# yielded by tail() when the file at `path` got replaced by a new one (a
+# different inode) - run.sh does `rm -rf thread_log/*` at the start of
+# every invocation, so a dashboard already attached from before a run
+# started is holding a handle to what's now a deleted file: reads on it
+# just return EOF forever, never seeing the new run's actual content, while
+# whatever state.done/etc. it parsed from the old file's leftovers (if any)
+# stays stuck. The caller must throw its State away and start fresh.
+RESTARTED = object()
 
-    with open(path, "r", errors="replace") as f:
+
+def tail(path):
+    inode = None
+    f = None
+    try:
         while True:
+            try:
+                st = os.stat(path)
+            except OSError:
+                if f is not None:
+                    f.close()
+                    f = None
+                    inode = None
+                    yield RESTARTED
+                yield None
+                time.sleep(0.3)
+                continue
+
+            if f is None or st.st_ino != inode:
+                if f is not None:
+                    f.close()
+                f = open(path, "r", errors="replace")
+                inode = st.st_ino
+                yield RESTARTED
+
             line = f.readline()
             if line:
                 yield line
             else:
                 yield None
                 time.sleep(0.2)
+    finally:
+        if f is not None:
+            f.close()
 
 
 def main():
@@ -625,12 +659,16 @@ def main():
             n_process = n_process if n_process is not None else parsed[1]
 
     total_pieces = get_index_max(size) // PIECES_PER_LEAF if size is not None else None
-    state = State(total_pieces=total_pieces, n_process=n_process)
 
-    if size is not None:
-        state.tree_root, state.tree_by_key = build_tree(get_index_max(size))
-        if state.tree_root is None:
-            state.tree_skipped_reason = f"tree too large to display ({2 * total_pieces - 1} nodes > {TREE_NODE_CAP})"
+    def make_state():
+        state = State(total_pieces=total_pieces, n_process=n_process)
+        if size is not None:
+            state.tree_root, state.tree_by_key = build_tree(get_index_max(size))
+            if state.tree_root is None:
+                state.tree_skipped_reason = f"tree too large to display ({2 * total_pieces - 1} nodes > {TREE_NODE_CAP})"
+        return state
+
+    state = make_state()
 
     # draw in the terminal's alternate screen buffer (like htop/less) so
     # repeated redraws overwrite in place instead of scrolling into history -
@@ -641,6 +679,15 @@ def main():
     try:
         last_render = 0.0
         for line in tail(args.log_path):
+            if line is RESTARTED:
+                # thread_log/run.log got (re)created since we last opened it
+                # - run.sh wipes it at the start of every invocation, so a
+                # dashboard already attached from before a run started would
+                # otherwise keep reading a deleted file forever while holding
+                # onto whatever state (including a stale state.done=True) it
+                # parsed from the previous run's leftovers.
+                state = make_state()
+                continue
             if line is not None:
                 feed_line(state, line)
 
