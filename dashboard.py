@@ -5,12 +5,17 @@ Tails thread_log/run.log (written by run.sh / run_debug.sh) and renders
 progress: leaf pieces done/total, an active-worker table, and a timing/ETA
 summary.
 
-The expected total piece count and worker count are derived from the
+The expected total piece count is derived from the `size` argument of the
 `pi(size, n_process)` call in src/main.c (same formula as get_index_max()
 in lib/big/code.c) rather than from the log itself: in a real run the very
 first tasks logged are already several tree levels deep (get_next_node
 descends silently before the first ready node is handed to a worker), so a
 depth-0 log line essentially never appears.
+
+Worker count is never read from source (n_process isn't always a literal -
+it can be computed per-platform, for instance). It comes from --n-process
+if given, otherwise it's inferred live from the log's "active processes"
+line, which converges to the true value within the first scheduling cycle.
 
 Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N] [--main-c PATH]
 """
@@ -23,7 +28,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import termios
 import time
+import tty
 
 TREE_PIECE_SIZE = 22
 PIECES_PER_LEAF = 1 << TREE_PIECE_SIZE
@@ -50,8 +57,10 @@ RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
-# matches e.g. "pi(4'000'000, 16);" - digit-separator quotes allowed per C23
-RE_MAIN_C_CALL = re.compile(r"\bpi\(\s*([\d']+)\s*,\s*([\d']+)\s*\)\s*;")
+# matches the size literal in e.g. "pi(4'000'000, 16);" or
+# "pi(4'000'000, n_threads);" (digit-separator quotes allowed per C23) -
+# n_process is deliberately not captured here, see parse_main_c().
+RE_MAIN_C_CALL = re.compile(r"\bpi\(\s*([\d']+)\s*,")
 
 
 def get_index_max(size, piece_size=TREE_PIECE_SIZE):
@@ -63,6 +72,10 @@ def get_index_max(size, piece_size=TREE_PIECE_SIZE):
 
 
 def parse_main_c(path):
+    """Extract `size` from the `pi(size, n_process)` call in main.c. Only
+    size is read from source: n_process isn't always a literal (e.g. it can
+    be computed per-platform), so it's left to --n-process or, absent that,
+    to State.active_max tracking the real concurrency seen in the log."""
     try:
         with open(path, "r") as f:
             text = f.read()
@@ -74,9 +87,7 @@ def parse_main_c(path):
             continue
         m = RE_MAIN_C_CALL.search(line)
         if m:
-            size = int(m.group(1).replace("'", ""))
-            n_process = int(m.group(2).replace("'", ""))
-            return size, n_process
+            return int(m.group(1).replace("'", ""))
     return None
 
 
@@ -476,11 +487,11 @@ def fmt_duration(seconds):
 
 def render_tree(node, lines, prefix="", is_last=True, is_root=True):
     if node.own_done:
-        mark, state, status = "✓", "done", "process done"
+        mark, state, status = "✓", "done", None
     elif node.in_progress:
         mark, state, status = "▸", "in_progress", str(node.task_idx)
     elif node.leaves_done > 0:
-        mark, state, status = "·", "in_progress", "partial"
+        mark, state, status = "·", "in_progress", None
     elif node.active_count > 0:
         # this node itself hasn't been scheduled yet (no begin/joined line
         # of its own) - a descendant mark (▸ N) already shows what's
@@ -488,7 +499,7 @@ def render_tree(node, lines, prefix="", is_last=True, is_root=True):
         # "pending" to say "don't collapse me, there's activity below".
         mark, state, status = "○", "in_progress", None
     else:
-        mark, state, status = "·", "pending", "waiting process"
+        mark, state, status = "·", "pending", None
 
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
     label = f"depth={node.depth} i0={node.i0:,}"
@@ -537,6 +548,10 @@ def render(state):
     elapsed = now - state.start_time if state.start_time else 0
     lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
+
+    if state.done:
+        lines.append("")
+        lines.append("*** PROCESS DONE - press any key to exit ***")
 
     if state.last_line_time is not None and not state.done:
         since_last_line = now - state.last_line_time
@@ -643,6 +658,36 @@ def tail(path):
             f.close()
 
 
+def draw(state):
+    cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+    # pad every row out to the full pane size ourselves rather than relying
+    # on \x1b[2J to fill erased cells with the active background color - not
+    # all terminals honor that ("back color erase"), so unpainted cells
+    # would otherwise show through as the terminal's default background.
+    content = [line[:cols].ljust(cols) for line in render(state).split("\n")][:rows]
+    content += [" " * cols] * (rows - len(content))
+    sys.stdout.write("\x1b[H\x1b[2J")
+    sys.stdout.write("\n".join(content))
+    sys.stdout.flush()
+
+
+def wait_for_dismissal():
+    """Block until the user presses a key, so the finished dashboard's
+    final frame stays on screen instead of the alternate-screen buffer
+    getting torn down (and the terminal snapping back to the shell) the
+    instant the run completes."""
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+    except (termios.error, OSError, ValueError):
+        return  # not an interactive terminal (e.g. stdin piped/redirected)
+    try:
+        tty.setcbreak(fd)
+        os.read(fd, 1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
@@ -652,11 +697,8 @@ def main():
     args = parser.parse_args()
 
     size, n_process = args.size, args.n_process
-    if size is None or n_process is None:
-        parsed = parse_main_c(args.main_c)
-        if parsed:
-            size = size if size is not None else parsed[0]
-            n_process = n_process if n_process is not None else parsed[1]
+    if size is None:
+        size = parse_main_c(args.main_c)
 
     total_pieces = get_index_max(size) // PIECES_PER_LEAF if size is not None else None
 
@@ -697,21 +739,16 @@ def main():
                 if state.process_running:
                     state.ever_saw_process = True
                 sweep_dead(state)
-                cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-                # pad every row out to the full pane size ourselves rather
-                # than relying on \x1b[2J to fill erased cells with the
-                # active background color - not all terminals honor that
-                # ("back color erase"), so unpainted cells would otherwise
-                # show through as the terminal's default background.
-                content = [line[:cols].ljust(cols) for line in render(state).split("\n")][:rows]
-                content += [" " * cols] * (rows - len(content))
-                sys.stdout.write("\x1b[H\x1b[2J")
-                sys.stdout.write("\n".join(content))
-                sys.stdout.flush()
+                draw(state)
                 last_render = now
 
             if state.done and state.ever_saw_process:
-                time.sleep(1.0)
+                # re-draw unconditionally: the periodic draw() above is
+                # throttled to once/sec, so the frame the user was looking
+                # at when the run finished may predate state.done and still
+                # be missing the "PROCESS DONE" banner render() adds for it.
+                draw(state)
+                wait_for_dismissal()
                 break
     finally:
         sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")

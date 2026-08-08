@@ -138,7 +138,6 @@ static node_p node_expand(node_p n, uint64_t index)
             }
             assert(false);
         }
-        break;
 
         case NODE_SPAN:
         {
@@ -224,13 +223,6 @@ static node_p get_next_node(node_p n)
 
 static void node_process(node_p n, uint64_t index)
 {
-    // index is the scheduler slot this task was spawned into, captured
-    // at fork time: the scheduler's array slot gets reassigned behind
-    // this task's back once some other task finishes (see task_end's
-    // tasks[index] = tasks[max-1] swap), but that reassignment happens
-    // in the parent's copy of the array, not in this child's local
-    // variable, so it's still safe to log here. pid is what actually
-    // ties a line to a unique task for the process's whole lifetime.
     int pid = (int)getpid();
 
     switch(n->type)
@@ -297,7 +289,21 @@ STRUCT(tree_task)
     pid_t pid;
     node_p n;
     uint64_t time_start;
+    bool active;
 };
+
+static uint64_t get_free_index(tree_task_p tasks, uint64_t n_process)
+{
+    for(uint64_t i=0; i<n_process; i++)
+    {
+        if(!tasks[i].active)
+        {
+            return i;
+        }
+    }
+
+    assert(false);
+}
 
 static void task_start(tree_task_p tasks, uint64_t index, node_p n)
 {
@@ -313,15 +319,16 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
     tasks[index] = (tree_task_t){
         .pid = pid,
         .n = n,
-        .time_start = get_time()
+        .time_start = get_time(),
+        .active = true
     };
 }
 
-static uint64_t get_task_index(tree_task_p tasks, pid_t pid, uint64_t max)
+static uint64_t get_task_index(tree_task_p tasks, pid_t pid, uint64_t n_process)
 {
-    for(uint64_t i=0; i<max; i++)
+    for(uint64_t i=0; i<n_process; i++)
     {
-        if(tasks[i].pid == pid)
+        if(tasks[i].active && tasks[i].pid == pid)
         {
             return i;
         }
@@ -330,18 +337,15 @@ static uint64_t get_task_index(tree_task_p tasks, pid_t pid, uint64_t max)
     assert(false);
 }
 
-static bool task_end(tree_task_p tasks, pid_t pid, uint64_t max)
+static bool task_end(tree_task_p tasks, pid_t pid, uint64_t n_process)
 {
-    uint64_t index = get_task_index(tasks, pid, max);
+    uint64_t index = get_task_index(tasks, pid, n_process);
     node_p n = tasks[index].n;
     uint64_t time_start = tasks[index].time_start;
 
     tprintf("[" U64P(2) "][%7d] %-20s| %25s | %7.1f", index, (int)pid, "task end", "", dtime(get_time() - time_start));
 
-    if(index < max - 1)
-    {
-        tasks[index] = tasks[max - 1];
-    }
+    tasks[index].active = false;
 
     node_p parent = n->parent;
 
@@ -369,13 +373,13 @@ static void scheduler(uint64_t size, uint64_t n_process)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    tree_task_p tasks = malloc(n_process * sizeof(tree_task_t));
+    tree_task_p tasks = calloc(n_process, sizeof(tree_task_t));
     assert(tasks);
 
-    uint64_t i = 0;
+    uint64_t active = 0;
     for(;;)
     {
-        for(; i<n_process; i++)
+        for(; active<n_process; active++)
         {
             node_p n = get_next_node(n_root);
             if(n == NULL)
@@ -383,17 +387,18 @@ static void scheduler(uint64_t size, uint64_t n_process)
                 break;
             }
 
-            task_start(tasks, i, n);
+            uint64_t index = get_free_index(tasks, n_process);
+            task_start(tasks, index, n);
         }
 
-        tprintf("              %-20s| " U64P(2) "", "active processes", i);
+        tprintf("              %-20s| " U64P(2) "", "active processes", active);
         pid_t pid = waitpid_safe(0, NULL);
 
-        if(task_end(tasks, pid, i))
+        if(task_end(tasks, pid, n_process))
         {
             break;
         }
-        i--;
+        active--;
     }
     free(tasks);
 }

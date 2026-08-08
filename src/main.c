@@ -40,7 +40,13 @@ int main(void)
     // };
     // num_config_set(&config);
 
-    pi(4'000'000, 16);
+#if defined(__APPLE__)
+    uint64_t n_threads = 8;
+#else
+    uint64_t n_threads = 16;
+#endif
+
+    pi(4'000'000, n_threads);
 
     printf("\n");
     return 0;
