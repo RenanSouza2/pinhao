@@ -2,8 +2,8 @@
 """Live terminal dashboard for a pi_tree run.
 
 Tails thread_log/run.log (written by run.sh / run_debug.sh) and renders
-progress: leaf pieces done/total, an active-worker table, and a timing/ETA
-summary.
+progress: leaf pieces done/total, an active-worker count, and a live tree
+view with per-node elapsed time.
 
 The expected total piece count is derived from the `size` argument of the
 `pi(size, n_process)` call in src/main.c (same formula as get_index_max()
@@ -121,7 +121,7 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "active_count", "parent", "children",
+        "own_done", "in_progress", "task_idx", "start_time", "active_count", "parent", "children",
     )
 
     def __init__(self, i0, depth, kind, n2, parent):
@@ -143,6 +143,10 @@ class TreeNode:
         # this node - only meaningful while in_progress; set at "begin",
         # cleared once this node's own completion event fires.
         self.task_idx = None
+        # wall-clock time.time() this node's own task started, for the
+        # elapsed time shown next to it in the tree view; same lifetime as
+        # task_idx.
+        self.start_time = None
         # count of currently-running tasks anywhere in this node's subtree
         # (itself included). get_next_node descends silently to find a
         # ready node before logging anything, so an ancestor sits at
@@ -221,6 +225,7 @@ def mark_node_done(node):
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
+    node.start_time = None
     mark_active(node, -1)
 
 
@@ -318,6 +323,7 @@ def handle_node_process(state, content):
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
+            tree_node.start_time = entry["start"]
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
@@ -485,7 +491,7 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
-def render_tree(node, lines, prefix="", is_last=True, is_root=True):
+def render_tree(node, lines, now, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
@@ -505,6 +511,8 @@ def render_tree(node, lines, prefix="", is_last=True, is_root=True):
     label = f"depth={node.depth} i0={node.i0:,}"
     if status is not None:
         label += f" [{status}]"
+        if node.start_time is not None:
+            label += f" {fmt_duration(now - node.start_time)}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):
@@ -512,7 +520,7 @@ def render_tree(node, lines, prefix="", is_last=True, is_root=True):
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
-        render_tree(child, lines, child_prefix, i == len(node.children) - 1, is_root=False)
+        render_tree(child, lines, now, child_prefix, i == len(node.children) - 1, is_root=False)
 
 
 def render_status_screen(state):
@@ -586,14 +594,7 @@ def render(state):
 
     n_workers = state.n_process or state.active_max
     crashed_note = f"  ({state.crashed_total} crashed total)" if state.crashed_total else ""
-    lines.append(f"active workers ({len(state.active)}/{n_workers or '?'}){crashed_note}:")
-    lines.append(f"  {'pid':>7}  {'elapsed':>8}  {'depth':>5}  {'i0':>14}")
-    for pid, w in sorted(state.active.items()):  # ordered by task id (pid)
-        depth = w["depth"] if w["depth"] is not None else "-"
-        i0 = f"{w['i0']:,}" if w["i0"] is not None else "-"
-        lines.append(f"  {pid:>7}  {fmt_duration(now - w['start']):>8}  {depth:>5}  {i0:>14}")
-    if not state.active:
-        lines.append("  (none)")
+    lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{crashed_note}")
 
     if state.crashed:
         lines.append("")
@@ -606,7 +607,7 @@ def render(state):
     lines.append("")
     if state.tree_root is not None:
         lines.append("tree (finished/pending subtrees collapsed):")
-        render_tree(state.tree_root, lines)
+        render_tree(state.tree_root, lines, now)
     elif state.tree_skipped_reason:
         lines.append(f"tree: {state.tree_skipped_reason}")
 

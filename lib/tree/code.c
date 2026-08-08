@@ -88,14 +88,14 @@ static node_p node_big_create(
     uint64_t remainder,
     uint64_t depth
 ) {
-    node_p n = malloc(sizeof(node_t));
-    assert(n);
-
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
         return node_span_create(parent, size, i_0, span, depth);
     }
+
+    node_p n = malloc(sizeof(node_t));
+    assert(n);
 
     *n = (node_t){
         .parent = parent,
