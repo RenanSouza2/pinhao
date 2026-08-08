@@ -59,3 +59,7 @@ cache*/*
 runner
 
 **/out*.txt
+
+# Python
+__pycache__/
+*.pyc

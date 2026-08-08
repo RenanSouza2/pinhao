@@ -107,7 +107,7 @@ void split_piece(uint64_t i_0, uint64_t span)
     TIME_SETUP
     split_sig(res, i_0, span);
     TIME_END(t1)
-    tprintf("piece | " U64P() " " U64P() " \t\t%.1f", i_0, span, dtime(t1));
+    tprintf("%-16s| " U64P(10) " " U64P(10) " | %7.1f", "piece", i_0, span, dtime(t1));
     sig_res_save(res, i_0, span);
 }
 
@@ -378,7 +378,7 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
 static void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     assert(span >= PIECE_SIZE);
-    tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
+    tprintf("%-16s| " U64P(10) " " U64P(10) " " U64P(3) "", "begin", i_0, span, depth);
 
     if(split_span_res_is_stored(size, i_0, span, depth))
     {
@@ -394,11 +394,11 @@ static void split_span(uint64_t size, uint64_t i_0, uint64_t span, uint64_t dept
     split_span(size, i_0              , span - 1, depth + 1);
     split_span(size, i_0 + B(span - 1), span - 1, depth + 1);
 
-    tprintf("joining | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
+    tprintf("%-16s| " U64P(10) " " U64P(10) " " U64P(3) "", "joining", i_0, span, depth);
     TIME_SETUP
     split_span_res_join(size, i_0, span, depth);
     TIME_END(t1)
-    tprintf("joined | " U64P() " " U64P() " " U64P() " \t\t%.1f", i_0, span, depth, dtime(t1));
+    tprintf("%-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", "joined", i_0, span, depth, dtime(t1));
 }
 
 
@@ -476,7 +476,7 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
 // out vector length 3, returns P, Q, R in that order
 static void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
-    tprintf("begin | " U64P() " " U64P() " " U64P() "", i_0, remainder, depth);
+    tprintf("%-16s| " U64P(10) " " U64P(10) " " U64P(3) "", "begin", i_0, remainder, depth);
 
     if(split_big_res_is_stored(size, i_0, remainder, depth))
     {
@@ -493,11 +493,11 @@ static void split_big(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t 
     split_span(size, i_0, span, depth + 1);
     split_big(size, i_0 + B(span), remainder - B(span), depth + 1);
 
-    tprintf("joining | " U64P() " " U64P() " " U64P() "", i_0, span, depth);
+    tprintf("%-16s| " U64P(10) " " U64P(10) " " U64P(3) "", "joining", i_0, span, depth);
     TIME_SETUP
     split_big_res_join(size, i_0, remainder, depth);
     TIME_END(t1)
-    tprintf("joined | " U64P() " " U64P() " " U64P() " \t\t%.1f", i_0, span, depth, dtime(t1));
+    tprintf("%-16s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", "joined", i_0, span, depth, dtime(t1));
 }
 
 
@@ -561,11 +561,11 @@ flt_num_t pi_finish(uint64_t size, uint64_t piece_size)
     flt_num_t flt_pi = flt_r;
     flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(3));
 
-    tprintf("dividing");
+    tprintf("%-16s|", "dividing");
     TIME_SETUP
     flt_pi = flt_num_div(flt_pi, flt_q);
     TIME_END(t1)
-    tprintf("divided \t\t%.1f", dtime(t1));
+    tprintf("%-16s| %7.1f", "divided", dtime(t1));
 
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     pi_save(size, flt_pi);
@@ -577,13 +577,13 @@ flt_num_t pi_big(uint64_t size)
 {
     if(pi_is_stored(size))
     {
-        tprintf("pi already stored");
+        tprintf("%-16s|", "pi already stored");
         return pi_load(size);
     }
 
     uint64_t index_max = get_index_max(size, PIECE_SIZE);
     split_big(size, 1, index_max, 0);
-    tprintf("binary split solved");
+    tprintf("%-16s|", "binary split solved");
 
     return pi_finish(size, PIECE_SIZE);
 }
