@@ -5,13 +5,16 @@ Tails thread_log/run.log (written by run.sh / run_debug.sh) and renders
 progress: leaf pieces done/total, an active-worker count, and a live tree
 view with per-node elapsed time.
 
-The expected total piece count comes from index_max, which pi_tree() logs
-once, first thing, as a "run size" line (see lib/tree/code.c) - not from
-src/main.c's source. Source is the wrong place to look: the `size` literal
-there is whatever will be compiled into the *next* build, not necessarily
-what a currently-running binary was actually built with, and a dashboard
-left attached across an edit+rerun would silently show stats for the old
-size forever. The log line is this run's own ground truth, always.
+The expected total piece count comes from index_max, and the tree shape
+comes from TREE_PIECE_SIZE - both logged by pi_tree(), first thing, as
+"piece size" and "run size" lines (see lib/tree/code.c), not read from
+source. Source is the wrong place to look: TREE_PIECE_SIZE is a build-time
+#define a Python process has no access to at all, and size (used to derive
+index_max) is whatever will be compiled into the *next* build, not
+necessarily what a currently-running binary was actually built with - a
+dashboard left attached across an edit+rerun would otherwise silently show
+stats for the old build forever. The log lines are this run's own ground
+truth, always.
 
 Worker count is never read from source either (n_process isn't always a
 literal - it can be computed per-platform, for instance). It comes from
@@ -32,11 +35,21 @@ import subprocess
 import sys
 import time
 
-TREE_PIECE_SIZE = 22
-PIECES_PER_LEAF = 1 << TREE_PIECE_SIZE
-
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
+
+# Set once the log's own "piece size" line arrives (see apply_piece_size /
+# RE_PIECE_SIZE below) - None until then. A build-time #define, so this is
+# the only place a Python process can ever learn it; there is no sane
+# default to fall back on.
+TREE_PIECE_SIZE = None
+PIECES_PER_LEAF = None
+
+
+def apply_piece_size(piece_size):
+    global TREE_PIECE_SIZE, PIECES_PER_LEAF
+    TREE_PIECE_SIZE = piece_size
+    PIECES_PER_LEAF = 1 << piece_size
 
 # node_process/task_start/task_end/split_piece all log "[idx][pid]" - idx is
 # the scheduler's reused array slot (see lib/tree/code.c), pid is this task's
@@ -56,12 +69,17 @@ RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
-# pi_tree()'s one-time "run size" line - see the module docstring for why
-# this, and not src/main.c, is where index_max comes from.
+# pi_tree()'s one-time "piece size" and "run size" lines - see the module
+# docstring for why these, and not source, are where TREE_PIECE_SIZE and
+# index_max come from. "piece size" is always logged first (see the ordering
+# comment in lib/tree/code.c), so by the time "run size" is seen,
+# TREE_PIECE_SIZE is already known.
+RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
 
 
-def get_index_max(size, piece_size=TREE_PIECE_SIZE):
+def get_index_max(size, piece_size=None):
+    piece_size = TREE_PIECE_SIZE if piece_size is None else piece_size
     index_max = (32 * size) + 4
     aux = index_max & ((1 << piece_size) - 1)
     if aux == 0:
@@ -343,11 +361,15 @@ def fmt_bytes(n):
 
 
 class State:
-    def __init__(self, total_pieces=None, n_process=None):
+    def __init__(self, total_pieces=None, n_process=None, explicit_size=None):
         self.start_time = None
         self.last_line_time = None
         self.total_pieces = total_pieces
         self.n_process = n_process
+        # --size, if given - kept around so handle_phase can resolve it into
+        # index_max the moment TREE_PIECE_SIZE becomes known (the "piece
+        # size" log line), rather than only at State construction time.
+        self.explicit_size = explicit_size
         self.pieces_done = 0
         self.pieces_from_cache = 0
         # a tree that reduces N leaves down to one root result always does
@@ -520,6 +542,19 @@ def handle_scheduler(state, content):
 
 
 def handle_phase(state, content):
+    m = RE_PIECE_SIZE.match(content)
+    if m:
+        # unconditional, unlike run size below: a fresh piece size line
+        # arrives on every run (RESTARTED gets a new State but this is a
+        # module global), and always reflects the binary that's actually
+        # running now.
+        apply_piece_size(int(m.group("piece_size")))
+        if state.total_pieces is None and state.explicit_size is not None:
+            # --size was given but couldn't be resolved into index_max up
+            # front (piece_size wasn't known yet) - do it now, first chance.
+            apply_index_max(state, get_index_max(state.explicit_size))
+        return
+
     m = RE_RUN_SIZE.match(content)
     if m:
         if state.total_pieces is None:  # else --size already set it explicitly; log agrees, nothing to do
@@ -880,11 +915,13 @@ def render(state):
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
             lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
-        # normally just a brief startup gap - the log's own "run size" line
-        # is the first thing pi_tree() logs, so this fills in within the
-        # first render tick. Stays stuck on "?" for a log from a binary
-        # built before that line existed, hence the --size escape hatch.
-        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"run size\" line, or pass --size){cache_note}")
+        # normally just a brief startup gap - the log's own "piece size"/
+        # "run size" lines are the first things pi_tree() logs, so this
+        # fills in within the first render tick. Stays stuck on "?" for a
+        # log from a binary built before those lines existed - --size can't
+        # rescue that case either, since it still needs TREE_PIECE_SIZE from
+        # the log to resolve into index_max.
+        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
     lines.append("")
 
     n_workers = state.n_process or state.active_max
@@ -983,22 +1020,23 @@ def draw(state):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
-    parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces up front instead of waiting for the log's own \"run size\" line")
+    parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
     parser.add_argument("--n-process", type=int, default=None, help="pi() n_process argument")
     args = parser.parse_args()
 
     n_process = args.n_process
 
     def make_state():
-        # No total_pieces/tree yet unless --size was given explicitly - both
-        # get filled in the moment the log's own "run size" line arrives
-        # (handle_phase -> apply_index_max), which happens on every
-        # RESTARTED (run.sh wipes thread_log/ for each new run) since it's
-        # the very first line pi_tree() logs.
-        state = State(n_process=n_process)
-        if args.size is not None:
-            apply_index_max(state, get_index_max(args.size))
-        return state
+        # No total_pieces/tree yet - filled in the moment the log's own
+        # "piece size"/"run size" lines arrive (handle_phase ->
+        # apply_index_max), which happens on every RESTARTED (run.sh wipes
+        # thread_log/ for each new run) since they're the first lines
+        # pi_tree() logs. --size (state.explicit_size) lets that happen as
+        # soon as piece size is known, without waiting on run size too - but
+        # still can't resolve to index_max any earlier than that, since
+        # TREE_PIECE_SIZE is a build-time #define with no source we can read
+        # it from (see module docstring).
+        return State(n_process=n_process, explicit_size=args.size)
 
     state = make_state()
     done_announced = False

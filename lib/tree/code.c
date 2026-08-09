@@ -12,7 +12,7 @@
 #ifdef DEBUG
 #endif
 
-#define TREE_PIECE_SIZE 22
+#define TREE_PIECE_SIZE 20
 
 #define NODE_BIG 0
 #define NODE_SPAN 1
@@ -407,11 +407,14 @@ static void scheduler(uint64_t size, uint64_t n_process)
 flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 {
     // logged once, first thing, regardless of whether this run ends up
-    // fully cached - a log consumer (e.g. dashboard.py) needs index_max up
-    // front to size a progress bar/tree, and can't otherwise get it: every
-    // other node_process line is already several tree levels deep by the
-    // time it's logged, and size/n_process aren't reliably readable from
-    // source (this call's own arguments can be computed, not literals).
+    // fully cached - a log consumer (e.g. dashboard.py) needs index_max and
+    // TREE_PIECE_SIZE up front to size a progress bar/tree, and can't
+    // otherwise get either: every other node_process line is already
+    // several tree levels deep by the time it's logged, size/n_process
+    // aren't reliably readable from source (this call's own arguments can
+    // be computed, not literals), and TREE_PIECE_SIZE is a build-time
+    // #define a log consumer has no access to at all.
+    tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
 
     if(pi_is_stored(size))
