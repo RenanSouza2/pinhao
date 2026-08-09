@@ -257,6 +257,99 @@ def pi_process_running():
         return False  # no pgrep available - fail closed rather than false-claim "running"
 
 
+_SYSCTL_INT_CACHE = {}
+
+
+def _sysctl_int(name):
+    """sysctl -n <name>, cached: hw.memsize doesn't change during a run."""
+    if name in _SYSCTL_INT_CACHE:
+        return _SYSCTL_INT_CACHE[name]
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
+        val = int(out.stdout.strip()) if out.returncode == 0 else None
+    except (OSError, ValueError):
+        val = None
+    _SYSCTL_INT_CACHE[name] = val
+    return val
+
+
+_VM_STAT_PAGE_SIZE_RE = re.compile(r"page size of (\d+) bytes")
+_VM_STAT_FIELD_RE = re.compile(r"^(?P<name>[^:]+):\s*(?P<val>\d+)\.?\s*$")
+
+
+def get_system_ram():
+    """(used_bytes, total_bytes) from macOS vm_stat/sysctl, or (None, total)
+    /(None, None) if a piece is unavailable (e.g. not on macOS).
+
+    "used" mirrors Activity Monitor's "Memory Used" - wired + active +
+    compressed pages - rather than total-free. That distinction matters here
+    because araucaria's big numbers, once past disk_threshold, live in a
+    MAP_SHARED mmap backed by an unlinked temp file (see num_create_disk in
+    mods/araucaria/lib/num/code.c) rather than the anonymous heap; their
+    clean, file-backed pages show up as reclaimable rather than
+    wired/active/compressed, so counting them as "used" would overstate real
+    memory pressure from this run.
+    """
+    total = _sysctl_int("hw.memsize")
+    try:
+        out = subprocess.run(["vm_stat"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return None, total
+    if out.returncode != 0:
+        return None, total
+
+    text = out.stdout
+    m = _VM_STAT_PAGE_SIZE_RE.search(text)
+    page_size = int(m.group(1)) if m else 4096
+
+    fields = {}
+    for line in text.splitlines():
+        m = _VM_STAT_FIELD_RE.match(line)
+        if m:
+            fields[m.group("name").strip()] = int(m.group("val"))
+
+    wanted = ("Pages wired down", "Pages active", "Pages occupied by compressor")
+    if not all(k in fields for k in wanted):
+        return None, total
+    return sum(fields[k] for k in wanted) * page_size, total
+
+
+def get_worker_rss(pids):
+    """Total resident memory (bytes) across the given pids, via `ps` - not
+    virtual size. araucaria's disk-backed big numbers (see get_system_ram
+    above) mean a worker's VSZ can dwarf what's actually resident, and its
+    RSS can legitimately shrink as the OS pages parts of a big number back
+    out to its backing file under memory pressure - that's the disk-backed
+    path working as designed, not a leak. Returns None if `ps` itself is
+    unavailable, 0 if there are simply no pids to sum."""
+    pids = list(pids)
+    if not pids:
+        return 0
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", ",".join(str(p) for p in pids)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    total_kb = sum(int(line) for line in out.stdout.split())
+    return total_kb * 1024
+
+
+def fmt_bytes(n):
+    if n is None:
+        return "?"
+    n = float(n)
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024 or unit == "G":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
 class State:
     def __init__(self, total_pieces=None, n_process=None):
         self.start_time = None
@@ -274,6 +367,22 @@ class State:
         self.joins_from_cache = 0
         self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
         self.join_events = collections.deque(maxlen=2000)  # (time, dur), node_process's "joined" completions
+        # Same (time, dur) pairs, bucketed by the node's depth: a join's cost
+        # scales with the size of what it's combining, which (loosely) tracks
+        # depth - shallow joins near the root combine much bigger numbers
+        # than deep ones - so a single flat average blurs that out. Piece
+        # durations shouldn't vary by depth (every piece is the same size),
+        # but they're bucketed too for a uniform depth_avg() lookup.
+        self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
+        self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
+        # (time, pieces_done + joins_done) once per render tick - the
+        # measured, empirical throughput behind measured_eta's global eta,
+        # as opposed to the modeled per-task durations above (still used for
+        # each tree node's own eta in render_tree). maxlen gives a margin
+        # over MEASURED_ETA_WINDOW_SECONDS worth of ~1/s render ticks, so the
+        # oldest sample still within the window is never right at the
+        # deque's own eviction boundary.
+        self.progress_samples = collections.deque(maxlen=400)
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -319,14 +428,6 @@ def handle_node_process(state, content):
         entry = state.active.setdefault(pid, {"start": time.time()})
         entry["depth"] = depth
         entry["i0"] = i0
-        # remainder is always a multiple of PIECES_PER_LEAF (see
-        # SPAN_VS_REMAINDER_CUTOFF above), so it can never equal
-        # TREE_PIECE_SIZE itself - only a SPAN leaf's span does. Tags this
-        # task with which average duration (piece vs join) applies to it,
-        # for estimate_global_eta's per-worker local eta - independent of
-        # the tree view, so it works even when the tree is too big to
-        # materialize.
-        entry["kind"] = "piece" if int(m.group("n2")) == TREE_PIECE_SIZE else "join"
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
@@ -352,7 +453,9 @@ def handle_node_process(state, content):
         state.joins_done += 1
         dur = m.group("dur")
         if dur is not None:
-            state.join_events.append((time.time(), float(dur)))
+            dur = float(dur)
+            state.join_events.append((time.time(), dur))
+            state.join_events_by_depth[depth].append((time.time(), dur))
         if tree_node is not None:
             mark_node_done(tree_node)
 
@@ -365,13 +468,17 @@ def handle_piece(state, content):
     state.pieces_done += 1
     state.piece_events.append((time.time(), dur))
 
+    # split_piece's own log line has no depth field (only i0/span) - the
+    # "begin" line the same pid logged moments earlier does, so pull it from
+    # there. This (and the by-depth bucketing) works even without a
+    # materialized tree, since it only needs this pid's own depth.
+    entry = state.active.get(int(m.group("pid")))
+    depth = entry["depth"] if entry else None
+    if depth is not None:
+        state.piece_events_by_depth[depth].append((time.time(), dur))
+
     if state.tree_by_key:
-        # split_piece's own log line has no depth field (only i0/span) -
-        # the "begin" line the same pid logged moments earlier does, so
-        # pull it from there.
         i0 = int(m.group("i0"))
-        entry = state.active.get(int(m.group("pid")))
-        depth = entry["depth"] if entry else None
         tree_node = state.tree_by_key.get((i0, depth)) if depth is not None else None
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
@@ -508,59 +615,72 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
-def blended_task_duration(remaining_pieces, avg_piece_dur, remaining_joins, avg_join_dur):
-    """Weighted-average duration of a "typical" still-to-do task, weighted by
-    how many of each kind (piece vs join) are actually left - used as the
-    flat per-task cost D in estimate_global_eta's makespan formula, since
-    pieces and joins can have very different average durations."""
-    parts = []
-    if avg_piece_dur is not None and remaining_pieces > 0:
-        parts.append((remaining_pieces, avg_piece_dur))
-    if avg_join_dur is not None and remaining_joins > 0:
-        parts.append((remaining_joins, avg_join_dur))
-    if not parts:
-        return None
-    total_n = sum(n for n, _ in parts)
-    return sum(n * d for n, d in parts) / total_n
+def depth_avg(events_by_depth, depth, fallback):
+    """Average duration among samples taken at this exact depth, or
+    `fallback` (typically the flat all-depths average for that kind) if this
+    depth hasn't been sampled yet - early in a run, or for a lightly
+    traveled depth (e.g. near the root, where only one or two nodes ever
+    exist at that depth), there just aren't enough samples yet to trust."""
+    events = events_by_depth.get(depth) if depth is not None else None
+    if events:
+        durs = [d for _, d in events]
+        if durs:
+            return sum(durs) / len(durs)
+    return fallback
 
 
-def estimate_global_eta(state, now, avg_piece_dur, avg_join_dur, n_workers, remaining_pieces, remaining_joins):
-    """Continuous relaxation of greedy load-balancing makespan: with W
-    workers, Q not-yet-started tasks each costing D, and each currently-busy
-    worker i already partway through its own task (local_eta_i left on it,
-    0 for an idle worker that's free right now), the finish time T satisfies
+# how far back the rolling window in measured_eta looks for a throughput
+# sample to compare against "now" - long enough to smooth over a single
+# scheduling hiccup or a momentary lull, short enough to react within a
+# render or two once the run's actual pace changes.
+MEASURED_ETA_WINDOW_SECONDS = 300.0
 
-        T * W == Q * D + sum(local_eta_i)
+# minimum span the rolling window needs before its rate is trusted, so a
+# couple of noisy samples right after attach (e.g. the tail() catch-up
+# burst - see feed loop below) can't produce a wild estimate; below this,
+# render() shows "?" instead.
+MEASURED_ETA_MIN_SPAN_SECONDS = 5.0
 
-    i.e. total worker-seconds spent is Q*D for fresh tasks plus whatever's
-    left on tasks already in flight, spread evenly over W workers. Unlike
-    assuming every worker starts a fresh average-duration task this instant,
-    this uses each busy worker's real remaining time - so the estimate
-    tightens right after a burst of workers start, and right before they
-    finish - and it degrades gracefully: with no active workers it reduces
-    to the simple remaining/(workers/D) rate.
+
+def measured_eta(state, remaining_units):
+    """Global eta from the run's own observed throughput - how much
+    done_units grew over the trailing window, extrapolated forward - rather
+    than modeling individual task durations, tree structure, and worker
+    count. This naturally reflects however many workers are *actually* busy
+    right now, including a tapering-off tail with fewer ready tasks than
+    workers, which dividing remaining work by the full configured worker
+    count would miss. The cost is a short warm-up (MEASURED_ETA_MIN_SPAN_SECONDS)
+    before there's enough history to trust, and no foresight into an
+    upcoming run of unusually expensive tasks (e.g. a burst of big joins
+    near the root) the way a per-task duration model could offer.
+
+    state.progress_samples is a chronological (time, done_units) deque,
+    appended once per render tick by the main loop - not here, so this stays
+    a pure read of already-collected history.
     """
-    D = blended_task_duration(remaining_pieces, avg_piece_dur, remaining_joins, avg_join_dur)
-    if not D or not n_workers:
+    if remaining_units <= 0:
+        return 0.0
+    if len(state.progress_samples) < 2:
         return None
 
-    busy_local_etas = []
-    for entry in state.active.values():
-        start = entry.get("start")
-        if start is None:
-            continue
-        kind = entry.get("kind")
-        avg = avg_piece_dur if kind == "piece" else (avg_join_dur if kind == "join" else None)
-        if avg is None:
-            avg = D  # kind not yet known (task_start seen, "begin" hasn't arrived) - D is the best guess available
-        busy_local_etas.append(max(avg - (now - start), 0.0))
+    now, done_now = state.progress_samples[-1]
+    cutoff = now - MEASURED_ETA_WINDOW_SECONDS
+    window_start_time, window_start_units = state.progress_samples[0]
+    for t, units in state.progress_samples:
+        if t >= cutoff:
+            window_start_time, window_start_units = t, units
+            break
 
-    remaining_tasks = remaining_pieces + remaining_joins
-    queued = max(remaining_tasks - len(busy_local_etas), 0)
-    return (queued * D + sum(busy_local_etas)) / n_workers
+    elapsed = now - window_start_time
+    progressed = done_now - window_start_units
+    if elapsed < MEASURED_ETA_MIN_SPAN_SECONDS or progressed <= 0:
+        return None
+
+    rate = progressed / elapsed
+    return remaining_units / rate
 
 
-def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, prefix="", is_last=True, is_root=True):
+def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
@@ -586,11 +706,14 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, prefix="", is_las
             if node.in_progress:
                 # A leaf (leaves_total == 1) is a single split_piece call, so
                 # piece durations are the right yardstick; anything else at
-                # this exact node is a "joining" combine step (join durations
-                # vary a lot with subtree size, so this per-node number is a
-                # rougher guess than the piece one, but still better than
-                # nothing).
-                avg = avg_piece_dur if node.leaves_total == 1 else avg_join_dur
+                # this exact node is a "joining" combine step. depth_avg
+                # prefers samples from this exact depth (join cost scales
+                # with what's being combined, which tracks depth) over the
+                # flat all-depths average.
+                is_leaf = node.leaves_total == 1
+                events_by_depth = piece_events_by_depth if is_leaf else join_events_by_depth
+                fallback = avg_piece_dur if is_leaf else avg_join_dur
+                avg = depth_avg(events_by_depth, node.depth, fallback)
                 if avg is not None:
                     remaining = avg - node_elapsed
                     eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
@@ -604,6 +727,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, prefix="", is_las
     for i, child in enumerate(node.children):
         render_tree(
             child, lines, now, avg_piece_dur, avg_join_dur,
+            piece_events_by_depth, join_events_by_depth,
             child_prefix, i == len(node.children) - 1, is_root=False,
         )
 
@@ -683,20 +807,17 @@ def render(state):
         lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         lines.append(f"         [{bar}]")
         if not state.done:
-            # Deliberately NOT based on done_units/elapsed-since-attach: tail()
-            # opens the log from byte 0 with no seek-to-end, so attaching to a
+            # Measured from the run's own observed throughput (see
+            # measured_eta) rather than modeled from per-task durations and
+            # worker count - deliberately NOT based on
+            # done_units/elapsed-since-attach directly, since tail() opens
+            # the log from byte 0 with no seek-to-end: attaching to a
             # process already mid-run bursts through its whole backlog in a
-            # near-instant tight loop before catching up to live. elapsed would
-            # read ~0 for all the progress in that backlog, spiking the rate.
-            # avg_piece_dur/avg_join_dur are immune to that (see above); see
-            # estimate_global_eta for how they, plus each busy worker's own
-            # local eta, combine into the estimate below.
-            eta = estimate_global_eta(
-                state, now, avg_piece_dur, avg_join_dur,
-                state.n_process or state.active_max,
-                remaining_pieces=state.total_pieces - state.pieces_done,
-                remaining_joins=total_joins - state.joins_done,
-            )
+            # near-instant tight loop before catching up to live, which
+            # would spike a naive rate. progress_samples only gets appended
+            # once per live render tick (see main()), so that burst is at
+            # worst one outlier sample, not the whole basis for the rate.
+            eta = measured_eta(state, total_units - done_units)
             if eta is not None:
                 lines.append(f"         eta: {fmt_duration(eta)} remaining")
             else:
@@ -709,6 +830,16 @@ def render(state):
     crashed_note = f"  ({state.crashed_total} crashed total)" if state.crashed_total else ""
     lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{crashed_note}")
 
+    ram_used, ram_total = get_system_ram()
+    if ram_total is not None:
+        ram_line = f"ram: {fmt_bytes(ram_used)} used / {fmt_bytes(ram_total)} total"
+        if ram_used is not None:
+            ram_line += f" ({100.0 * ram_used / ram_total:4.1f}%)"
+        worker_rss = get_worker_rss(state.active.keys())
+        if worker_rss:
+            ram_line += f"   workers: {fmt_bytes(worker_rss)}"
+        lines.append(ram_line)
+
     if state.crashed:
         lines.append("")
         lines.append("crashed workers (pid, depth, i0, ran for):")
@@ -720,7 +851,10 @@ def render(state):
     lines.append("")
     if state.tree_root is not None:
         lines.append("tree (finished/pending subtrees collapsed):")
-        render_tree(state.tree_root, lines, now, avg_piece_dur, avg_join_dur)
+        render_tree(
+            state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
+            state.piece_events_by_depth, state.join_events_by_depth,
+        )
     elif state.tree_skipped_reason:
         lines.append(f"tree: {state.tree_skipped_reason}")
 
@@ -842,6 +976,11 @@ def main():
                     if state.process_running:
                         state.ever_saw_process = True
                     sweep_dead(state)
+                # once per live tick, not once per log line - see
+                # measured_eta, which needs wall-clock-spaced samples, not
+                # log-density-spaced ones (a tail() backlog burst would
+                # otherwise cram thousands of samples into a few ms).
+                state.progress_samples.append((now, state.pieces_done + state.joins_done))
                 draw(state)
                 last_render = now
 
