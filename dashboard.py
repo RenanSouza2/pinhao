@@ -1,27 +1,6 @@
 #!/usr/bin/env python3
 """Live terminal dashboard for a pi_tree run.
 
-Tails thread_log/run.log (written by run.sh / run_debug.sh) and renders
-progress: leaf pieces done/total, an active-worker count, and a live tree
-view with per-node elapsed time.
-
-The expected total piece count comes from index_max, and the tree shape
-comes from TREE_PIECE_SIZE - both logged by pi_tree(), first thing, as
-"piece size" and "run size" lines (see lib/tree/code.c), not read from
-source. Source is the wrong place to look: TREE_PIECE_SIZE is a build-time
-#define a Python process has no access to at all, and size (used to derive
-index_max) is whatever will be compiled into the *next* build, not
-necessarily what a currently-running binary was actually built with - a
-dashboard left attached across an edit+rerun would otherwise silently show
-stats for the old build forever. The log lines are this run's own ground
-truth, always.
-
-Worker count is never read from source either (n_process isn't always a
-literal - it can be computed per-platform, for instance). It comes from
---n-process if given, otherwise it's inferred live from the log's "active
-processes" line, which converges to the true value within the first
-scheduling cycle.
-
 Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 """
 
@@ -38,10 +17,6 @@ import time
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
 
-# Set once the log's own "piece size" line arrives (see apply_piece_size /
-# RE_PIECE_SIZE below) - None until then. A build-time #define, so this is
-# the only place a Python process can ever learn it; there is no sane
-# default to fall back on.
 TREE_PIECE_SIZE = None
 PIECES_PER_LEAF = None
 
@@ -51,9 +26,6 @@ def apply_piece_size(piece_size):
     TREE_PIECE_SIZE = piece_size
     PIECES_PER_LEAF = 1 << piece_size
 
-# node_process/task_start/task_end/split_piece all log "[idx][pid]" - idx is
-# the scheduler's reused array slot (see lib/tree/code.c), pid is this task's
-# stable identity for its whole lifetime. We key everything off pid.
 _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]"
 
 RE_NODE_PROCESS = re.compile(
@@ -69,11 +41,6 @@ RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
-# pi_tree()'s one-time "piece size" and "run size" lines - see the module
-# docstring for why these, and not source, are where TREE_PIECE_SIZE and
-# index_max come from. "piece size" is always logged first (see the ordering
-# comment in lib/tree/code.c), so by the time "run size" is seen,
-# TREE_PIECE_SIZE is already known.
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
 
@@ -87,30 +54,15 @@ def get_index_max(size, piece_size=None):
     return index_max + (1 << piece_size) - aux
 
 
-# A BIG node's "remainder" and a SPAN node's "span" share the same log field
-# (n2) with no tag saying which. But remainder is always a multiple of
-# PIECES_PER_LEAF (>> 64), while span is a bit-width (<= 64) - the piece-size
-# alignment invariant in get_index_max() makes that gap absolute, at any
-# depth, so the magnitude alone tells them apart.
 SPAN_VS_REMAINDER_CUTOFF = 64
 
 
 def leaves_covered(n2):
-    """How many leaf pieces an "already stored"/"begin" node_process line
-    for this n2 value represents - used to credit pieces that were already
-    on disk from an earlier run, which never individually log split_piece's
-    "piece" line and would otherwise be invisible to the progress count."""
     if n2 > SPAN_VS_REMAINDER_CUTOFF:
         return n2 // PIECES_PER_LEAF
     return 1 << (n2 - TREE_PIECE_SIZE)
 
 
-# The log only ever tells us which nodes were *touched*, never the tree's
-# shape - but the shape is fully deterministic from index_max alone (same
-# recursion as node_big_create/node_span_create/node_expand in
-# lib/tree/code.c), so we replicate it here once and overlay live status
-# from the log onto it by key, rather than trying to infer structure from
-# the log's begin/joining/joined lines.
 TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 
 
@@ -127,30 +79,10 @@ class TreeNode:
         self.n2 = n2  # remainder (BIG) or span (SPAN)
         self.leaves_total = (n2 // PIECES_PER_LEAF) if kind == "BIG" else (1 << (n2 - TREE_PIECE_SIZE))
         self.leaves_done = 0
-        # leaves_done reaching leaves_total only means every *leaf*
-        # underneath is computed - the "joining" steps that actually
-        # combine them into THIS node's own result run afterward, and can
-        # take a while. own_done is set only by this exact node's own
-        # completion event (piece/already-stored/joined) and is the real
-        # "collapse this subtree" signal for the tree view.
         self.own_done = False
         self.in_progress = False
-        # the scheduler's array slot ([idx] in the log) currently working
-        # this node - only meaningful while in_progress; set at "begin",
-        # cleared once this node's own completion event fires.
         self.task_idx = None
-        # wall-clock time.time() this node's own task started, for the
-        # elapsed time shown next to it in the tree view; same lifetime as
-        # task_idx.
         self.start_time = None
-        # count of currently-running tasks anywhere in this node's subtree
-        # (itself included). get_next_node descends silently to find a
-        # ready node before logging anything, so an ancestor sits at
-        # "pending" - no begin/joined line of its own - for the node's
-        # entire lifetime; without this, the tree view has no way to tell
-        # "pending, nothing happening below" apart from "pending, but N
-        # tasks are actively working several levels down" and collapses
-        # both the same way.
         self.active_count = 0
         self.parent = parent
         self.children = []
@@ -183,8 +115,6 @@ def _build_big(i0, remainder, depth, parent, by_key):
 
 
 def build_tree(index_max):
-    """Returns (root, by_key) where by_key maps (i0, depth) -> TreeNode, or
-    (None, None) if the tree is too large to materialize/render sanely."""
     total_pieces = index_max // PIECES_PER_LEAF
     if 2 * total_pieces - 1 > TREE_NODE_CAP:
         return None, None
@@ -194,9 +124,6 @@ def build_tree(index_max):
 
 
 def apply_index_max(state, index_max):
-    """(Re)derive total_pieces and the tree shape from index_max - the run's
-    own ground truth, sourced either from --size or, once it arrives, the
-    log's own "run size" line (see RE_RUN_SIZE / the module docstring)."""
     state.total_pieces = index_max // PIECES_PER_LEAF
     state.tree_root, state.tree_by_key = build_tree(index_max)
     if state.tree_root is None:
@@ -206,10 +133,6 @@ def apply_index_max(state, index_max):
 
 
 def mark_leaves_done(node, leaves):
-    """Credit a completed leaf count up through every ancestor, purely for
-    the "X/Y leaves done" partial-progress number - this alone does NOT
-    mean an ancestor's own combine step has run, so it must never by
-    itself cause a node to collapse as done in the tree view."""
     n = node
     while n is not None:
         n.leaves_done = min(n.leaves_done + leaves, n.leaves_total)
@@ -217,9 +140,6 @@ def mark_leaves_done(node, leaves):
 
 
 def mark_active(node, delta):
-    """Propagate a task starting (+1) or finishing (-1) up through every
-    ancestor's active_count, so an ancestor that hasn't logged anything of
-    its own yet still knows work is happening in its subtree."""
     n = node
     while n is not None:
         n.active_count += delta
@@ -227,9 +147,6 @@ def mark_active(node, delta):
 
 
 def mark_node_done(node):
-    """This exact node's own result just completed (piece / already stored
-    / joined) - only this node collapses; ancestors still need their own
-    completion event before they do too."""
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
@@ -238,24 +155,16 @@ def mark_node_done(node):
 
 
 def pid_alive(pid):
-    """Best-effort OS-level liveness check, since the log alone can't tell
-    us a task's process was killed mid-flight - it would just go silent."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except OSError:
-        # e.g. PermissionError: process exists, we just can't signal it
         return True
     return True
 
 
 def pi_process_running():
-    """True if a pi_tree binary (src/main.o or src/debug.o) is currently
-    running. thread_log/run.log from a finished run looks byte-for-byte
-    identical whether it's from a live run that just wrapped up or a stale
-    leftover from an earlier one with nothing running right now - only the
-    OS can tell those apart."""
     try:
         result = subprocess.run(
             ["pgrep", "-f", r"src/(main|debug)\.o"],
@@ -264,7 +173,7 @@ def pi_process_running():
         )
         return result.returncode == 0
     except OSError:
-        return False  # no pgrep available - fail closed rather than false-claim "running"
+        return False
 
 
 _SYSCTL_INT_CACHE = {}
@@ -290,18 +199,6 @@ _VM_STAT_FIELD_RE = re.compile(r"^(?P<name>[^:]+):\s*(?P<val>\d+)\.?\s*$")
 
 
 def get_system_ram():
-    """(used_bytes, total_bytes) from macOS vm_stat/sysctl, or (None, total)
-    /(None, None) if a piece is unavailable (e.g. not on macOS).
-
-    "used" mirrors Activity Monitor's "Memory Used" - wired + active +
-    compressed pages - rather than total-free. That distinction matters here
-    because araucaria's big numbers, once past disk_threshold, live in a
-    MAP_SHARED mmap backed by an unlinked temp file (see num_create_disk in
-    mods/araucaria/lib/num/code.c) rather than the anonymous heap; their
-    clean, file-backed pages show up as reclaimable rather than
-    wired/active/compressed, so counting them as "used" would overstate real
-    memory pressure from this run.
-    """
     total = _sysctl_int("hw.memsize")
     try:
         out = subprocess.run(["vm_stat"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -327,13 +224,6 @@ def get_system_ram():
 
 
 def get_worker_rss(pids):
-    """Total resident memory (bytes) across the given pids, via `ps` - not
-    virtual size. araucaria's disk-backed big numbers (see get_system_ram
-    above) mean a worker's VSZ can dwarf what's actually resident, and its
-    RSS can legitimately shrink as the OS pages parts of a big number back
-    out to its backing file under memory pressure - that's the disk-backed
-    path working as designed, not a leak. Returns None if `ps` itself is
-    unavailable, 0 if there are simply no pids to sum."""
     pids = list(pids)
     if not pids:
         return 0
@@ -366,37 +256,15 @@ class State:
         self.last_line_time = None
         self.total_pieces = total_pieces
         self.n_process = n_process
-        # --size, if given - kept around so handle_phase can resolve it into
-        # index_max the moment TREE_PIECE_SIZE becomes known (the "piece
-        # size" log line), rather than only at State construction time.
         self.explicit_size = explicit_size
         self.pieces_done = 0
         self.pieces_from_cache = 0
-        # a tree that reduces N leaves down to one root result always does
-        # exactly N-1 join operations, regardless of its shape (each join
-        # merges two components into one, starting from N components and
-        # ending at 1) - so total joins is derived from total_pieces, no
-        # separate simulation of the BIG/SPAN tree shape needed.
         self.joins_done = 0
         self.joins_from_cache = 0
         self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
-        self.join_events = collections.deque(maxlen=2000)  # (time, dur), node_process's "joined" completions
-        # Same (time, dur) pairs, bucketed by the node's depth: a join's cost
-        # scales with the size of what it's combining, which (loosely) tracks
-        # depth - shallow joins near the root combine much bigger numbers
-        # than deep ones - so a single flat average blurs that out. Piece
-        # durations shouldn't vary by depth (every piece is the same size),
-        # but they're bucketed too for a uniform depth_avg() lookup.
+        self.join_events = collections.deque(maxlen=2000)  # (time, dur)
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
-        # (time, pieces_done + joins_done) once per render tick - the
-        # measured, empirical throughput behind measured_eta's global eta,
-        # as opposed to the modeled per-task durations above (still used for
-        # each tree node's own eta in render_tree). maxlen gives a margin
-        # over MEASURED_ETA_WIDE_WINDOW_SECONDS (the longer of the two
-        # windows render() uses) worth of ~1/s render ticks, so the oldest
-        # sample still within either window is never right at the deque's
-        # own eviction boundary.
         self.progress_samples = collections.deque(maxlen=1100)
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
@@ -424,11 +292,6 @@ class State:
 
 
 def set_phase(state, phase):
-    """Record when the run left "splitting" for a later phase - render()
-    uses this to show elapsed-in-phase instead of a stale eta once the
-    tracked pieces/joins total hits 100% but the process is still running
-    (dividing the binary-split result down, then rendering it to decimal -
-    real work with no piece/join count of its own to track)."""
     if phase != state.phase:
         state.phase = phase
         state.phase_start_time = time.time()
@@ -437,11 +300,6 @@ def set_phase(state, phase):
 def handle_node_process(state, content):
     m = RE_NODE_PROCESS.match(content)
     if not m:
-        # split_piece's "piece" line is logged by tprintf from inside
-        # node_process (case NODE_SPAN, right after calling split_piece()),
-        # so its __func__ - and thus its log func field - is "node_process",
-        # not "split_piece"; RE_NODE_PROCESS doesn't match it because it has
-        # no depth field. Route it to handle_piece instead of dropping it.
         handle_piece(state, content)
         return
     pid = int(m.group("pid"))
@@ -464,19 +322,15 @@ def handle_node_process(state, content):
     elif action == "already stored":
         state.active.pop(pid, None)
         state.suspected_dead.pop(pid, None)
-        # this whole subtree was cached from an earlier (possibly
-        # interrupted) run, so it never produces its own "piece"/"joined"
-        # lines - credit its leaves *and* the joins that combined them, or
-        # the progress count would silently stall on a resumed run.
         covered = leaves_covered(int(m.group("n2")))
         state.pieces_done += covered
         state.pieces_from_cache += covered
-        joins_covered = covered - 1  # a subtree of L leaves has L-1 joins
+        joins_covered = covered - 1
         state.joins_done += joins_covered
         state.joins_from_cache += joins_covered
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
-            mark_node_done(tree_node)  # cached result stands in for this node's own join
+            mark_node_done(tree_node)
     elif action == "joined":
         state.joins_done += 1
         dur = m.group("dur")
@@ -496,10 +350,6 @@ def handle_piece(state, content):
     state.pieces_done += 1
     state.piece_events.append((time.time(), dur))
 
-    # split_piece's own log line has no depth field (only i0/span) - the
-    # "begin" line the same pid logged moments earlier does, so pull it from
-    # there. This (and the by-depth bucketing) works even without a
-    # materialized tree, since it only needs this pid's own depth.
     entry = state.active.get(int(m.group("pid")))
     depth = entry["depth"] if entry else None
     if depth is not None:
@@ -510,7 +360,7 @@ def handle_piece(state, content):
         tree_node = state.tree_by_key.get((i0, depth)) if depth is not None else None
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
-            mark_node_done(tree_node)  # a leaf has no separate join step - computing it is completing it
+            mark_node_done(tree_node)
 
 
 def handle_task_start(state, content):
@@ -544,20 +394,14 @@ def handle_scheduler(state, content):
 def handle_phase(state, content):
     m = RE_PIECE_SIZE.match(content)
     if m:
-        # unconditional, unlike run size below: a fresh piece size line
-        # arrives on every run (RESTARTED gets a new State but this is a
-        # module global), and always reflects the binary that's actually
-        # running now.
         apply_piece_size(int(m.group("piece_size")))
         if state.total_pieces is None and state.explicit_size is not None:
-            # --size was given but couldn't be resolved into index_max up
-            # front (piece_size wasn't known yet) - do it now, first chance.
             apply_index_max(state, get_index_max(state.explicit_size))
         return
 
     m = RE_RUN_SIZE.match(content)
     if m:
-        if state.total_pieces is None:  # else --size already set it explicitly; log agrees, nothing to do
+        if state.total_pieces is None:
             apply_index_max(state, int(m.group("index_max")))
         return
 
@@ -565,15 +409,9 @@ def handle_phase(state, content):
     if not m:
         return
     action = m.group("action").strip()
-    # "divided"/"pi already stored" only mean the binary-splitting result is
-    # ready - pi() still has to run flt_num_display_dec() over it afterward
-    # (logged as "display begin"/"display end" under func "pi", below) before
-    # the process actually exits, so state.done waits for that instead.
     if action in ("dividing", "divided", "pi already stored", "binary split solved"):
         set_phase(state, action)
     if action == "pi already stored":
-        # pi_tree() short-circuits here without ever running the scheduler -
-        # the whole result was already on disk from an earlier run.
         if state.total_pieces:
             state.pieces_from_cache += state.total_pieces - state.pieces_done
             state.pieces_done = state.total_pieces
@@ -604,10 +442,6 @@ DISPATCH = {
 
 def feed_line(state, line):
     line = line.rstrip("\n")
-    # the func/content separator is "\t| ", but some pipe/pty layers between
-    # the C program and this log file expand that tab to spaces, so split on
-    # the first literal "|" instead (func names never contain one) and let
-    # the per-func regexes absorb whatever whitespace remains.
     func, sep, content = line.partition("|")
     if not sep:
         return
@@ -620,21 +454,10 @@ def feed_line(state, line):
     handler(state, content)
 
 
-# A task's process legitimately disappears (gets reaped by the parent's
-# waitpid()) an instant *before* the parent's own "task_end" log line for it
-# is written and flows through the tee pipe to this file - so "not found by
-# pid_alive()" is also exactly what a completely normal finish looks like
-# for a brief moment, not just a crash. Debounce past that window before
-# believing it, or every successful completion would flash as a false
-# "crashed" that then never gets reclaimed once task_end no-ops on it.
 DEAD_GRACE_SECONDS = 3.0
 
 
 def sweep_dead(state):
-    """Move tasks whose process has been gone for longer than the log could
-    plausibly still catch up on into `crashed`, since the log itself never
-    tells us a task was killed - it would otherwise sit in `active` forever
-    looking healthy."""
     now = time.time()
     for pid in list(state.active):
         if pid_alive(pid):
@@ -663,11 +486,6 @@ def fmt_duration(seconds):
 
 
 def depth_avg(events_by_depth, depth, fallback):
-    """Average duration among samples taken at this exact depth, or
-    `fallback` (typically the flat all-depths average for that kind) if this
-    depth hasn't been sampled yet - early in a run, or for a lightly
-    traveled depth (e.g. near the root, where only one or two nodes ever
-    exist at that depth), there just aren't enough samples yet to trust."""
     events = events_by_depth.get(depth) if depth is not None else None
     if events:
         durs = [d for _, d in events]
@@ -676,45 +494,12 @@ def depth_avg(events_by_depth, depth, fallback):
     return fallback
 
 
-# how far back the rolling window in measured_eta looks for a throughput
-# sample to compare against "now" - long enough to smooth over a single
-# scheduling hiccup or a momentary lull, short enough to react within a
-# render or two once the run's actual pace changes.
 MEASURED_ETA_WINDOW_SECONDS = 300.0
-
-# a second, longer window (3x the short one) - render() calls measured_eta
-# with both and shows the spread as a range. Real per-task durations vary a
-# lot even for nominally identical work (see measured_eta's docstring), so a
-# single point estimate implies more precision than the data supports; the
-# gap between a recent-biased and a longer-run-averaged rate is a cheap,
-# honest stand-in for that uncertainty.
 MEASURED_ETA_WIDE_WINDOW_SECONDS = MEASURED_ETA_WINDOW_SECONDS * 3
-
-# minimum span the rolling window needs before its rate is trusted, so a
-# couple of noisy samples right after attach (e.g. the tail() catch-up
-# burst - see feed loop below) can't produce a wild estimate; below this,
-# render() shows "?" instead.
 MEASURED_ETA_MIN_SPAN_SECONDS = 5.0
 
 
 def measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WINDOW_SECONDS):
-    """Global eta from the run's own observed throughput - how much
-    done_units grew over the trailing window, extrapolated forward - rather
-    than modeling individual task durations, tree structure, and worker
-    count. This naturally reflects however many workers are *actually* busy
-    right now, including a tapering-off tail with fewer ready tasks than
-    workers, which dividing remaining work by the full configured worker
-    count would miss. The cost is a short warm-up (MEASURED_ETA_MIN_SPAN_SECONDS)
-    before there's enough history to trust, and no foresight into an
-    upcoming run of unusually expensive tasks (e.g. a burst of big joins
-    near the root) the way a per-task duration model could offer.
-
-    state.progress_samples is a chronological (time, done_units) deque,
-    appended once per render tick by the main loop - not here, so this stays
-    a pure read of already-collected history. render() calls this twice,
-    once per window length, to show a range instead of one point estimate -
-    see MEASURED_ETA_WIDE_WINDOW_SECONDS.
-    """
     if remaining_units <= 0:
         return 0.0
     if len(state.progress_samples) < 2:
@@ -738,14 +523,6 @@ def measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WINDOW_SECO
 
 
 def format_eta_range(state, remaining_units):
-    """The "eta: ..." line's text: measured_eta from both the short and wide
-    windows, shown as a range when they disagree. Real per-task durations
-    vary a lot even for nominally identical work (e.g. resource contention
-    between worker processes), so a single point estimate implies more
-    precision than the underlying data supports - the gap between a
-    recent-biased and a longer-run-averaged rate is a cheap, honest stand-in
-    for that uncertainty, rather than one number that just happens to be
-    wrong by some unstated amount."""
     short = measured_eta(state, remaining_units)
     wide = measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WIDE_WINDOW_SECONDS)
     etas = [e for e in (short, wide) if e is not None]
@@ -765,10 +542,6 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
     elif node.leaves_done > 0:
         mark, state, status = "·", "in_progress", None
     elif node.active_count > 0:
-        # this node itself hasn't been scheduled yet (no begin/joined line
-        # of its own) - a descendant mark (▸ N) already shows what's
-        # actually running, so this one just needs a mark distinct from
-        # "pending" to say "don't collapse me, there's activity below".
         mark, state, status = "○", "in_progress", None
     else:
         mark, state, status = "·", "pending", None
@@ -781,12 +554,6 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
             node_elapsed = now - node.start_time
             label += f" {fmt_duration(node_elapsed)}"
             if node.in_progress:
-                # A leaf (leaves_total == 1) is a single split_piece call, so
-                # piece durations are the right yardstick; anything else at
-                # this exact node is a "joining" combine step. depth_avg
-                # prefers samples from this exact depth (join cost scales
-                # with what's being combined, which tracks depth) over the
-                # flat all-depths average.
                 is_leaf = node.leaves_total == 1
                 events_by_depth = piece_events_by_depth if is_leaf else join_events_by_depth
                 fallback = avg_piece_dur if is_leaf else avg_join_dur
@@ -798,7 +565,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):
-        return  # collapse: a done subtree needs no detail, a pending one has none yet
+        return
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
@@ -810,12 +577,6 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
 
 
 def render_status_screen(state):
-    """A stale thread_log/run.log from a previous run reads identically to
-    a live one that just finished, so `state.done` alone can't be trusted
-    here - trust the OS (state.ever_saw_process/process_running) instead:
-    with no pi_tree process ever actually seen running this session, show
-    what's really going on rather than a full dashboard built from
-    leftover/misleading numbers."""
     lines = []
     lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
     lines.append("")
@@ -831,12 +592,6 @@ def render_status_screen(state):
 
 
 def render(state):
-    # Same race as sweep_dead's DEAD_GRACE_SECONDS, one level up: the OS can
-    # report the whole process gone (pi_process_running's pgrep) an instant
-    # before feed_line() has consumed the "display end" log line that sets
-    # state.done - so "not running yet" is also what a completely normal
-    # finish looks like for a brief moment. Give it the same grace window
-    # before showing the "may have crashed" status screen.
     process_gone_recently = (
         state.process_gone_since is not None
         and time.time() - state.process_gone_since < DEAD_GRACE_SECONDS
@@ -853,11 +608,6 @@ def render(state):
     lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
 
-    # Both durations come from the C program's own per-event timers, not
-    # dashboard wall-clock, so - unlike done_units/elapsed-since-attach -
-    # they're unaffected by tail() bursting through a backlog when attaching
-    # to a process already mid-run (see the overall-eta comment below).
-    # Shared by the stall check, the overall eta, and each tree node's eta.
     piece_durs = [d for _, d in state.piece_events]
     avg_piece_dur = sum(piece_durs) / len(piece_durs) if piece_durs else None
     join_durs = [d for _, d in state.join_events]
@@ -869,8 +619,6 @@ def render(state):
 
     if state.last_line_time is not None and not state.done:
         since_last_line = now - state.last_line_time
-        # a lull up to one full task duration is normal (e.g. only one slow
-        # task left running); only warn once we're well past that.
         stall_threshold = max(60.0, 2 * max(piece_durs)) if piece_durs else 60.0
         if since_last_line > stall_threshold:
             lines.append(
@@ -894,33 +642,11 @@ def render(state):
         lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         lines.append(f"         [{bar}]")
         if not state.done and state.phase == "splitting":
-            # Measured from the run's own observed throughput (see
-            # measured_eta) rather than modeled from per-task durations and
-            # worker count - deliberately NOT based on
-            # done_units/elapsed-since-attach directly, since tail() opens
-            # the log from byte 0 with no seek-to-end: attaching to a
-            # process already mid-run bursts through its whole backlog in a
-            # near-instant tight loop before catching up to live, which
-            # would spike a naive rate. progress_samples only gets appended
-            # once per live render tick (see main()), so that burst is at
-            # worst one outlier sample, not the whole basis for the rate.
             lines.append(f"         eta: {format_eta_range(state, total_units - done_units)}")
         elif not state.done:
-            # pieces/joins only cover pi_tree()'s own work - the result still
-            # has to be divided down and rendered to decimal (dividing/
-            # displaying) before the process actually exits, so 100% here
-            # doesn't mean done. There's no unit count for that part to base
-            # an eta on, so show how long it's taken instead of leaving a
-            # stale "00:00 remaining" up once the tracked total is reached.
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
             lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
-        # normally just a brief startup gap - the log's own "piece size"/
-        # "run size" lines are the first things pi_tree() logs, so this
-        # fills in within the first render tick. Stays stuck on "?" for a
-        # log from a binary built before those lines existed - --size can't
-        # rescue that case either, since it still needs TREE_PIECE_SIZE from
-        # the log to resolve into index_max.
         lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
     lines.append("")
 
@@ -959,13 +685,6 @@ def render(state):
     return "\n".join(lines)
 
 
-# yielded by tail() when the file at `path` got replaced by a new one (a
-# different inode) - run.sh does `rm -rf thread_log/*` at the start of
-# every invocation, so a dashboard already attached from before a run
-# started is holding a handle to what's now a deleted file: reads on it
-# just return EOF forever, never seeing the new run's actual content, while
-# whatever state.done/etc. it parsed from the old file's leftovers (if any)
-# stays stuck. The caller must throw its State away and start fresh.
 RESTARTED = object()
 
 
@@ -1006,10 +725,6 @@ def tail(path):
 
 def draw(state):
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    # pad every row out to the full pane size ourselves rather than relying
-    # on \x1b[2J to fill erased cells with the active background color - not
-    # all terminals honor that ("back color erase"), so unpainted cells
-    # would otherwise show through as the terminal's default background.
     content = [line[:cols].ljust(cols) for line in render(state).split("\n")][:rows]
     content += [" " * cols] * (rows - len(content))
     sys.stdout.write("\x1b[H\x1b[2J")
@@ -1027,36 +742,17 @@ def main():
     n_process = args.n_process
 
     def make_state():
-        # No total_pieces/tree yet - filled in the moment the log's own
-        # "piece size"/"run size" lines arrive (handle_phase ->
-        # apply_index_max), which happens on every RESTARTED (run.sh wipes
-        # thread_log/ for each new run) since they're the first lines
-        # pi_tree() logs. --size (state.explicit_size) lets that happen as
-        # soon as piece size is known, without waiting on run size too - but
-        # still can't resolve to index_max any earlier than that, since
-        # TREE_PIECE_SIZE is a build-time #define with no source we can read
-        # it from (see module docstring).
         return State(n_process=n_process, explicit_size=args.size)
 
     state = make_state()
     done_announced = False
 
-    # draw in the terminal's alternate screen buffer (like htop/less) so
-    # repeated redraws overwrite in place instead of scrolling into history -
-    # a plain "\x1b[2J\x1b[H" only clears the visible screen, not scrollback,
-    # so fast redraws pile up into a wall of stacked frames there.
     sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[48;2;10;20;60m")
     sys.stdout.flush()
     try:
         last_render = 0.0
         for line in tail(args.log_path):
             if line is RESTARTED:
-                # thread_log/run.log got (re)created since we last opened it
-                # - run.sh wipes it at the start of every invocation, so a
-                # dashboard already attached from before a run started would
-                # otherwise keep reading a deleted file forever while holding
-                # onto whatever state (including a stale state.done=True) it
-                # parsed from the previous run's leftovers.
                 state = make_state()
                 done_announced = False
                 continue
@@ -1066,9 +762,6 @@ def main():
             now = time.time()
             if now - last_render >= 1.0:
                 if not state.done:
-                    # once done, the OS process is gone for good - no point
-                    # spawning a pgrep every second forever just to keep
-                    # confirming it's still gone.
                     state.process_running = pi_process_running()
                     if state.process_running:
                         state.ever_saw_process = True
@@ -1076,22 +769,11 @@ def main():
                     elif state.process_gone_since is None:
                         state.process_gone_since = now
                     sweep_dead(state)
-                # once per live tick, not once per log line - see
-                # measured_eta, which needs wall-clock-spaced samples, not
-                # log-density-spaced ones (a tail() backlog burst would
-                # otherwise cram thousands of samples into a few ms).
                 state.progress_samples.append((now, state.pieces_done + state.joins_done))
                 draw(state)
                 last_render = now
 
             if state.done and state.ever_saw_process and not done_announced:
-                # re-draw unconditionally: the periodic draw() above is
-                # throttled to once/sec, so the frame the user was looking
-                # at when the run finished may predate state.done and still
-                # be missing the "PROCESS DONE" banner render() adds for it.
-                # Keep looping afterward instead of exiting - the finished
-                # dashboard (full stats included) stays on screen until the
-                # user closes the terminal or hits Ctrl+C themselves.
                 draw(state)
                 done_announced = True
     finally:
@@ -1104,9 +786,6 @@ def _raise_keyboard_interrupt(signum, frame):
 
 
 if __name__ == "__main__":
-    # SIGTERM bypasses Python's finally blocks by default; route it through
-    # the same cleanup path as Ctrl+C so a `kill` or supervisor stop still
-    # restores the terminal out of the alternate screen buffer.
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     try:
         main()
