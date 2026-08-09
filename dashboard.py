@@ -386,6 +386,7 @@ class State:
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
+        self.phase_start_time = None  # set by set_phase() on every transition away from "splitting"
         self.crashed = collections.deque(maxlen=10)  # (pid, depth, i0, ran_for)
         self.crashed_total = 0
         self.suspected_dead = {}  # pid -> time first seen not-alive
@@ -393,6 +394,7 @@ class State:
         self.tree_by_key = None  # (i0, depth) -> TreeNode
         self.tree_skipped_reason = None
         self.process_running = False
+        self.process_gone_since = None  # time.time() process_running first went False since done
         self.ever_saw_process = False
         self.done = False
 
@@ -404,6 +406,17 @@ class State:
     @property
     def total_joins(self):
         return self.total_pieces - 1 if self.total_pieces else None
+
+
+def set_phase(state, phase):
+    """Record when the run left "splitting" for a later phase - render()
+    uses this to show elapsed-in-phase instead of a stale eta once the
+    tracked pieces/joins total hits 100% but the process is still running
+    (dividing the binary-split result down, then rendering it to decimal -
+    real work with no piece/join count of its own to track)."""
+    if phase != state.phase:
+        state.phase = phase
+        state.phase_start_time = time.time()
 
 
 def handle_node_process(state, content):
@@ -510,7 +523,7 @@ def handle_scheduler(state, content):
     if action == "active processes":
         state.active_max = max(state.active_max, int(m.group("val")))
     elif action in ("pi already stored", "binary split solved"):
-        state.phase = action
+        set_phase(state, action)
 
 
 def handle_phase(state, content):
@@ -523,7 +536,7 @@ def handle_phase(state, content):
     # (logged as "display begin"/"display end" under func "pi", below) before
     # the process actually exits, so state.done waits for that instead.
     if action in ("dividing", "divided", "pi already stored", "binary split solved"):
-        state.phase = action
+        set_phase(state, action)
     if action == "pi already stored":
         # pi_tree() short-circuits here without ever running the scheduler -
         # the whole result was already on disk from an earlier run.
@@ -536,9 +549,9 @@ def handle_phase(state, content):
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
             mark_node_done(state.tree_root)
     elif action == "display begin":
-        state.phase = "displaying"
+        set_phase(state, "displaying")
     elif action == "display end":
-        state.phase = "displayed"
+        set_phase(state, "displayed")
         state.done = True
 
 
@@ -754,7 +767,17 @@ def render_status_screen(state):
 
 
 def render(state):
-    if not state.ever_saw_process or (not state.process_running and not state.done):
+    # Same race as sweep_dead's DEAD_GRACE_SECONDS, one level up: the OS can
+    # report the whole process gone (pi_process_running's pgrep) an instant
+    # before feed_line() has consumed the "display end" log line that sets
+    # state.done - so "not running yet" is also what a completely normal
+    # finish looks like for a brief moment. Give it the same grace window
+    # before showing the "may have crashed" status screen.
+    process_gone_recently = (
+        state.process_gone_since is not None
+        and time.time() - state.process_gone_since < DEAD_GRACE_SECONDS
+    )
+    if not state.ever_saw_process or (not state.process_running and not state.done and not process_gone_recently):
         return render_status_screen(state)
 
     lines = []
@@ -806,7 +829,7 @@ def render(state):
         lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
         lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         lines.append(f"         [{bar}]")
-        if not state.done:
+        if not state.done and state.phase == "splitting":
             # Measured from the run's own observed throughput (see
             # measured_eta) rather than modeled from per-task durations and
             # worker count - deliberately NOT based on
@@ -822,6 +845,15 @@ def render(state):
                 lines.append(f"         eta: {fmt_duration(eta)} remaining")
             else:
                 lines.append("         eta: ? remaining")
+        elif not state.done:
+            # pieces/joins only cover pi_tree()'s own work - the result still
+            # has to be divided down and rendered to decimal (dividing/
+            # displaying) before the process actually exits, so 100% here
+            # doesn't mean done. There's no unit count for that part to base
+            # an eta on, so show how long it's taken instead of leaving a
+            # stale "00:00 remaining" up once the tracked total is reached.
+            phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
+            lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
         lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (pass --size for totals){cache_note}")
     lines.append("")
@@ -975,6 +1007,9 @@ def main():
                     state.process_running = pi_process_running()
                     if state.process_running:
                         state.ever_saw_process = True
+                        state.process_gone_since = None
+                    elif state.process_gone_since is None:
+                        state.process_gone_since = now
                     sweep_dead(state)
                 # once per live tick, not once per log line - see
                 # measured_eta, which needs wall-clock-spaced samples, not
