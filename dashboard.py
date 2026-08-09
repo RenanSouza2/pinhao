@@ -154,14 +154,14 @@ def mark_node_done(node):
     mark_active(node, -1)
 
 
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+def mark_node_done_from_cache(node):
+    """Like mark_node_done(), but for a node that was never marked active
+    (no "begin" line seen) - e.g. a fully-cached run where pi_tree() finds
+    the result already stored and returns before the scheduler runs."""
+    node.own_done = True
+    node.in_progress = False
+    node.task_idx = None
+    node.start_time = None
 
 
 def pi_process_running():
@@ -197,8 +197,31 @@ def _sysctl_int(name):
 _VM_STAT_PAGE_SIZE_RE = re.compile(r"page size of (\d+) bytes")
 _VM_STAT_FIELD_RE = re.compile(r"^(?P<name>[^:]+):\s*(?P<val>\d+)\.?\s*$")
 
+_MEMINFO_FIELD_RE = re.compile(r"^(?P<name>\S+):\s*(?P<val>\d+)\s*kB\s*$")
 
-def get_system_ram():
+
+def _get_system_ram_linux():
+    try:
+        with open("/proc/meminfo") as f:
+            text = f.read()
+    except OSError:
+        return None, None
+
+    fields = {}
+    for line in text.splitlines():
+        m = _MEMINFO_FIELD_RE.match(line)
+        if m:
+            fields[m.group("name")] = int(m.group("val")) * 1024
+
+    total = fields.get("MemTotal")
+    if total is None:
+        return None, None
+    available = fields.get("MemAvailable")
+    used = total - available if available is not None else None
+    return used, total
+
+
+def _get_system_ram_macos():
     total = _sysctl_int("hw.memsize")
     try:
         out = subprocess.run(["vm_stat"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -221,6 +244,12 @@ def get_system_ram():
     if not all(k in fields for k in wanted):
         return None, total
     return sum(fields[k] for k in wanted) * page_size, total
+
+
+def get_system_ram():
+    if sys.platform.startswith("linux"):
+        return _get_system_ram_linux()
+    return _get_system_ram_macos()
 
 
 def get_worker_rss(pids):
@@ -270,9 +299,6 @@ class State:
         self.active_max = 0
         self.phase = "splitting"
         self.phase_start_time = None  # set by set_phase() on every transition away from "splitting"
-        self.crashed = collections.deque(maxlen=10)  # (pid, depth, i0, ran_for)
-        self.crashed_total = 0
-        self.suspected_dead = {}  # pid -> time first seen not-alive
         self.tree_root = None
         self.tree_by_key = None  # (i0, depth) -> TreeNode
         self.tree_skipped_reason = None
@@ -321,7 +347,6 @@ def handle_node_process(state, content):
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
-        state.suspected_dead.pop(pid, None)
         covered = leaves_covered(int(m.group("n2")))
         state.pieces_done += covered
         state.pieces_from_cache += covered
@@ -377,7 +402,6 @@ def handle_task_end(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
-    state.suspected_dead.pop(pid, None)
 
 
 def handle_scheduler(state, content):
@@ -419,12 +443,22 @@ def handle_phase(state, content):
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
-            mark_node_done(state.tree_root)
+            mark_node_done_from_cache(state.tree_root)
     elif action == "display begin":
         set_phase(state, "displaying")
     elif action == "display end":
         set_phase(state, "displayed")
         state.done = True
+
+
+def handle_untracked(state, content):
+    """pi_big()'s own split_span/split_big recursion (lib/big/code.c) logs in a
+    format this dashboard doesn't parse (no [idx][pid] task id - it isn't
+    forked per task like pi_tree()'s scheduler). It's currently dead code
+    (only pi_tree() is called from src/main.c); this entry exists so a future
+    switch back to pi_big() shows nothing tracked instead of being silently
+    indistinguishable from a missing DISPATCH entry."""
+    del state, content
 
 
 DISPATCH = {
@@ -437,6 +471,8 @@ DISPATCH = {
     "pi_finish": handle_phase,
     "pi_big": handle_phase,
     "pi": handle_phase,
+    "split_span": handle_untracked,
+    "split_big": handle_untracked,
 }
 
 
@@ -457,27 +493,10 @@ def feed_line(state, line):
 DEAD_GRACE_SECONDS = 3.0
 
 
-def sweep_dead(state):
-    now = time.time()
-    for pid in list(state.active):
-        if pid_alive(pid):
-            state.suspected_dead.pop(pid, None)
-            continue
-
-        first_seen = state.suspected_dead.setdefault(pid, now)
-        if now - first_seen < DEAD_GRACE_SECONDS:
-            continue
-
-        w = state.active.pop(pid)
-        state.suspected_dead.pop(pid, None)
-        state.crashed.append((pid, w["depth"], w["i0"], now - w["start"]))
-        state.crashed_total += 1
-
-
 def fmt_duration(seconds):
     if seconds is None or seconds != seconds or seconds == float("inf"):
         return "?"
-    seconds = int(seconds)
+    seconds = max(0, int(seconds))
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     if h:
@@ -587,7 +606,7 @@ def render_status_screen(state):
         lines.append("  process finished.")
     else:
         lines.append("  WARNING: process is no longer running, but never finished")
-        lines.append("  (it may have crashed - check thread_log/run.log for the last lines)")
+        lines.append("  (check thread_log/run.log for the last lines)")
     return "\n".join(lines)
 
 
@@ -623,7 +642,7 @@ def render(state):
         if since_last_line > stall_threshold:
             lines.append(
                 f"WARNING: no log activity for {fmt_duration(since_last_line)} "
-                "- the run may have stopped or crashed"
+                "- the run may have stopped"
             )
 
     lines.append("")
@@ -651,26 +670,20 @@ def render(state):
     lines.append("")
 
     n_workers = state.n_process or state.active_max
-    crashed_note = f"  ({state.crashed_total} crashed total)" if state.crashed_total else ""
-    lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{crashed_note}")
+    lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}")
 
     ram_used, ram_total = get_system_ram()
+    ram_parts = []
     if ram_total is not None:
-        ram_line = f"ram: {fmt_bytes(ram_used)} used / {fmt_bytes(ram_total)} total"
+        ram_part = f"ram: {fmt_bytes(ram_used)} used / {fmt_bytes(ram_total)} total"
         if ram_used is not None:
-            ram_line += f" ({100.0 * ram_used / ram_total:4.1f}%)"
-        worker_rss = get_worker_rss(state.active.keys())
-        if worker_rss:
-            ram_line += f"   workers: {fmt_bytes(worker_rss)}"
-        lines.append(ram_line)
-
-    if state.crashed:
-        lines.append("")
-        lines.append("crashed workers (pid, depth, i0, ran for):")
-        for pid, depth, i0, ran_for in state.crashed:
-            depth = depth if depth is not None else "-"
-            i0 = f"{i0:,}" if i0 is not None else "-"
-            lines.append(f"  {pid:<7} depth={depth!s:<3} i0={i0:<14} {fmt_duration(ran_for)}")
+            ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
+        ram_parts.append(ram_part)
+    worker_rss = get_worker_rss(state.active.keys())
+    if worker_rss:
+        ram_parts.append(f"workers: {fmt_bytes(worker_rss)}")
+    if ram_parts:
+        lines.append("   ".join(ram_parts))
 
     lines.append("")
     if state.tree_root is not None:
@@ -768,7 +781,6 @@ def main():
                         state.process_gone_since = None
                     elif state.process_gone_since is None:
                         state.process_gone_since = now
-                    sweep_dead(state)
                 state.progress_samples.append((now, state.pieces_done + state.joins_done))
                 draw(state)
                 last_render = now
