@@ -5,19 +5,21 @@ Tails thread_log/run.log (written by run.sh / run_debug.sh) and renders
 progress: leaf pieces done/total, an active-worker count, and a live tree
 view with per-node elapsed time.
 
-The expected total piece count is derived from the `size` argument of the
-`pi(size, n_process)` call in src/main.c (same formula as get_index_max()
-in lib/big/code.c) rather than from the log itself: in a real run the very
-first tasks logged are already several tree levels deep (get_next_node
-descends silently before the first ready node is handed to a worker), so a
-depth-0 log line essentially never appears.
+The expected total piece count comes from index_max, which pi_tree() logs
+once, first thing, as a "run size" line (see lib/tree/code.c) - not from
+src/main.c's source. Source is the wrong place to look: the `size` literal
+there is whatever will be compiled into the *next* build, not necessarily
+what a currently-running binary was actually built with, and a dashboard
+left attached across an edit+rerun would silently show stats for the old
+size forever. The log line is this run's own ground truth, always.
 
-Worker count is never read from source (n_process isn't always a literal -
-it can be computed per-platform, for instance). It comes from --n-process
-if given, otherwise it's inferred live from the log's "active processes"
-line, which converges to the true value within the first scheduling cycle.
+Worker count is never read from source either (n_process isn't always a
+literal - it can be computed per-platform, for instance). It comes from
+--n-process if given, otherwise it's inferred live from the log's "active
+processes" line, which converges to the true value within the first
+scheduling cycle.
 
-Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N] [--main-c PATH]
+Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 """
 
 import argparse
@@ -35,7 +37,6 @@ PIECES_PER_LEAF = 1 << TREE_PIECE_SIZE
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
-DEFAULT_MAIN_C = os.path.join(REPO_ROOT, "src", "main.c")
 
 # node_process/task_start/task_end/split_piece all log "[idx][pid]" - idx is
 # the scheduler's reused array slot (see lib/tree/code.c), pid is this task's
@@ -55,10 +56,9 @@ RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
-# matches the size literal in e.g. "pi(4'000'000, 16);" or
-# "pi(4'000'000, n_threads);" (digit-separator quotes allowed per C23) -
-# n_process is deliberately not captured here, see parse_main_c().
-RE_MAIN_C_CALL = re.compile(r"\bpi\(\s*([\d']+)\s*,")
+# pi_tree()'s one-time "run size" line - see the module docstring for why
+# this, and not src/main.c, is where index_max comes from.
+RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
 
 
 def get_index_max(size, piece_size=TREE_PIECE_SIZE):
@@ -67,26 +67,6 @@ def get_index_max(size, piece_size=TREE_PIECE_SIZE):
     if aux == 0:
         return index_max
     return index_max + (1 << piece_size) - aux
-
-
-def parse_main_c(path):
-    """Extract `size` from the `pi(size, n_process)` call in main.c. Only
-    size is read from source: n_process isn't always a literal (e.g. it can
-    be computed per-platform), so it's left to --n-process or, absent that,
-    to State.active_max tracking the real concurrency seen in the log."""
-    try:
-        with open(path, "r") as f:
-            text = f.read()
-    except OSError:
-        return None
-
-    for line in text.splitlines():
-        if "uint64_t" in line:  # skip the `static void pi(uint64_t size, ...)` definition
-            continue
-        m = RE_MAIN_C_CALL.search(line)
-        if m:
-            return int(m.group(1).replace("'", ""))
-    return None
 
 
 # A BIG node's "remainder" and a SPAN node's "span" share the same log field
@@ -193,6 +173,18 @@ def build_tree(index_max):
     by_key = {}
     root = _build_big(1, index_max, 0, None, by_key)
     return root, by_key
+
+
+def apply_index_max(state, index_max):
+    """(Re)derive total_pieces and the tree shape from index_max - the run's
+    own ground truth, sourced either from --size or, once it arrives, the
+    log's own "run size" line (see RE_RUN_SIZE / the module docstring)."""
+    state.total_pieces = index_max // PIECES_PER_LEAF
+    state.tree_root, state.tree_by_key = build_tree(index_max)
+    if state.tree_root is None:
+        state.tree_skipped_reason = (
+            f"tree too large to display ({2 * state.total_pieces - 1} nodes > {TREE_NODE_CAP})"
+        )
 
 
 def mark_leaves_done(node, leaves):
@@ -379,10 +371,11 @@ class State:
         # measured, empirical throughput behind measured_eta's global eta,
         # as opposed to the modeled per-task durations above (still used for
         # each tree node's own eta in render_tree). maxlen gives a margin
-        # over MEASURED_ETA_WINDOW_SECONDS worth of ~1/s render ticks, so the
-        # oldest sample still within the window is never right at the
-        # deque's own eviction boundary.
-        self.progress_samples = collections.deque(maxlen=400)
+        # over MEASURED_ETA_WIDE_WINDOW_SECONDS (the longer of the two
+        # windows render() uses) worth of ~1/s render ticks, so the oldest
+        # sample still within either window is never right at the deque's
+        # own eviction boundary.
+        self.progress_samples = collections.deque(maxlen=1100)
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -527,6 +520,12 @@ def handle_scheduler(state, content):
 
 
 def handle_phase(state, content):
+    m = RE_RUN_SIZE.match(content)
+    if m:
+        if state.total_pieces is None:  # else --size already set it explicitly; log agrees, nothing to do
+            apply_index_max(state, int(m.group("index_max")))
+        return
+
     m = RE_PHASE.match(content)
     if not m:
         return
@@ -648,6 +647,14 @@ def depth_avg(events_by_depth, depth, fallback):
 # render or two once the run's actual pace changes.
 MEASURED_ETA_WINDOW_SECONDS = 300.0
 
+# a second, longer window (3x the short one) - render() calls measured_eta
+# with both and shows the spread as a range. Real per-task durations vary a
+# lot even for nominally identical work (see measured_eta's docstring), so a
+# single point estimate implies more precision than the data supports; the
+# gap between a recent-biased and a longer-run-averaged rate is a cheap,
+# honest stand-in for that uncertainty.
+MEASURED_ETA_WIDE_WINDOW_SECONDS = MEASURED_ETA_WINDOW_SECONDS * 3
+
 # minimum span the rolling window needs before its rate is trusted, so a
 # couple of noisy samples right after attach (e.g. the tail() catch-up
 # burst - see feed loop below) can't produce a wild estimate; below this,
@@ -655,7 +662,7 @@ MEASURED_ETA_WINDOW_SECONDS = 300.0
 MEASURED_ETA_MIN_SPAN_SECONDS = 5.0
 
 
-def measured_eta(state, remaining_units):
+def measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WINDOW_SECONDS):
     """Global eta from the run's own observed throughput - how much
     done_units grew over the trailing window, extrapolated forward - rather
     than modeling individual task durations, tree structure, and worker
@@ -669,7 +676,9 @@ def measured_eta(state, remaining_units):
 
     state.progress_samples is a chronological (time, done_units) deque,
     appended once per render tick by the main loop - not here, so this stays
-    a pure read of already-collected history.
+    a pure read of already-collected history. render() calls this twice,
+    once per window length, to show a range instead of one point estimate -
+    see MEASURED_ETA_WIDE_WINDOW_SECONDS.
     """
     if remaining_units <= 0:
         return 0.0
@@ -677,7 +686,7 @@ def measured_eta(state, remaining_units):
         return None
 
     now, done_now = state.progress_samples[-1]
-    cutoff = now - MEASURED_ETA_WINDOW_SECONDS
+    cutoff = now - window_seconds
     window_start_time, window_start_units = state.progress_samples[0]
     for t, units in state.progress_samples:
         if t >= cutoff:
@@ -691,6 +700,26 @@ def measured_eta(state, remaining_units):
 
     rate = progressed / elapsed
     return remaining_units / rate
+
+
+def format_eta_range(state, remaining_units):
+    """The "eta: ..." line's text: measured_eta from both the short and wide
+    windows, shown as a range when they disagree. Real per-task durations
+    vary a lot even for nominally identical work (e.g. resource contention
+    between worker processes), so a single point estimate implies more
+    precision than the underlying data supports - the gap between a
+    recent-biased and a longer-run-averaged rate is a cheap, honest stand-in
+    for that uncertainty, rather than one number that just happens to be
+    wrong by some unstated amount."""
+    short = measured_eta(state, remaining_units)
+    wide = measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WIDE_WINDOW_SECONDS)
+    etas = [e for e in (short, wide) if e is not None]
+    if not etas:
+        return "? remaining"
+    lo_str, hi_str = fmt_duration(min(etas)), fmt_duration(max(etas))
+    if lo_str == hi_str:
+        return f"{lo_str} remaining"
+    return f"{lo_str}–{hi_str} remaining"
 
 
 def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, prefix="", is_last=True, is_root=True):
@@ -840,11 +869,7 @@ def render(state):
             # would spike a naive rate. progress_samples only gets appended
             # once per live render tick (see main()), so that burst is at
             # worst one outlier sample, not the whole basis for the rate.
-            eta = measured_eta(state, total_units - done_units)
-            if eta is not None:
-                lines.append(f"         eta: {fmt_duration(eta)} remaining")
-            else:
-                lines.append("         eta: ? remaining")
+            lines.append(f"         eta: {format_eta_range(state, total_units - done_units)}")
         elif not state.done:
             # pieces/joins only cover pi_tree()'s own work - the result still
             # has to be divided down and rendered to decimal (dividing/
@@ -855,7 +880,11 @@ def render(state):
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
             lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
-        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (pass --size for totals){cache_note}")
+        # normally just a brief startup gap - the log's own "run size" line
+        # is the first thing pi_tree() logs, so this fills in within the
+        # first render tick. Stays stuck on "?" for a log from a binary
+        # built before that line existed, hence the --size escape hatch.
+        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"run size\" line, or pass --size){cache_note}")
     lines.append("")
 
     n_workers = state.n_process or state.active_max
@@ -954,23 +983,21 @@ def draw(state):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
-    parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces")
+    parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces up front instead of waiting for the log's own \"run size\" line")
     parser.add_argument("--n-process", type=int, default=None, help="pi() n_process argument")
-    parser.add_argument("--main-c", default=DEFAULT_MAIN_C, help="path to src/main.c, auto-parsed if --size not given")
     args = parser.parse_args()
 
-    size, n_process = args.size, args.n_process
-    if size is None:
-        size = parse_main_c(args.main_c)
-
-    total_pieces = get_index_max(size) // PIECES_PER_LEAF if size is not None else None
+    n_process = args.n_process
 
     def make_state():
-        state = State(total_pieces=total_pieces, n_process=n_process)
-        if size is not None:
-            state.tree_root, state.tree_by_key = build_tree(get_index_max(size))
-            if state.tree_root is None:
-                state.tree_skipped_reason = f"tree too large to display ({2 * total_pieces - 1} nodes > {TREE_NODE_CAP})"
+        # No total_pieces/tree yet unless --size was given explicitly - both
+        # get filled in the moment the log's own "run size" line arrives
+        # (handle_phase -> apply_index_max), which happens on every
+        # RESTARTED (run.sh wipes thread_log/ for each new run) since it's
+        # the very first line pi_tree() logs.
+        state = State(n_process=n_process)
+        if args.size is not None:
+            apply_index_max(state, get_index_max(args.size))
         return state
 
     state = make_state()

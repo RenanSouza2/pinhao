@@ -406,6 +406,14 @@ static void scheduler(uint64_t size, uint64_t n_process)
 [[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 {
+    // logged once, first thing, regardless of whether this run ends up
+    // fully cached - a log consumer (e.g. dashboard.py) needs index_max up
+    // front to size a progress bar/tree, and can't otherwise get it: every
+    // other node_process line is already several tree levels deep by the
+    // time it's logged, and size/n_process aren't reliably readable from
+    // source (this call's own arguments can be computed, not literals).
+    tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
+
     if(pi_is_stored(size))
     {
         tprintf("              %-20s|", "pi already stored");
