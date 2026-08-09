@@ -28,9 +28,7 @@ import shutil
 import signal
 import subprocess
 import sys
-import termios
 import time
-import tty
 
 TREE_PIECE_SIZE = 22
 PIECES_PER_LEAF = 1 << TREE_PIECE_SIZE
@@ -275,6 +273,7 @@ class State:
         self.joins_done = 0
         self.joins_from_cache = 0
         self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
+        self.join_events = collections.deque(maxlen=2000)  # (time, dur), node_process's "joined" completions
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -320,6 +319,14 @@ def handle_node_process(state, content):
         entry = state.active.setdefault(pid, {"start": time.time()})
         entry["depth"] = depth
         entry["i0"] = i0
+        # remainder is always a multiple of PIECES_PER_LEAF (see
+        # SPAN_VS_REMAINDER_CUTOFF above), so it can never equal
+        # TREE_PIECE_SIZE itself - only a SPAN leaf's span does. Tags this
+        # task with which average duration (piece vs join) applies to it,
+        # for estimate_global_eta's per-worker local eta - independent of
+        # the tree view, so it works even when the tree is too big to
+        # materialize.
+        entry["kind"] = "piece" if int(m.group("n2")) == TREE_PIECE_SIZE else "join"
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
@@ -343,6 +350,9 @@ def handle_node_process(state, content):
             mark_node_done(tree_node)  # cached result stands in for this node's own join
     elif action == "joined":
         state.joins_done += 1
+        dur = m.group("dur")
+        if dur is not None:
+            state.join_events.append((time.time(), float(dur)))
         if tree_node is not None:
             mark_node_done(tree_node)
 
@@ -401,14 +411,15 @@ def handle_phase(state, content):
     if not m:
         return
     action = m.group("action").strip()
+    # "divided"/"pi already stored" only mean the binary-splitting result is
+    # ready - pi() still has to run flt_num_display_dec() over it afterward
+    # (logged as "display begin"/"display end" under func "pi", below) before
+    # the process actually exits, so state.done waits for that instead.
     if action in ("dividing", "divided", "pi already stored", "binary split solved"):
         state.phase = action
-    if action == "divided":
-        state.done = True
     if action == "pi already stored":
         # pi_tree() short-circuits here without ever running the scheduler -
         # the whole result was already on disk from an earlier run.
-        state.done = True
         if state.total_pieces:
             state.pieces_from_cache += state.total_pieces - state.pieces_done
             state.pieces_done = state.total_pieces
@@ -417,6 +428,11 @@ def handle_phase(state, content):
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
             mark_node_done(state.tree_root)
+    elif action == "display begin":
+        state.phase = "displaying"
+    elif action == "display end":
+        state.phase = "displayed"
+        state.done = True
 
 
 DISPATCH = {
@@ -428,6 +444,7 @@ DISPATCH = {
     "pi_tree": handle_phase,
     "pi_finish": handle_phase,
     "pi_big": handle_phase,
+    "pi": handle_phase,
 }
 
 
@@ -491,7 +508,59 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
-def render_tree(node, lines, now, prefix="", is_last=True, is_root=True):
+def blended_task_duration(remaining_pieces, avg_piece_dur, remaining_joins, avg_join_dur):
+    """Weighted-average duration of a "typical" still-to-do task, weighted by
+    how many of each kind (piece vs join) are actually left - used as the
+    flat per-task cost D in estimate_global_eta's makespan formula, since
+    pieces and joins can have very different average durations."""
+    parts = []
+    if avg_piece_dur is not None and remaining_pieces > 0:
+        parts.append((remaining_pieces, avg_piece_dur))
+    if avg_join_dur is not None and remaining_joins > 0:
+        parts.append((remaining_joins, avg_join_dur))
+    if not parts:
+        return None
+    total_n = sum(n for n, _ in parts)
+    return sum(n * d for n, d in parts) / total_n
+
+
+def estimate_global_eta(state, now, avg_piece_dur, avg_join_dur, n_workers, remaining_pieces, remaining_joins):
+    """Continuous relaxation of greedy load-balancing makespan: with W
+    workers, Q not-yet-started tasks each costing D, and each currently-busy
+    worker i already partway through its own task (local_eta_i left on it,
+    0 for an idle worker that's free right now), the finish time T satisfies
+
+        T * W == Q * D + sum(local_eta_i)
+
+    i.e. total worker-seconds spent is Q*D for fresh tasks plus whatever's
+    left on tasks already in flight, spread evenly over W workers. Unlike
+    assuming every worker starts a fresh average-duration task this instant,
+    this uses each busy worker's real remaining time - so the estimate
+    tightens right after a burst of workers start, and right before they
+    finish - and it degrades gracefully: with no active workers it reduces
+    to the simple remaining/(workers/D) rate.
+    """
+    D = blended_task_duration(remaining_pieces, avg_piece_dur, remaining_joins, avg_join_dur)
+    if not D or not n_workers:
+        return None
+
+    busy_local_etas = []
+    for entry in state.active.values():
+        start = entry.get("start")
+        if start is None:
+            continue
+        kind = entry.get("kind")
+        avg = avg_piece_dur if kind == "piece" else (avg_join_dur if kind == "join" else None)
+        if avg is None:
+            avg = D  # kind not yet known (task_start seen, "begin" hasn't arrived) - D is the best guess available
+        busy_local_etas.append(max(avg - (now - start), 0.0))
+
+    remaining_tasks = remaining_pieces + remaining_joins
+    queued = max(remaining_tasks - len(busy_local_etas), 0)
+    return (queued * D + sum(busy_local_etas)) / n_workers
+
+
+def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
@@ -512,7 +581,20 @@ def render_tree(node, lines, now, prefix="", is_last=True, is_root=True):
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
-            label += f" {fmt_duration(now - node.start_time)}"
+            node_elapsed = now - node.start_time
+            label += f" {fmt_duration(node_elapsed)}"
+            if node.in_progress:
+                # A leaf (leaves_total == 1) is a single split_piece call, so
+                # piece durations are the right yardstick; anything else at
+                # this exact node is a "joining" combine step (join durations
+                # vary a lot with subtree size, so this per-node number is a
+                # rougher guess than the piece one, but still better than
+                # nothing).
+                avg = avg_piece_dur if node.leaves_total == 1 else avg_join_dur
+                if avg is not None:
+                    remaining = avg - node_elapsed
+                    eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
+                    label += f" (eta {eta_str})"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):
@@ -520,7 +602,10 @@ def render_tree(node, lines, now, prefix="", is_last=True, is_root=True):
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
-        render_tree(child, lines, now, child_prefix, i == len(node.children) - 1, is_root=False)
+        render_tree(
+            child, lines, now, avg_piece_dur, avg_join_dur,
+            child_prefix, i == len(node.children) - 1, is_root=False,
+        )
 
 
 def render_status_screen(state):
@@ -557,16 +642,25 @@ def render(state):
     lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
 
+    # Both durations come from the C program's own per-event timers, not
+    # dashboard wall-clock, so - unlike done_units/elapsed-since-attach -
+    # they're unaffected by tail() bursting through a backlog when attaching
+    # to a process already mid-run (see the overall-eta comment below).
+    # Shared by the stall check, the overall eta, and each tree node's eta.
+    piece_durs = [d for _, d in state.piece_events]
+    avg_piece_dur = sum(piece_durs) / len(piece_durs) if piece_durs else None
+    join_durs = [d for _, d in state.join_events]
+    avg_join_dur = sum(join_durs) / len(join_durs) if join_durs else None
+
     if state.done:
         lines.append("")
-        lines.append("*** PROCESS DONE - press any key to exit ***")
+        lines.append("*** PROCESS DONE ***")
 
     if state.last_line_time is not None and not state.done:
         since_last_line = now - state.last_line_time
-        recent_durs = [d for _, d in state.piece_events]
         # a lull up to one full task duration is normal (e.g. only one slow
         # task left running); only warn once we're well past that.
-        stall_threshold = max(60.0, 2 * max(recent_durs)) if recent_durs else 60.0
+        stall_threshold = max(60.0, 2 * max(piece_durs)) if piece_durs else 60.0
         if since_last_line > stall_threshold:
             lines.append(
                 f"WARNING: no log activity for {fmt_duration(since_last_line)} "
@@ -588,6 +682,25 @@ def render(state):
         lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
         lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         lines.append(f"         [{bar}]")
+        if not state.done:
+            # Deliberately NOT based on done_units/elapsed-since-attach: tail()
+            # opens the log from byte 0 with no seek-to-end, so attaching to a
+            # process already mid-run bursts through its whole backlog in a
+            # near-instant tight loop before catching up to live. elapsed would
+            # read ~0 for all the progress in that backlog, spiking the rate.
+            # avg_piece_dur/avg_join_dur are immune to that (see above); see
+            # estimate_global_eta for how they, plus each busy worker's own
+            # local eta, combine into the estimate below.
+            eta = estimate_global_eta(
+                state, now, avg_piece_dur, avg_join_dur,
+                state.n_process or state.active_max,
+                remaining_pieces=state.total_pieces - state.pieces_done,
+                remaining_joins=total_joins - state.joins_done,
+            )
+            if eta is not None:
+                lines.append(f"         eta: {fmt_duration(eta)} remaining")
+            else:
+                lines.append("         eta: ? remaining")
     else:
         lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (pass --size for totals){cache_note}")
     lines.append("")
@@ -607,7 +720,7 @@ def render(state):
     lines.append("")
     if state.tree_root is not None:
         lines.append("tree (finished/pending subtrees collapsed):")
-        render_tree(state.tree_root, lines, now)
+        render_tree(state.tree_root, lines, now, avg_piece_dur, avg_join_dur)
     elif state.tree_skipped_reason:
         lines.append(f"tree: {state.tree_skipped_reason}")
 
@@ -672,23 +785,6 @@ def draw(state):
     sys.stdout.flush()
 
 
-def wait_for_dismissal():
-    """Block until the user presses a key, so the finished dashboard's
-    final frame stays on screen instead of the alternate-screen buffer
-    getting torn down (and the terminal snapping back to the shell) the
-    instant the run completes."""
-    try:
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-    except (termios.error, OSError, ValueError):
-        return  # not an interactive terminal (e.g. stdin piped/redirected)
-    try:
-        tty.setcbreak(fd)
-        os.read(fd, 1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
@@ -712,6 +808,7 @@ def main():
         return state
 
     state = make_state()
+    done_announced = False
 
     # draw in the terminal's alternate screen buffer (like htop/less) so
     # repeated redraws overwrite in place instead of scrolling into history -
@@ -730,27 +827,34 @@ def main():
                 # onto whatever state (including a stale state.done=True) it
                 # parsed from the previous run's leftovers.
                 state = make_state()
+                done_announced = False
                 continue
             if line is not None:
                 feed_line(state, line)
 
             now = time.time()
             if now - last_render >= 1.0:
-                state.process_running = pi_process_running()
-                if state.process_running:
-                    state.ever_saw_process = True
-                sweep_dead(state)
+                if not state.done:
+                    # once done, the OS process is gone for good - no point
+                    # spawning a pgrep every second forever just to keep
+                    # confirming it's still gone.
+                    state.process_running = pi_process_running()
+                    if state.process_running:
+                        state.ever_saw_process = True
+                    sweep_dead(state)
                 draw(state)
                 last_render = now
 
-            if state.done and state.ever_saw_process:
+            if state.done and state.ever_saw_process and not done_announced:
                 # re-draw unconditionally: the periodic draw() above is
                 # throttled to once/sec, so the frame the user was looking
                 # at when the run finished may predate state.done and still
                 # be missing the "PROCESS DONE" banner render() adds for it.
+                # Keep looping afterward instead of exiting - the finished
+                # dashboard (full stats included) stays on screen until the
+                # user closes the terminal or hits Ctrl+C themselves.
                 draw(state)
-                wait_for_dismissal()
-                break
+                done_announced = True
     finally:
         sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()

@@ -46,7 +46,7 @@ int main(void)
     uint64_t n_threads = 16;
 #endif
 
-    pi(4'000'000, n_threads);
+    pi(8'000'000, n_threads);
 
     printf("\n");
     return 0;
