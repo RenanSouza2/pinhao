@@ -60,4 +60,7 @@ vice versa) in these paths, flag it rather than deciding silently.
 
 `cache/` holds generated out-of-core `.bin` data files from real runs.
 Treat it as build/run output — don't hand-edit or rely on its contents
-being meaningful across runs.
+being meaningful across runs. It's fine to clean generated files out of
+`cache/*/` between runs, but always keep the `.gitkeep` file in each
+subdirectory (e.g. `cache/numbers/.gitkeep`) — those keep the empty dirs
+tracked in git and must not be deleted.
