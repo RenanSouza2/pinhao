@@ -136,7 +136,7 @@ static node_p node_expand(node_p n, uint64_t index)
                     return node_big_create(n, size, i_0 + B(span), remainder - B(span), depth + 1);
                 }
             }
-            UNREACHABLE();
+            revert();
         }
 
         case NODE_SPAN:
@@ -149,7 +149,7 @@ static node_p node_expand(node_p n, uint64_t index)
             return node_span_create(n, size, i_0 + offset, span - 1, depth + 1);
         }
     }
-    UNREACHABLE();
+    revert();
 }
 
 static bool node_is_ready(node_p n)
@@ -302,7 +302,7 @@ static uint64_t get_free_index(tree_task_p tasks, uint64_t n_process)
         }
     }
 
-    UNREACHABLE();
+    revert();
 }
 
 static void task_start(tree_task_p tasks, uint64_t index, node_p n)
@@ -334,7 +334,7 @@ static uint64_t get_task_index(tree_task_p tasks, pid_t pid, uint64_t n_process)
         }
     }
 
-    UNREACHABLE();
+    revert();
 }
 
 static bool task_end(tree_task_p tasks, pid_t pid, uint64_t n_process)
@@ -366,7 +366,7 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t n_process)
         }
     }
 
-    UNREACHABLE();
+    revert();
 }
 
 static void scheduler(uint64_t size, uint64_t n_process)
