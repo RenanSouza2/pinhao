@@ -233,6 +233,29 @@ static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder,
     return true;
 }
 
+// Exact limb count of a stored union_num's P (index 0), read from its file header
+// instead of loaded in full: a SIG-typed entry's count sits right after the signal
+// field; a FLT-typed entry is already fixed-precision at `size`.
+static uint64_t union_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+{
+    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
+    assert(fp);
+
+    file_read_move_to_index(fp, 0);
+    uint64_t type = file_read_uint64(fp);
+    file_read_uint64(fp); // union_num.size (fixed working precision, unused here)
+
+    uint64_t op_size = size;
+    if(type == SIG)
+    {
+        file_read_uint64(fp); // sig_num.signal
+        op_size = file_read_uint64(fp); // sig_num.count
+    }
+
+    fclose(fp);
+    return op_size;
+}
+
 
 
 static void split_span_res_path_set(
@@ -284,6 +307,19 @@ bool split_span_res_is_stored(
 
     uint64_t remainder = B(span);
     return union_res_is_stored(size, i_0, remainder, depth);
+}
+
+// Real op size for a span node's already-stored result -- mirrors
+// split_span_res_is_stored's SIG-vs-union check but returns the exact size instead.
+uint64_t split_span_res_op_size(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+{
+    if(sig_res_is_stored(i_0, span))
+    {
+        return sig_res_get_size(i_0, span);
+    }
+
+    uint64_t remainder = B(span);
+    return union_res_op_size(size, i_0, remainder, depth);
 }
 
 static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
@@ -431,6 +467,19 @@ bool split_big_res_is_stored(
     }
 
     return union_res_is_stored(size, i_0, remainder, depth);
+}
+
+// Real op size for a big node's already-stored result -- mirrors
+// split_big_res_is_stored's span-collapse check but returns the exact size instead.
+uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+{
+    if(stdc_count_ones(remainder) == 1)
+    {
+        uint64_t span = stdc_bit_width(remainder) - 1;
+        return split_span_res_op_size(size, i_0, span, depth);
+    }
+
+    return union_res_op_size(size, i_0, remainder, depth);
 }
 
 void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)

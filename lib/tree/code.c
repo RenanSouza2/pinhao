@@ -221,37 +221,12 @@ static node_p get_next_node(node_p n)
     return NULL;
 }
 
-// Rough bit width of a single leaf term (p, q, u, v in split_sig): all are O(i) for
-// i up to ~32*size (get_index_max), and q = 8*i is the largest at ~256*size.
-static uint64_t node_mem_bits_per_term(uint64_t size)
-{
-    return stdc_bit_width(256 * size);
-}
-
-// P, Q and R all grow at the same rate through this recursion: each level's P/Q/R is
-// a product or sum-of-products of the previous level's same-order P/Q/R (see
-// split_sig_join), so one formula estimates all three -- limb count scales
-// ~linearly with the number of combined leaf terms (`range`), until it saturates at
-// the working precision `size` limbs, mirroring union_num_wrap_sig's promotion of
-// an oversized sig_num to a fixed-precision flt_num.
-static uint64_t node_mem_operand_limbs(uint64_t range, uint64_t size)
-{
-    if(range == 0)
-    {
-        return 0;
-    }
-
-    uint64_t bits = node_mem_bits_per_term(size) * range;
-    uint64_t limbs = (bits + 63) / 64;
-
-    return limbs < size ? limbs : size;
-}
-
 // Estimates the average memory a node's join will use, from araucaria's own
 // num_mul_estimate_memory. A join runs four cross multiplications between the two
 // children (P1xP2, Q1xQ2, P1xR2, R1xQ2), but P, Q and R are the same order at
-// every node (see node_mem_operand_limbs), so all four are sized identically and
-// one call stands in for all of them.
+// every node (split_sig_join keeps them in lockstep), so one call with each
+// child's P size stands in for all four. Operand sizes are read from each
+// child's already-stored result via split_span_res_op_size / split_big_res_op_size.
 static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
 {
     uint64_t op_1 = 0;
@@ -261,24 +236,30 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
     {
         case NODE_SPAN:
         {
+            uint64_t size = n->a.s.size;
+            uint64_t i_0 = n->a.s.i_0;
             uint64_t span = n->a.s.span;
+            uint64_t depth = n->a.s.depth;
             if(span == TREE_PIECE_SIZE)
             {
                 return 0;
             }
 
-            op_1 = node_mem_operand_limbs(B(span - 1), n->a.s.size);
-            op_2 = op_1;
+            op_1 = split_span_res_op_size(size, i_0, span - 1, depth + 1);
+            op_2 = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1);
         }
         break;
 
         case NODE_BIG:
         {
-            uint64_t remainder = n->a.b.remainder;
             uint64_t size = n->a.b.size;
+            uint64_t i_0 = n->a.b.i_0;
+            uint64_t remainder = n->a.b.remainder;
+            uint64_t depth = n->a.b.depth;
             uint64_t span = stdc_bit_width(remainder) - 1;
-            op_1 = node_mem_operand_limbs(B(span), size);
-            op_2 = node_mem_operand_limbs(remainder - B(span), size);
+
+            op_1 = split_span_res_op_size(size, i_0, span, depth + 1);
+            op_2 = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1);
         }
         break;
     }

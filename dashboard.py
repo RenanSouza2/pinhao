@@ -31,7 +31,7 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]"
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
-    r"(?:\s*\|\s*(?P<dur>[\d.]+))?"
+    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B))?"
 )
 RE_PIECE = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
@@ -69,7 +69,8 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "start_time", "active_count", "parent", "children",
+        "own_done", "in_progress", "task_idx", "pid", "start_time", "active_count", "parent", "children",
+        "mem_estimate",
     )
 
     def __init__(self, i0, depth, kind, n2, parent):
@@ -82,10 +83,12 @@ class TreeNode:
         self.own_done = False
         self.in_progress = False
         self.task_idx = None
+        self.pid = None
         self.start_time = None
         self.active_count = 0
         self.parent = parent
         self.children = []
+        self.mem_estimate = None  # bytes, set when a "joining" line is seen for this node
 
 
 def _build_span(i0, span, depth, parent, by_key):
@@ -150,6 +153,7 @@ def mark_node_done(node):
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
+    node.pid = None
     node.start_time = None
     mark_active(node, -1)
 
@@ -161,6 +165,7 @@ def mark_node_done_from_cache(node):
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
+    node.pid = None
     node.start_time = None
 
 
@@ -252,21 +257,27 @@ def get_system_ram():
     return _get_system_ram_macos()
 
 
-def get_worker_rss(pids):
+def get_pid_rss(pids):
+    """pid -> RSS bytes, for the given live pids (missing/dead pids are omitted)."""
     pids = list(pids)
     if not pids:
-        return 0
+        return {}
     try:
         out = subprocess.run(
-            ["ps", "-o", "rss=", "-p", ",".join(str(p) for p in pids)],
+            ["ps", "-o", "pid=,rss=", "-p", ",".join(str(p) for p in pids)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
-        return None
+        return {}
     if out.returncode != 0:
-        return None
-    total_kb = sum(int(line) for line in out.stdout.split())
-    return total_kb * 1024
+        return {}
+    result = {}
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pid, rss = parts
+            result[int(pid)] = int(rss) * 1024
+    return result
 
 
 def fmt_bytes(n):
@@ -343,6 +354,7 @@ def handle_node_process(state, content):
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
+            tree_node.pid = pid
             tree_node.start_time = entry["start"]
             mark_active(tree_node, 1)
     elif action == "already stored":
@@ -356,6 +368,10 @@ def handle_node_process(state, content):
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
             mark_node_done(tree_node)
+    elif action == "joining":
+        mem = m.group("mem")
+        if tree_node is not None and mem is not None:
+            tree_node.mem_estimate = int(mem)
     elif action == "joined":
         state.joins_done += 1
         dur = m.group("dur")
@@ -541,6 +557,15 @@ def measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WINDOW_SECO
     return remaining_units / rate
 
 
+def active_mem_estimate(node):
+    if node is None or node.own_done:
+        return 0
+    total = node.mem_estimate if (node.in_progress and node.mem_estimate is not None) else 0
+    for child in node.children:
+        total += active_mem_estimate(child)
+    return total
+
+
 def format_eta_range(state, remaining_units):
     short = measured_eta(state, remaining_units)
     wide = measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WIDE_WINDOW_SECONDS)
@@ -553,7 +578,7 @@ def format_eta_range(state, remaining_units):
     return f"{lo_str}–{hi_str} remaining"
 
 
-def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, prefix="", is_last=True, is_root=True):
+def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
@@ -566,7 +591,10 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
         mark, state, status = "·", "pending", None
 
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
-    label = f"depth={node.depth} i0={node.i0:,}"
+    if node.kind == "BIG":
+        label = f"[{node.depth}, B, {node.i0:,}]"
+    else:
+        label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
@@ -581,6 +609,11 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                     remaining = avg - node_elapsed
                     eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
                     label += f" (eta {eta_str})"
+                current = pid_rss.get(node.pid) if node.pid is not None else None
+                if node.mem_estimate is not None or current is not None:
+                    est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
+                    cur_str = fmt_bytes(current) if current is not None else "?"
+                    label += f" {est_str} | {cur_str}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):
@@ -590,7 +623,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
     for i, child in enumerate(node.children):
         render_tree(
             child, lines, now, avg_piece_dur, avg_join_dur,
-            piece_events_by_depth, join_events_by_depth,
+            piece_events_by_depth, join_events_by_depth, pid_rss,
             child_prefix, i == len(node.children) - 1, is_root=False,
         )
 
@@ -661,7 +694,10 @@ def render(state):
         lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         lines.append(f"         [{bar}]")
         if not state.done and state.phase == "splitting":
-            lines.append(f"         eta: {format_eta_range(state, total_units - done_units)}")
+            eta_line = f"         eta: {format_eta_range(state, total_units - done_units)}"
+            if state.tree_root is not None:
+                eta_line += f"    est. memory: {fmt_bytes(active_mem_estimate(state.tree_root))}"
+            lines.append(eta_line)
         elif not state.done:
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
             lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
@@ -679,9 +715,9 @@ def render(state):
         if ram_used is not None:
             ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
         ram_parts.append(ram_part)
-    worker_rss = get_worker_rss(state.active.keys())
-    if worker_rss:
-        ram_parts.append(f"workers: {fmt_bytes(worker_rss)}")
+    pid_rss = get_pid_rss(state.active.keys())
+    if pid_rss:
+        ram_parts.append(f"workers: {fmt_bytes(sum(pid_rss.values()))}")
     if ram_parts:
         lines.append("   ".join(ram_parts))
 
@@ -690,7 +726,7 @@ def render(state):
         lines.append("tree (finished/pending subtrees collapsed):")
         render_tree(
             state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
-            state.piece_events_by_depth, state.join_events_by_depth,
+            state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
         )
     elif state.tree_skipped_reason:
         lines.append(f"tree: {state.tree_skipped_reason}")
