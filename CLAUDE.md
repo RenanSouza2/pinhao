@@ -4,6 +4,14 @@ Guidance for Claude Code when working in this repo. See `README.md` for
 project overview, build commands, and directory layout — this file only
 covers what isn't obvious from the code.
 
+## Cross-platform: Linux and macOS
+
+This project must build and run on both Linux and macOS. Avoid
+platform-specific APIs unless guarded by the appropriate `#ifdef` (see the
+existing Apple-platform checks around process/core counts in `src/main.c`
+for the pattern), and don't assume a Linux-only toolchain or filesystem
+layout when making changes.
+
 ## Submodules (`mods/`)
 
 `mods/clu`, `mods/macros`, `mods/araucaria` are git submodules but are

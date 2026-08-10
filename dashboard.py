@@ -70,7 +70,7 @@ class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
         "own_done", "in_progress", "task_idx", "pid", "start_time", "active_count", "parent", "children",
-        "mem_estimate",
+        "mem_estimate", "join_term", "join_micro",
     )
 
     def __init__(self, i0, depth, kind, n2, parent):
@@ -89,6 +89,8 @@ class TreeNode:
         self.parent = parent
         self.children = []
         self.mem_estimate = None  # bytes, set when a "joining" line is seen for this node
+        self.join_term = None  # e.g. "P1xP2", from a split_*_res_join "mul ..." header line
+        self.join_micro = None  # e.g. "loading P1" / "multiplying", from a split_*_res_join phase line
 
 
 def _build_span(i0, span, depth, parent, by_key):
@@ -155,6 +157,8 @@ def mark_node_done(node):
     node.task_idx = None
     node.pid = None
     node.start_time = None
+    node.join_term = None
+    node.join_micro = None
     mark_active(node, -1)
 
 
@@ -167,6 +171,8 @@ def mark_node_done_from_cache(node):
     node.task_idx = None
     node.pid = None
     node.start_time = None
+    node.join_term = None
+    node.join_micro = None
 
 
 def pi_process_running():
@@ -403,6 +409,28 @@ def handle_piece(state, content):
             mark_node_done(tree_node)
 
 
+def handle_join_phase(state, content):
+    """split_span_res_join / split_big_res_join log their own header ("mul
+    P1xP2") and phase (loading/loaded/multiplying/.../written) lines with the
+    same [idx][pid] | i0 n2 depth shape as node_process, so RE_NODE_PROCESS
+    parses them too. Track the latest term/micro-phase on the matching tree
+    node so they can be shown beside it while it's in progress."""
+    m = RE_NODE_PROCESS.match(content)
+    if not m or not state.tree_by_key:
+        return
+    action = re.sub(r"\s+", " ", m.group("action").strip())
+    i0 = int(m.group("i0"))
+    depth = int(m.group("depth"))
+    tree_node = state.tree_by_key.get((i0, depth))
+    if tree_node is None:
+        return
+    term = action.removeprefix("mul ")
+    if term != action:
+        tree_node.join_term = term
+    else:
+        tree_node.join_micro = action
+
+
 def handle_task_start(state, content):
     m = RE_TASK_START.match(content)
     if not m:
@@ -488,6 +516,8 @@ DISPATCH = {
     "pi": handle_phase,
     "split_span": handle_untracked,
     "split_big": handle_untracked,
+    "split_span_res_join": handle_join_phase,
+    "split_big_res_join": handle_join_phase,
 }
 
 
@@ -567,12 +597,17 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                 if avg is not None:
                     remaining = avg - node_elapsed
                     eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
-                    label += f" (eta {eta_str})"
+                    label += f" ({eta_str})"
                 current = pid_rss.get(node.pid) if node.pid is not None else None
                 if node.mem_estimate is not None or current is not None:
                     est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
                     cur_str = fmt_bytes(current) if current is not None else "?"
-                    label += f" {est_str} | {cur_str}"
+                    label += f" {est_str} - {cur_str}"
+                if node.join_term:
+                    op1, _, op2 = node.join_term.partition("x")
+                    label += f" | {op1} x {op2}"
+                    if node.join_micro:
+                        label += f" | {node.join_micro}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):

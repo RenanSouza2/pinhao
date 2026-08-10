@@ -1,4 +1,7 @@
+// #define LOCK_IN_PLACE
+
 #include <stdio.h>
+#include <unistd.h>
 
 #include "debug.h"
 #include "../big/internal.h"
@@ -291,7 +294,7 @@ static void node_process(node_p n, uint64_t index)
             uint64_t mem_avg_bytes = node_estimate_memory(n, UINT64_MAX);
             tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, "joining", i_0, remainder, depth, mem_avg_bytes);
             TIME_SETUP
-            split_big_res_join(size, i_0, remainder, depth);
+            split_big_res_join(index, size, i_0, remainder, depth);
             TIME_END(t1)
             tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, remainder, depth, dtime(t1));
         }
@@ -324,7 +327,7 @@ static void node_process(node_p n, uint64_t index)
             uint64_t mem_avg_bytes = node_estimate_memory(n, UINT64_MAX);
             tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, "joining", i_0, span, depth, mem_avg_bytes);
             TIME_SETUP
-            split_span_res_join(size, i_0, span, depth);
+            split_span_res_join(index, size, i_0, span, depth);
             TIME_END(t1)
             tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
         }
@@ -358,6 +361,9 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
     pid_t pid = fork_safe();
     if(pid == 0)
     {
+#ifdef LOCK_IN_PLACE
+        fork_lock_processor(index);
+#endif
         node_process(n, index);
         exit(EXIT_SUCCESS);
     }
@@ -454,6 +460,12 @@ static void scheduler(uint64_t size, uint64_t n_process)
 [[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 {
+    long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
+    if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
+    {
+        n_process = (uint64_t)n_proc_avail;
+    }
+
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
 
