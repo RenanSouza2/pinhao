@@ -283,10 +283,7 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
         break;
     }
 
-    uint64_t mul_max;
-    uint64_t mul_avg;
-    num_mul_estimate_memory(op_1, op_2, disk_threshold, &mul_max, &mul_avg);
-    return mul_avg;
+    return num_mul_estimate_memory(op_1, op_2, disk_threshold);
 }
 
 static void node_process(node_p n, uint64_t index)
