@@ -1,4 +1,6 @@
+#!/usr/bin/env bash
 set -e
+mkdir -p thread_log
 rm -rf thread_log/*
 make dbg
-time ./src/debug.o $@ PI
+time ./src/debug.o $@ PI 2> >(tee thread_log/run.log >&2)
