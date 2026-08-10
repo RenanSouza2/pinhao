@@ -141,12 +141,11 @@ There are two independent caching layers, and only one of them is optional:
     building blocks (`pi_big`, `pi_v1`/`pi_v2`/`pi_v3`, splitting and union
     number helpers) kept for reference and experimentation.
 - `mods/`: Git submodules containing shared libraries:
-  - `clu`: Utility functions and logging.
+  - `clu`: Memory management debug tool.
   - `macros`: C macros for assertions, timing, static typing, and threading.
   - `araucaria`: The custom arbitrary-precision arithmetic library (big
     integers, fixed/floating-point, disk-backed numbers).
 - `makefiles/`: Shared compiler flags, environments, and linker setup.
-- `cache/`: Default location for out-of-core file persistence (generated at
-  runtime — not meant to be hand-edited).
+- `cache/`: Default location for out-of-core file persistence.
 - `dashboard.py`: Live terminal dashboard that visualizes a run's progress
   from `thread_log/run.log`.
