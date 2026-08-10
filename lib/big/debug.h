@@ -1,8 +1,7 @@
 #ifndef BIG_DEBUG_H
 #define BIG_DEBUG_H
 
-#include "header.h"
-#include "struct.h"
+#include "internal.h"
 
 #ifdef DEBUG
 #endif
