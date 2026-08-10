@@ -305,7 +305,6 @@ class State:
         self.join_events = collections.deque(maxlen=2000)  # (time, dur)
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
-        self.progress_samples = collections.deque(maxlen=1100)
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -529,34 +528,6 @@ def depth_avg(events_by_depth, depth, fallback):
     return fallback
 
 
-MEASURED_ETA_WINDOW_SECONDS = 300.0
-MEASURED_ETA_WIDE_WINDOW_SECONDS = MEASURED_ETA_WINDOW_SECONDS * 3
-MEASURED_ETA_MIN_SPAN_SECONDS = 5.0
-
-
-def measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WINDOW_SECONDS):
-    if remaining_units <= 0:
-        return 0.0
-    if len(state.progress_samples) < 2:
-        return None
-
-    now, done_now = state.progress_samples[-1]
-    cutoff = now - window_seconds
-    window_start_time, window_start_units = state.progress_samples[0]
-    for t, units in state.progress_samples:
-        if t >= cutoff:
-            window_start_time, window_start_units = t, units
-            break
-
-    elapsed = now - window_start_time
-    progressed = done_now - window_start_units
-    if elapsed < MEASURED_ETA_MIN_SPAN_SECONDS or progressed <= 0:
-        return None
-
-    rate = progressed / elapsed
-    return remaining_units / rate
-
-
 def active_mem_estimate(node):
     if node is None or node.own_done:
         return 0
@@ -564,18 +535,6 @@ def active_mem_estimate(node):
     for child in node.children:
         total += active_mem_estimate(child)
     return total
-
-
-def format_eta_range(state, remaining_units):
-    short = measured_eta(state, remaining_units)
-    wide = measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WIDE_WINDOW_SECONDS)
-    etas = [e for e in (short, wide) if e is not None]
-    if not etas:
-        return "? remaining"
-    lo_str, hi_str = fmt_duration(min(etas)), fmt_duration(max(etas))
-    if lo_str == hi_str:
-        return f"{lo_str} remaining"
-    return f"{lo_str}–{hi_str} remaining"
 
 
 def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, prefix="", is_last=True, is_root=True):
@@ -680,6 +639,11 @@ def render(state):
 
     lines.append("")
 
+    ram_used, ram_total = get_system_ram()
+    pid_rss = get_pid_rss(state.active.keys())
+
+    # --- overall completion (left column) ---
+    completion_lines = []
     cached_units = state.pieces_from_cache + state.joins_from_cache
     cache_note = f"  ({cached_units} from cache)" if cached_units else ""
     if state.total_pieces:
@@ -690,36 +654,43 @@ def render(state):
         bar_width = 40
         filled = int(bar_width * done_units / total_units)
         bar = "#" * filled + "-" * (bar_width - filled)
-        lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
-        lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
-        lines.append(f"         [{bar}]")
-        if not state.done and state.phase == "splitting":
-            eta_line = f"         eta: {format_eta_range(state, total_units - done_units)}"
-            if state.tree_root is not None:
-                eta_line += f"    est. memory: {fmt_bytes(active_mem_estimate(state.tree_root))}"
-            lines.append(eta_line)
-        elif not state.done:
+        completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
+        completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
+        completion_lines.append(f"         [{bar}]")
+        if not state.done and state.phase != "splitting":
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
-            lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
+            completion_lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
-        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
-    lines.append("")
+        completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
 
+    # --- active workers / ram (right column) ---
+    status_lines = []
     n_workers = state.n_process or state.active_max
-    lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}")
+    status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}")
 
-    ram_used, ram_total = get_system_ram()
     ram_parts = []
     if ram_total is not None:
-        ram_part = f"ram: {fmt_bytes(ram_used)} used / {fmt_bytes(ram_total)} total"
+        ram_part = f"ram: {fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
         if ram_used is not None:
             ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
         ram_parts.append(ram_part)
-    pid_rss = get_pid_rss(state.active.keys())
-    if pid_rss:
-        ram_parts.append(f"workers: {fmt_bytes(sum(pid_rss.values()))}")
+    if pid_rss or state.tree_root is not None:
+        est_str = fmt_bytes(active_mem_estimate(state.tree_root)) if state.tree_root is not None else "?"
+        real_str = fmt_bytes(sum(pid_rss.values())) if pid_rss else "?"
+        ram_parts.append(f"workers: {est_str} | {real_str}")
     if ram_parts:
-        lines.append("   ".join(ram_parts))
+        status_lines.append("   ".join(ram_parts))
+    if ram_total is not None and ram_used is not None:
+        bar_width = 40
+        filled = int(bar_width * min(ram_used, ram_total) / ram_total)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        status_lines.append(f"[{bar}]")
+
+    col_width = max((len(l) for l in completion_lines), default=0) + 4
+    for i in range(max(len(completion_lines), len(status_lines))):
+        left = completion_lines[i] if i < len(completion_lines) else ""
+        right = status_lines[i] if i < len(status_lines) else ""
+        lines.append(left.ljust(col_width) + right)
 
     lines.append("")
     if state.tree_root is not None:
@@ -817,7 +788,6 @@ def main():
                         state.process_gone_since = None
                     elif state.process_gone_since is None:
                         state.process_gone_since = now
-                state.progress_samples.append((now, state.pieces_done + state.joins_done))
                 draw(state)
                 last_render = now
 

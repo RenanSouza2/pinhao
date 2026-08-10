@@ -12,7 +12,7 @@
 #ifdef DEBUG
 #endif
 
-#define TREE_PIECE_SIZE 20
+#define TREE_PIECE_SIZE 22
 
 #define NODE_BIG 0
 #define NODE_SPAN 1
