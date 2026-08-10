@@ -342,30 +342,71 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 
 
 
+// A join runs four cross multiplications between the two children (P1xP2,
+// Q1xQ2, P1xR2, R1xQ2 -- see node_estimate_memory in lib/tree/code.c). Each
+// term gets its own loading/multiplying/writing log line with timing, nested
+// under the caller's overall "joining"/"joined" line.
+#define JOIN_STEP(BEGIN, END, TERM, I_0, SPAN_ARG, DEPTH, STMT)                                                        \
+    do {                                                                                                               \
+        tprintf("              %-12s%-9s| " U64P(10) " " U64P(10) " " U64P(3) "", BEGIN, TERM, I_0, SPAN_ARG, DEPTH); \
+        TIME_SETUP                                                                                                     \
+        STMT                                                                                                           \
+        TIME_END(_t)                                                                                                   \
+        tprintf("              %-12s%-9s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", END, TERM, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
+    } while(0)
+
+#define JOIN_LOAD(TERM, I_0, SPAN_ARG, DEPTH, STMT)  JOIN_STEP("loading",     "loaded",     TERM, I_0, SPAN_ARG, DEPTH, STMT)
+#define JOIN_MUL(TERM, I_0, SPAN_ARG, DEPTH, STMT)   JOIN_STEP("multiplying", "multiplied", TERM, I_0, SPAN_ARG, DEPTH, STMT)
+#define JOIN_WRITE(TERM, I_0, SPAN_ARG, DEPTH, STMT) JOIN_STEP("writing",     "written",    TERM, I_0, SPAN_ARG, DEPTH, STMT)
+
 void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     if(split_span_res_is_sig(size, i_0, span))
     {
         file_t fp = sig_res_open_write(i_0, span);
+        static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
         for(uint64_t i=0; i<2; i++)
         {
-            sig_num_t sig_1 = sig_res_load(i_0, span - 1, i);
-            sig_num_t sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, i);
-            sig_num_t sig = sig_num_mul(sig_1, sig_2);
-            file_write_sig_num(&fp, sig);
+            const char *term = p_terms[i];
+
+            sig_num_t sig_1, sig_2;
+            JOIN_LOAD(term, i_0, span, depth,
+                sig_1 = sig_res_load(i_0, span - 1, i);
+                sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, i);
+            );
+
+            sig_num_t sig;
+            JOIN_MUL(term, i_0, span, depth,
+                sig = sig_num_mul(sig_1, sig_2);
+            );
+
+            JOIN_WRITE(term, i_0, span, depth,
+                file_write_sig_num(&fp, sig);
+            );
             sig_num_free(sig);
         }
 
-        sig_num_t sig_1 = sig_res_load(i_0, span - 1, 0);
-        sig_num_t sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 2);
-        sig_num_t sig_r_1 = sig_num_mul(sig_1, sig_2);
+        sig_num_t sig_1, sig_2, sig_r_1;
+        JOIN_LOAD("P1xR2", i_0, span, depth,
+            sig_1 = sig_res_load(i_0, span - 1, 0);
+            sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 2);
+        );
+        JOIN_MUL("P1xR2", i_0, span, depth,
+            sig_r_1 = sig_num_mul(sig_1, sig_2);
+        );
 
-        sig_1 = sig_res_load(i_0, span - 1, 2);
-        sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 1);
-        sig_num_t sig_r_2 = sig_num_mul(sig_1, sig_2);
-
-        sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
-        file_write_sig_num(&fp, sig_r_1);
+        sig_num_t sig_r_2;
+        JOIN_LOAD("R1xQ2", i_0, span, depth,
+            sig_1 = sig_res_load(i_0, span - 1, 2);
+            sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 1);
+        );
+        JOIN_MUL("R1xQ2", i_0, span, depth,
+            sig_r_2 = sig_num_mul(sig_1, sig_2);
+        );
+        JOIN_WRITE("R1xQ2", i_0, span, depth,
+            sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
+            file_write_sig_num(&fp, sig_r_1);
+        );
         sig_num_free(sig_r_1);
 
         file_write_close(&fp);
@@ -376,29 +417,53 @@ void split_span_res_join(uint64_t size, uint64_t i_0, uint64_t span, uint64_t de
     }
 
     file_t fp = union_res_open_write(size, i_0, B(span), depth);
+    static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
     for(uint64_t i=0; i<2; i++)
     {
-        union_num_t u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
-        union_num_t u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, i);
-        union_num_t u = union_num_mul(u_1, u_2);
-        file_write_union_num(&fp, u);
+        const char *term = p_terms[i];
+
+        union_num_t u_1, u_2;
+        JOIN_LOAD(term, i_0, span, depth,
+            u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
+            u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, i);
+        );
+
+        union_num_t u;
+        JOIN_MUL(term, i_0, span, depth,
+            u = union_num_mul(u_1, u_2);
+        );
+
+        JOIN_WRITE(term, i_0, span, depth,
+            file_write_union_num(&fp, u);
+        );
         union_num_free(u);
     }
 
-    union_num_t u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
-    union_num_t u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
-    union_num_t u_r_1 = union_num_mul(u_1, u_2);
-    if(araucaria_disk_config_is_set())
-    {
-        u_r_1 = union_num_realloc_disk(u_r_1);
-    }
+    union_num_t u_1, u_2, u_r_1;
+    JOIN_LOAD("P1xR2", i_0, span, depth,
+        u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
+        u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
+    );
+    JOIN_MUL("P1xR2", i_0, span, depth,
+        u_r_1 = union_num_mul(u_1, u_2);
+        if(araucaria_disk_config_is_set())
+        {
+            u_r_1 = union_num_realloc_disk(u_r_1);
+        }
+    );
 
-    u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
-    u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
-    union_num_t u_r_2 = union_num_mul(u_1, u_2);
-
-    u_r_1 = union_num_add(u_r_1, u_r_2);
-    file_write_union_num(&fp, u_r_1);
+    union_num_t u_r_2;
+    JOIN_LOAD("R1xQ2", i_0, span, depth,
+        u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
+        u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
+    );
+    JOIN_MUL("R1xQ2", i_0, span, depth,
+        u_r_2 = union_num_mul(u_1, u_2);
+    );
+    JOIN_WRITE("R1xQ2", i_0, span, depth,
+        u_r_1 = union_num_add(u_r_1, u_r_2);
+        file_write_union_num(&fp, u_r_1);
+    );
     union_num_free(u_r_1);
 
     file_write_close(&fp);
@@ -487,30 +552,55 @@ void split_big_res_join(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_
     file_t fp = union_res_open_write(size, i_0, remainder, depth);
 
     uint64_t span = stdc_bit_width(remainder) - 1;
+    static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
     for(uint64_t i=0; i<2; i++)
     {
-        union_num_t u_1 = split_span_res_load(size, i_0, span, depth + 1, i);
-        union_num_t u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, i);
-        union_num_t u = union_num_mul(u_1, u_2);
+        const char *term = p_terms[i];
 
-        file_write_union_num(&fp, u);
+        union_num_t u_1, u_2;
+        JOIN_LOAD(term, i_0, remainder, depth,
+            u_1 = split_span_res_load(size, i_0, span, depth + 1, i);
+            u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, i);
+        );
+
+        union_num_t u;
+        JOIN_MUL(term, i_0, remainder, depth,
+            u = union_num_mul(u_1, u_2);
+        );
+
+        JOIN_WRITE(term, i_0, remainder, depth,
+            file_write_union_num(&fp, u);
+        );
         union_num_free(u);
     }
 
-    union_num_t u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
-    union_num_t u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
-    union_num_t u_r_1 = union_num_mul(u_1, u_2);
-    if(araucaria_disk_config_is_set())
-    {
-        u_r_1 = union_num_realloc_disk(u_r_1);
-    }
+    union_num_t u_1, u_2, u_r_1;
+    JOIN_LOAD("P1xR2", i_0, remainder, depth,
+        u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
+        u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
+    );
+    JOIN_MUL("P1xR2", i_0, remainder, depth,
+        u_r_1 = union_num_mul(u_1, u_2);
+        if(araucaria_disk_config_is_set())
+        {
+            u_r_1 = union_num_realloc_disk(u_r_1);
+        }
+    );
 
-    u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
-    u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
-    union_num_t u_r_2 = union_num_mul(u_1, u_2);
+    union_num_t u_r_2;
+    JOIN_LOAD("R1xQ2", i_0, remainder, depth,
+        u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
+        u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
+    );
+    JOIN_MUL("R1xQ2", i_0, remainder, depth,
+        u_r_2 = union_num_mul(u_1, u_2);
+    );
 
-    union_num_t u = union_num_add(u_r_1, u_r_2);
-    file_write_union_num(&fp, u);
+    union_num_t u;
+    JOIN_WRITE("R1xQ2", i_0, remainder, depth,
+        u = union_num_add(u_r_1, u_r_2);
+        file_write_union_num(&fp, u);
+    );
     union_num_free(u);
 
     file_write_close(&fp);
