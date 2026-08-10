@@ -158,13 +158,13 @@ static bool sig_res_is_stored(uint64_t i_0, uint64_t span)
     return true;
 }
 
-// Get the size of the first number
-static uint64_t sig_res_get_size(uint64_t i_0, uint64_t span)
+// Get the size of the number at the given index (0=P, 1=Q, 2=R)
+static uint64_t sig_res_get_size(uint64_t i_0, uint64_t span, uint64_t index)
 {
     FILE *fp = sig_res_try_open_read(i_0, span);
     assert(fp);
 
-    file_read_move_to_index(fp, 0);
+    file_read_move_to_index(fp, index);
     file_read_uint64(fp);
     uint64_t size = file_read_uint64(fp);
     fclose(fp);
@@ -235,15 +235,15 @@ static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder,
     return true;
 }
 
-// Exact limb count of a stored union_num's P (index 0), read from its file header
-// instead of loaded in full: a SIG-typed entry's count sits right after the signal
-// field; a FLT-typed entry is already fixed-precision at `size`.
-static uint64_t union_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+// Exact limb count of a stored union_num at the given index (0=P, 1=Q, 2=R), read
+// from its file header instead of loaded in full: a SIG-typed entry's count sits
+// right after the signal field; a FLT-typed entry is already fixed-precision at `size`.
+static uint64_t union_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t index)
 {
     FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
     assert(fp);
 
-    file_read_move_to_index(fp, 0);
+    file_read_move_to_index(fp, index);
     uint64_t type = file_read_uint64(fp);
     file_read_uint64(fp); // union_num.size (fixed working precision, unused here)
 
@@ -313,15 +313,15 @@ bool split_span_res_is_stored(
 
 // Real op size for a span node's already-stored result -- mirrors
 // split_span_res_is_stored's SIG-vs-union check but returns the exact size instead.
-uint64_t split_span_res_op_size(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+uint64_t split_span_res_op_size(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t index)
 {
     if(sig_res_is_stored(i_0, span))
     {
-        return sig_res_get_size(i_0, span);
+        return sig_res_get_size(i_0, span, index);
     }
 
     uint64_t remainder = B(span);
-    return union_res_op_size(size, i_0, remainder, depth);
+    return union_res_op_size(size, i_0, remainder, depth, index);
 }
 
 static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
@@ -338,7 +338,7 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
         return false;
     }
 
-    uint64_t size_1 = sig_res_get_size(i_0, span - 1);
+    uint64_t size_1 = sig_res_get_size(i_0, span - 1, 0);
     return size_1 < size;
 }
 
@@ -347,9 +347,12 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 // All processes read/write cache/*.bin over the same physical disk; this
 // lock turns concurrent I/O from every forked worker into a single queue so
 // a spinning disk isn't seeking between unrelated offsets. Held around a
-// matched pair of loads (both operands read in before releasing) and
-// separately around each write, but never across a JOIN_MUL -- so
-// multiplication still overlaps other processes' I/O.
+// matched pair of loads (both operands read in before releasing) and around
+// each write, but never across a JOIN_MUL -- so multiplication still
+// overlaps other processes' I/O. When a write is immediately followed by the
+// next term's pair of loads (nothing but a JOIN_HEADER log line in between),
+// the lock is kept held across that write-then-read boundary instead of
+// being released and immediately re-acquired -- see JOIN_WRITE_HOLD.
 static int g_disk_lock_fd = -1;
 
 static void disk_lock(void)
@@ -413,6 +416,18 @@ static void disk_unlock(void)
         disk_unlock(); \
     } while(0)
 
+// Like JOIN_WRITE, but leaves the lock held instead of releasing it: for a
+// write immediately followed (across just a JOIN_HEADER log line, no I/O in
+// between) by the next term's operand reads, so that write-then-read pair
+// stays under one continuous lock hold instead of unlocking and immediately
+// re-locking. The paired read must skip its own JOIN_LOCK and release the
+// lock itself (still via a plain disk_unlock()) once its loads are done.
+#define JOIN_WRITE_HOLD(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
+    do { \
+        JOIN_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \
+        JOIN_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
+    } while(0)
+
 void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
     int pid = (int)getpid();
@@ -429,7 +444,10 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
             sig_num_t sig_1;
             sig_num_t sig_2;
-            JOIN_LOCK(index, pid, i_0, span, depth);
+            if(i == 0)
+            {
+                JOIN_LOCK(index, pid, i_0, span, depth);
+            }
             JOIN_LOAD(p_op_1[i], index, pid, i_0, span, depth,
                 sig_1 = sig_res_load(i_0, span - 1, i);
             );
@@ -443,7 +461,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
                 sig = sig_num_mul(sig_1, sig_2);
             );
 
-            JOIN_WRITE(index, pid, i_0, span, depth,
+            JOIN_WRITE_HOLD(index, pid, i_0, span, depth,
                 file_write_sig_num(&fp, sig);
             );
             sig_num_free(sig);
@@ -453,7 +471,6 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         sig_num_t sig_1;
         sig_num_t sig_2;
-        JOIN_LOCK(index, pid, i_0, span, depth);
         JOIN_LOAD("P1", index, pid, i_0, span, depth,
             sig_1 = sig_res_load(i_0, span - 1, 0);
         );
@@ -505,7 +522,10 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         union_num_t u_1;
         union_num_t u_2;
+        if(i == 0)
+        {
             JOIN_LOCK(index, pid, i_0, span, depth);
+        }
         JOIN_LOAD(p_op_1[i], index, pid, i_0, span, depth,
             u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
         );
@@ -519,7 +539,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
             u = union_num_mul(u_1, u_2);
         );
 
-        JOIN_WRITE(index, pid, i_0, span, depth,
+        JOIN_WRITE_HOLD(index, pid, i_0, span, depth,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
@@ -529,7 +549,6 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
     union_num_t u_1;
     union_num_t u_2;
-    JOIN_LOCK(index, pid, i_0, span, depth);
     JOIN_LOAD("P1", index, pid, i_0, span, depth,
         u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
     );
@@ -640,15 +659,15 @@ bool split_big_res_is_stored(
 
 // Real op size for a big node's already-stored result -- mirrors
 // split_big_res_is_stored's span-collapse check but returns the exact size instead.
-uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t index)
 {
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
-        return split_span_res_op_size(size, i_0, span, depth);
+        return split_span_res_op_size(size, i_0, span, depth, index);
     }
 
-    return union_res_op_size(size, i_0, remainder, depth);
+    return union_res_op_size(size, i_0, remainder, depth, index);
 }
 
 void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
@@ -667,7 +686,10 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
         union_num_t u_1;
         union_num_t u_2;
-        JOIN_LOCK(index, pid, i_0, remainder, depth);
+        if(i == 0)
+        {
+            JOIN_LOCK(index, pid, i_0, remainder, depth);
+        }
         JOIN_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
             u_1 = split_span_res_load(size, i_0, span, depth + 1, i);
         );
@@ -681,7 +703,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
             u = union_num_mul(u_1, u_2);
         );
 
-        JOIN_WRITE(index, pid, i_0, remainder, depth,
+        JOIN_WRITE_HOLD(index, pid, i_0, remainder, depth,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
@@ -691,7 +713,6 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
     union_num_t u_1;
     union_num_t u_2;
-    JOIN_LOCK(index, pid, i_0, remainder, depth);
     JOIN_LOAD("P1", index, pid, i_0, remainder, depth,
         u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
     );

@@ -15,7 +15,7 @@
 #ifdef DEBUG
 #endif
 
-#define TREE_PIECE_SIZE 22
+#define TREE_PIECE_SIZE 24
 
 #define NODE_BIG 0
 #define NODE_SPAN 1
@@ -226,10 +226,11 @@ static node_p get_next_node(node_p n)
 
 // Estimates the average memory a node's join will use, from araucaria's own
 // num_mul_estimate_memory. A join runs four cross multiplications between the two
-// children (P1xP2, Q1xQ2, P1xR2, R1xQ2), but P, Q and R are the same order at
-// every node (split_sig_join keeps them in lockstep), so one call with each
-// child's P size stands in for all four. Operand sizes are read from each
-// child's already-stored result via split_span_res_op_size / split_big_res_op_size.
+// children (P1xP2, Q1xQ2, P1xR2, R1xQ2); R1xQ2 is used as the representative term,
+// since R accumulates contributions from both children and so tends to be the
+// largest operand of the four. Operand sizes are read from each child's
+// already-stored result via split_span_res_op_size / split_big_res_op_size
+// (index 2 = R, index 1 = Q).
 static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
 {
     uint64_t op_1 = 0;
@@ -248,8 +249,8 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
                 return 0;
             }
 
-            op_1 = split_span_res_op_size(size, i_0, span - 1, depth + 1);
-            op_2 = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1);
+            op_1 = split_span_res_op_size(size, i_0, span - 1, depth + 1, 2);
+            op_2 = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
         }
         break;
 
@@ -261,8 +262,8 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
             uint64_t depth = n->a.b.depth;
             uint64_t span = stdc_bit_width(remainder) - 1;
 
-            op_1 = split_span_res_op_size(size, i_0, span, depth + 1);
-            op_2 = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1);
+            op_1 = split_span_res_op_size(size, i_0, span, depth + 1, 2);
+            op_2 = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
         }
         break;
     }

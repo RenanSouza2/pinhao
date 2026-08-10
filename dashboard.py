@@ -20,6 +20,28 @@ DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
 TREE_PIECE_SIZE = None
 PIECES_PER_LEAF = None
 
+# Muted amber (#C9A66B) for the "loading"/"writing" micro-phases (actively
+# blocked in the I/O syscall). Not a full \x1b[0m reset: the screen
+# background is set once (SGR 48) when the alt-screen is entered and never
+# reapplied per frame, so a bare reset here would strip it for the rest of
+# the run. 39 (default foreground) clears just the color this pair set,
+# leaving the background alone.
+IO_ATTN_ON = "\x1b[38;2;201;166;107m"
+IO_ATTN_OFF = "\x1b[39m"
+
+# Wine (#722F37), not vibrant red, to flag the "locking" micro-phase. 39
+# (default foreground) is enough to clear it - see IO_ATTN_OFF comment
+# above for why a bare reset is avoided.
+LOCK_ON = "\x1b[38;2;114;47;55m"
+LOCK_OFF = "\x1b[39m"
+
+# Sage (#6B8E6B), a muted green rather than a vibrant one, for the
+# "multiplying" micro-phase - same 39-only reset as LOCK_OFF.
+MUL_ON = "\x1b[38;2;107;142;107m"
+MUL_OFF = "\x1b[39m"
+
+ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 
 def apply_piece_size(piece_size):
     global TREE_PIECE_SIZE, PIECES_PER_LEAF
@@ -187,6 +209,38 @@ def pi_process_running():
         return False
 
 
+def get_run_start_time():
+    """Wall-clock start time of the running pi process, taken from the oldest
+    pid matching the run: workers are fork()ed (not exec'd) from the same
+    binary, so they all share its command line and pgrep -f matches every
+    one of them - the oldest pid is the original parent."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"src/(main|debug)\.o"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    pids = [p for p in result.stdout.split() if p]
+    if not pids:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "etimes=", "-p", ",".join(pids)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    etimes = [int(x) for x in out.stdout.split() if x.strip()]
+    if not etimes:
+        return None
+    return time.time() - max(etimes)
+
+
 _SYSCTL_INT_CACHE = {}
 
 
@@ -313,6 +367,7 @@ class State:
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
         self.lock_count = 0
+        self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -323,6 +378,7 @@ class State:
         self.process_running = False
         self.process_gone_since = None  # time.time() process_running first went False since done
         self.ever_saw_process = False
+        self.run_start_time = None  # wall-clock start of the actual pi process, from get_run_start_time()
         self.done = False
 
     def touch(self):
@@ -417,15 +473,21 @@ def handle_join_phase(state, content):
     lines with the same [idx][pid] | i0 n2 depth shape as node_process, so
     RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
-    "locked" additionally rolls into a global lock-wait total (tracked here,
-    ahead of the tree lookup, so it isn't dropped on runs whose tree is too
-    large to display - see TREE_NODE_CAP)."""
+    "locking"/"locked" additionally maintain the set of pids currently
+    blocked waiting on the exclusive disk lock, and "locked" rolls into a
+    global lock-wait total (both tracked here, ahead of the tree lookup, so
+    they aren't dropped on runs whose tree is too large to display - see
+    TREE_NODE_CAP)."""
     m = RE_NODE_PROCESS.match(content)
     if not m:
         return
     action = re.sub(r"\s+", " ", m.group("action").strip())
+    pid = int(m.group("pid"))
 
-    if action == "locked":
+    if action == "locking":
+        state.locking_pids.add(pid)
+    elif action == "locked":
+        state.locking_pids.discard(pid)
         dur = m.group("dur")
         if dur is not None:
             state.lock_wait_total += float(dur)
@@ -459,6 +521,7 @@ def handle_task_end(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
+    state.locking_pids.discard(pid)
 
 
 def handle_scheduler(state, content):
@@ -621,7 +684,14 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                     op1, _, op2 = node.join_term.partition("x")
                     label += f" | {op1} x {op2}"
                     if node.join_micro:
-                        label += f" | {node.join_micro}"
+                        micro = node.join_micro
+                        if micro == "locking":
+                            micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
+                        elif micro == "multiplying":
+                            micro = f"{MUL_ON}{micro}{MUL_OFF}"
+                        elif micro.startswith("loading") or micro == "writing":
+                            micro = f"{IO_ATTN_ON}{micro}{IO_ATTN_OFF}"
+                        label += f" | {micro}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending"):
@@ -667,6 +737,9 @@ def render(state):
     elapsed = now - state.start_time if state.start_time else 0
     lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
+    if state.run_start_time is not None:
+        run_elapsed = now - state.run_start_time
+        lines.append(f"run:     {fmt_duration(run_elapsed)} (since process start)")
 
     piece_durs = [d for _, d in state.piece_events]
     avg_piece_dur = sum(piece_durs) / len(piece_durs) if piece_durs else None
@@ -715,7 +788,8 @@ def render(state):
     # --- active workers / ram (right column) ---
     status_lines = []
     n_workers = state.n_process or state.active_max
-    status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}")
+    blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids else ""
+    status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}")
 
     ram_parts = []
     if ram_total is not None:
@@ -798,9 +872,32 @@ def tail(path):
             f.close()
 
 
+def _fit_visible(line, width):
+    """Truncate/pad line to width visible columns, treating ANSI SGR escapes
+    (zero-width) as free so they're never split mid-sequence - a naive
+    line[:width] slice could otherwise cut an escape in half and leak color
+    into the rest of the screen."""
+    out = []
+    visible = 0
+    i, n = 0, len(line)
+    while i < n:
+        m = ANSI_SGR_RE.match(line, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+            continue
+        if visible < width:
+            out.append(line[i])
+            visible += 1
+        i += 1
+    if visible < width:
+        out.append(" " * (width - visible))
+    return "".join(out)
+
+
 def draw(state):
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    content = [line[:cols].ljust(cols) for line in render(state).split("\n")][:rows]
+    content = [_fit_visible(line, cols) for line in render(state).split("\n")][:rows]
     content += [" " * cols] * (rows - len(content))
     sys.stdout.write("\x1b[H\x1b[2J")
     sys.stdout.write("\n".join(content))
@@ -841,6 +938,8 @@ def main():
                     if state.process_running:
                         state.ever_saw_process = True
                         state.process_gone_since = None
+                        if state.run_start_time is None:
+                            state.run_start_time = get_run_start_time()
                     elif state.process_gone_since is None:
                         state.process_gone_since = now
                 draw(state)
