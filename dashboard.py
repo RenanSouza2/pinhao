@@ -311,6 +311,8 @@ class State:
         self.join_events = collections.deque(maxlen=2000)  # (time, dur)
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
+        self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
+        self.lock_count = 0
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -411,14 +413,26 @@ def handle_piece(state, content):
 
 def handle_join_phase(state, content):
     """split_span_res_join / split_big_res_join log their own header ("mul
-    P1xP2") and phase (loading/loaded/multiplying/.../written) lines with the
-    same [idx][pid] | i0 n2 depth shape as node_process, so RE_NODE_PROCESS
-    parses them too. Track the latest term/micro-phase on the matching tree
-    node so they can be shown beside it while it's in progress."""
+    P1xP2") and phase (loading/loaded/multiplying/.../written/locking/locked)
+    lines with the same [idx][pid] | i0 n2 depth shape as node_process, so
+    RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
+    matching tree node so they can be shown beside it while it's in progress.
+    "locked" additionally rolls into a global lock-wait total (tracked here,
+    ahead of the tree lookup, so it isn't dropped on runs whose tree is too
+    large to display - see TREE_NODE_CAP)."""
     m = RE_NODE_PROCESS.match(content)
-    if not m or not state.tree_by_key:
+    if not m:
         return
     action = re.sub(r"\s+", " ", m.group("action").strip())
+
+    if action == "locked":
+        dur = m.group("dur")
+        if dur is not None:
+            state.lock_wait_total += float(dur)
+            state.lock_count += 1
+
+    if not state.tree_by_key:
+        return
     i0 = int(m.group("i0"))
     depth = int(m.group("depth"))
     tree_node = state.tree_by_key.get((i0, depth))
@@ -720,6 +734,12 @@ def render(state):
         filled = int(bar_width * min(ram_used, ram_total) / ram_total)
         bar = "#" * filled + "-" * (bar_width - filled)
         status_lines.append(f"[{bar}]")
+    if state.lock_count:
+        avg_ms = 1000.0 * state.lock_wait_total / state.lock_count
+        status_lines.append(
+            f"disk lock wait: {fmt_duration(state.lock_wait_total)} total "
+            f"({state.lock_count} acquires, avg {avg_ms:.0f}ms)"
+        )
 
     col_width = max((len(l) for l in completion_lines), default=0) + 4
     for i in range(max(len(completion_lines), len(status_lines))):

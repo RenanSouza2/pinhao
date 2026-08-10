@@ -1,5 +1,7 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/file.h>
 
 #include "debug.h" // IWYU pragma: keep
 #include "../../mods/clu/header.h" // IWYU pragma: keep
@@ -342,6 +344,31 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 
 
 
+// All processes read/write cache/*.bin over the same physical disk; this
+// lock turns concurrent I/O from every forked worker into a single queue so
+// a spinning disk isn't seeking between unrelated offsets. Held around a
+// matched pair of loads (both operands read in before releasing) and
+// separately around each write, but never across a JOIN_MUL -- so
+// multiplication still overlaps other processes' I/O.
+static int g_disk_lock_fd = -1;
+
+static void disk_lock(void)
+{
+    if(g_disk_lock_fd < 0)
+    {
+        g_disk_lock_fd = open(CACHE "/disk.lock", O_CREAT | O_RDWR, 0644);
+        assert(g_disk_lock_fd >= 0);
+    }
+    int res = flock(g_disk_lock_fd, LOCK_EX);
+    assert(res == 0);
+}
+
+static void disk_unlock(void)
+{
+    int res = flock(g_disk_lock_fd, LOCK_UN);
+    assert(res == 0);
+}
+
 // A join runs four cross multiplications between the two children (P1xP2,
 // Q1xQ2, P1xR2, R1xQ2 -- see node_estimate_memory in lib/tree/code.c). Each
 // term is announced with a header line first, then broken into its
@@ -373,7 +400,18 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 
 #define JOIN_LOAD(OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) JOIN_LOAD_LABELED("loading", "loaded", OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 #define JOIN_MUL(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      JOIN_PHASE("multiplying", "multiplied", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
-#define JOIN_WRITE(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)    JOIN_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
+
+// Timed like any other phase, so a long "locking" -> "locked" gap in the log
+// (and in the dashboard's join_micro column) reads as lock contention rather
+// than silently vanishing into disk_lock()'s blocking flock() call.
+#define JOIN_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH) JOIN_PHASE("locking", "locked", INDEX, PID, I_0, SPAN_ARG, DEPTH, disk_lock();)
+
+#define JOIN_WRITE(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
+    do { \
+        JOIN_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \
+        JOIN_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
+        disk_unlock(); \
+    } while(0)
 
 void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
@@ -390,14 +428,15 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
             JOIN_HEADER(p_terms[i], index, pid, i_0, span, depth);
 
             sig_num_t sig_1;
+            sig_num_t sig_2;
+            JOIN_LOCK(index, pid, i_0, span, depth);
             JOIN_LOAD(p_op_1[i], index, pid, i_0, span, depth,
                 sig_1 = sig_res_load(i_0, span - 1, i);
             );
-
-            sig_num_t sig_2;
             JOIN_LOAD(p_op_2[i], index, pid, i_0, span, depth,
                 sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, i);
             );
+            disk_unlock();
 
             sig_num_t sig;
             JOIN_MUL(index, pid, i_0, span, depth,
@@ -413,14 +452,15 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
         JOIN_HEADER("P1xR2", index, pid, i_0, span, depth);
 
         sig_num_t sig_1;
+        sig_num_t sig_2;
+        JOIN_LOCK(index, pid, i_0, span, depth);
         JOIN_LOAD("P1", index, pid, i_0, span, depth,
             sig_1 = sig_res_load(i_0, span - 1, 0);
         );
-
-        sig_num_t sig_2;
         JOIN_LOAD("R2", index, pid, i_0, span, depth,
             sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 2);
         );
+        disk_unlock();
 
         sig_num_t sig_r_1;
         JOIN_MUL(index, pid, i_0, span, depth,
@@ -429,13 +469,14 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         JOIN_HEADER("R1xQ2", index, pid, i_0, span, depth);
 
+        JOIN_LOCK(index, pid, i_0, span, depth);
         JOIN_LOAD("R1", index, pid, i_0, span, depth,
             sig_1 = sig_res_load(i_0, span - 1, 2);
         );
-
         JOIN_LOAD("Q2", index, pid, i_0, span, depth,
             sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 1);
         );
+        disk_unlock();
 
         sig_num_t sig_r_2;
         JOIN_MUL(index, pid, i_0, span, depth,
@@ -463,14 +504,15 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
         JOIN_HEADER(p_terms[i], index, pid, i_0, span, depth);
 
         union_num_t u_1;
+        union_num_t u_2;
+            JOIN_LOCK(index, pid, i_0, span, depth);
         JOIN_LOAD(p_op_1[i], index, pid, i_0, span, depth,
             u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
         );
-
-        union_num_t u_2;
         JOIN_LOAD(p_op_2[i], index, pid, i_0, span, depth,
             u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, i);
         );
+        disk_unlock();
 
         union_num_t u;
         JOIN_MUL(index, pid, i_0, span, depth,
@@ -486,14 +528,15 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
     JOIN_HEADER("P1xR2", index, pid, i_0, span, depth);
 
     union_num_t u_1;
+    union_num_t u_2;
+    JOIN_LOCK(index, pid, i_0, span, depth);
     JOIN_LOAD("P1", index, pid, i_0, span, depth,
         u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
     );
-
-    union_num_t u_2;
     JOIN_LOAD("R2", index, pid, i_0, span, depth,
         u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
     );
+    disk_unlock();
 
     union_num_t u_r_1;
     JOIN_MUL(index, pid, i_0, span, depth,
@@ -506,13 +549,14 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
     JOIN_HEADER("R1xQ2", index, pid, i_0, span, depth);
 
+    JOIN_LOCK(index, pid, i_0, span, depth);
     JOIN_LOAD("R1", index, pid, i_0, span, depth,
         u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
     );
-
     JOIN_LOAD("Q2", index, pid, i_0, span, depth,
         u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
     );
+    disk_unlock();
 
     union_num_t u_r_2;
     JOIN_MUL(index, pid, i_0, span, depth,
@@ -622,14 +666,15 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
         JOIN_HEADER(p_terms[i], index, pid, i_0, remainder, depth);
 
         union_num_t u_1;
+        union_num_t u_2;
+        JOIN_LOCK(index, pid, i_0, remainder, depth);
         JOIN_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
             u_1 = split_span_res_load(size, i_0, span, depth + 1, i);
         );
-
-        union_num_t u_2;
         JOIN_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
             u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, i);
         );
+        disk_unlock();
 
         union_num_t u;
         JOIN_MUL(index, pid, i_0, remainder, depth,
@@ -645,14 +690,15 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
     JOIN_HEADER("P1xR2", index, pid, i_0, remainder, depth);
 
     union_num_t u_1;
+    union_num_t u_2;
+    JOIN_LOCK(index, pid, i_0, remainder, depth);
     JOIN_LOAD("P1", index, pid, i_0, remainder, depth,
         u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
     );
-
-    union_num_t u_2;
     JOIN_LOAD("R2", index, pid, i_0, remainder, depth,
         u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
     );
+    disk_unlock();
 
     union_num_t u_r_1;
     JOIN_MUL(index, pid, i_0, remainder, depth,
@@ -665,13 +711,14 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
     JOIN_HEADER("R1xQ2", index, pid, i_0, remainder, depth);
 
+    JOIN_LOCK(index, pid, i_0, remainder, depth);
     JOIN_LOAD("R1", index, pid, i_0, remainder, depth,
         u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
     );
-
     JOIN_LOAD("Q2", index, pid, i_0, remainder, depth,
         u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
     );
+    disk_unlock();
 
     union_num_t u_r_2;
     JOIN_MUL(index, pid, i_0, remainder, depth,

@@ -40,7 +40,7 @@ int main(void)
     // };
     // num_config_set(&config);
 
-    pi(4'000'000, 16);
+    pi(128'000'000, 16);
 
     printf("\n");
     return 0;
