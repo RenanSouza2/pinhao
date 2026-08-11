@@ -64,7 +64,7 @@ def apply_piece_size(piece_size):
     TREE_PIECE_SIZE = piece_size
     PIECES_PER_LEAF = 1 << piece_size
 
-_TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]"
+_TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
@@ -450,14 +450,16 @@ def handle_node_process(state, content):
     tree_node = state.tree_by_key.get((i0, depth)) if state.tree_by_key else None
 
     if action == "begin":
-        entry = state.active.setdefault(pid, {"start": time.time()})
+        ts = float(m.group("ts"))
+        entry = state.active.setdefault(pid, {})
+        entry["start"] = ts
         entry["depth"] = depth
         entry["i0"] = i0
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
             tree_node.pid = pid
-            tree_node.start_time = entry["start"]
+            tree_node.start_time = ts
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
@@ -551,7 +553,7 @@ def handle_task_start(state, content):
     if not m:
         return
     pid = int(m.group("pid"))
-    state.active.setdefault(pid, {"start": time.time(), "depth": None, "i0": None})
+    state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
 
 
 def handle_task_end(state, content):
@@ -693,26 +695,24 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
         mark, state, status = "✓", "done", None
     elif node.in_progress:
         mark, state, status = "▸", "in_progress", str(node.task_idx)
+    elif node.children and all(c.own_done for c in node.children):
+        mark, state, status = "·", "ready", None
     elif node.leaves_done > 0:
         mark, state, status = "·", "in_progress", None
     elif node.active_count > 0:
         mark, state, status = "○", "in_progress", None
-    elif node.children and all(c.own_done for c in node.children):
-        mark, state, status = "◆", "ready", "ready"
     else:
         mark, state, status = "·", "pending", None
 
-    id_str = f"{node.i0:,}"
-    if state == "ready":
-        id_str = f"{READY_ID_ON}{id_str}{READY_ID_OFF}"
-    elif state == "done":
-        id_str = f"{DONE_ID_ON}{id_str}{DONE_ID_OFF}"
-
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
     if node.kind == "BIG":
-        label = f"[{node.depth}, B, {id_str}]"
+        label = f"[{node.depth}, B, {node.i0:,}]"
     else:
-        label = f"[{node.depth}, {node.n2}, {id_str}]"
+        label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
+    if state == "ready":
+        label = f"{READY_ID_ON}{label}{READY_ID_OFF}"
+    elif state == "done":
+        label = f"{DONE_ID_ON}{label}{DONE_ID_OFF}"
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
@@ -746,7 +746,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                         label += f" | {micro}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
-    if state in ("done", "pending"):
+    if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
         return
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")

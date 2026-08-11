@@ -283,7 +283,7 @@ static node_p get_next_node(tree_scheduler_p s, node_p n, uint64_t index)
 
     if(node_is_ready(n))
     {
-        uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX);
+        uint64_t mem_cost = node_estimate_memory(n, araucaria_disk_config_get_threshold());
         if(
             index > 0 &&
             mem_cost > 0 &&
@@ -331,20 +331,20 @@ static void node_process(node_p n, uint64_t index)
             uint64_t remainder = n->a.b.remainder;
             uint64_t depth = n->a.b.depth;
 
-            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, remainder, depth);
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
 
             if(split_big_res_is_stored(size, i_0, remainder, depth))
             {
-                tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, remainder, depth);
+                tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "already stored", i_0, remainder, depth);
                 return;
             }
 
-            uint64_t mem_avg_bytes = node_estimate_memory(n, UINT64_MAX);
-            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, "joining", i_0, remainder, depth, mem_avg_bytes);
+            uint64_t mem_avg_bytes = node_estimate_memory(n, araucaria_disk_config_get_threshold());
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, remainder, depth, mem_avg_bytes);
             TIME_SETUP
             split_big_res_join(index, size, i_0, remainder, depth);
             TIME_END(t1)
-            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, remainder, depth, dtime(t1));
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, remainder, depth, dtime(t1));
         }
         break;
 
@@ -355,11 +355,11 @@ static void node_process(node_p n, uint64_t index)
             uint64_t span = n->a.s.span;
             uint64_t depth = n->a.s.depth;
 
-            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, span, depth);
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
 
             if(split_span_res_is_stored(size, i_0, span, depth))
             {
-                tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "already stored", i_0, span, depth);
+                tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "already stored", i_0, span, depth);
                 return;
             }
 
@@ -368,16 +368,16 @@ static void node_process(node_p n, uint64_t index)
                 TIME_SETUP
                 split_piece(i_0, span);
                 TIME_END(t1)
-                tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, "piece", i_0, span, "", dtime(t1));
+                tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, get_wall_time(), "piece", i_0, span, "", dtime(t1));
                 return;
             }
 
-            uint64_t mem_avg_bytes = node_estimate_memory(n, UINT64_MAX);
-            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, "joining", i_0, span, depth, mem_avg_bytes);
+            uint64_t mem_avg_bytes = node_estimate_memory(n, araucaria_disk_config_get_threshold());
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, span, depth, mem_avg_bytes);
             TIME_SETUP
             split_span_res_join(index, size, i_0, span, depth);
             TIME_END(t1)
-            tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
         }
         break;
     }
@@ -412,7 +412,7 @@ static void task_start(tree_scheduler_p s, node_p n)
         exit(EXIT_SUCCESS);
     }
 
-    tprintf("[" U64P(2) "][%7d] %-20s|", index, (int)pid, "task start");
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s|", index, (int)pid, get_wall_time(), "task start");
 
     s->tasks[index] = (tree_task_t){
         .pid = pid,
@@ -443,7 +443,7 @@ static bool task_end(tree_scheduler_p s, pid_t pid)
     node_p n = s->tasks[index].n;
     uint64_t time_start = s->tasks[index].time_start;
 
-    tprintf("[" U64P(2) "][%7d] %-20s| %25s | %7.1f", index, (int)pid, "task end", "", dtime(get_time() - time_start));
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| %25s | %7.1f", index, (int)pid, get_wall_time(), "task end", "", dtime(get_time() - time_start));
 
     s->tasks[index].active = false;
     s->total_mem_cost -= n->mem_cost;

@@ -381,24 +381,24 @@ static void disk_unlock(void)
 // line came from, so concurrent joins' interleaved output on stderr stays
 // attributable.
 #define JOIN_HEADER(TERM, INDEX, PID, I_0, SPAN_ARG, DEPTH) \
-    tprintf("[" U64P(2) "][%7d] mul %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, TERM, I_0, SPAN_ARG, DEPTH)
+    tprintf("[" U64P(2) "][%7d][%17.6f] mul %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), TERM, I_0, SPAN_ARG, DEPTH)
 
 #define JOIN_PHASE(BEGIN, END, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                               \
     do {                                                                                                             \
-        tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, BEGIN, I_0, SPAN_ARG, DEPTH); \
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), BEGIN, I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                   \
         STMT                                                                                                         \
         TIME_END(_t)                                                                                                 \
-        tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, END, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), END, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
     } while(0)
 
 #define JOIN_LOAD_LABELED(BEGIN, END, LABEL, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                              \
     do {                                                                                                                          \
-        tprintf("[" U64P(2) "][%7d] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, BEGIN, LABEL, I_0, SPAN_ARG, DEPTH); \
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), BEGIN, LABEL, I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                                \
         STMT                                                                                                                      \
         TIME_END(_t)                                                                                                              \
-        tprintf("[" U64P(2) "][%7d] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, END, LABEL, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), END, LABEL, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
     } while(0)
 
 #define JOIN_LOAD(OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) JOIN_LOAD_LABELED("loading", "loaded", OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
@@ -599,7 +599,7 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
     int pid = (int)getpid();
 
     assert(span >= PIECE_SIZE);
-    tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, span, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
 
     if(split_span_res_is_stored(size, i_0, span, depth))
     {
@@ -615,11 +615,11 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
     split_span(index, size, i_0              , span - 1, depth + 1);
     split_span(index, size, i_0 + B(span - 1), span - 1, depth + 1);
 
-    tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, span, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
     split_span_res_join(index, size, i_0, span, depth);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
 
 
@@ -764,7 +764,7 @@ static void split_big(uint64_t index, uint64_t size, uint64_t i_0, uint64_t rema
 {
     int pid = (int)getpid();
 
-    tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "begin", i_0, remainder, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
 
     if(split_big_res_is_stored(size, i_0, remainder, depth))
     {
@@ -781,11 +781,11 @@ static void split_big(uint64_t index, uint64_t size, uint64_t i_0, uint64_t rema
     split_span(index, size, i_0, span, depth + 1);
     split_big(index, size, i_0 + B(span), remainder - B(span), depth + 1);
 
-    tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, "joining", i_0, span, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
     split_big_res_join(index, size, i_0, remainder, depth);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, "joined", i_0, span, depth, dtime(t1));
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
 
 

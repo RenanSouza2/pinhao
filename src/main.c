@@ -4,7 +4,7 @@
 #include "../mods/macros/assert.h" // IWYU pragma: keep
 // #include "../mods/macros/fork.h"
 #include "../mods/macros/time.h"
-// #include "../mods/araucaria/lib/num/struct.h"
+#include "../mods/araucaria/lib/num/struct.h"
 
 // #define CACHE "/mnt/wsl/external_workspace/cache"
 // #include "../lib/linear/linear/header.h"
@@ -32,16 +32,14 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    // char disk_path[] = "./cache/tmp";
-    // char disk_path[] = "/mnt/wsl/external_workspace/cache/tmp";
-    // num_config_t config = {
-    //     .disk_path = disk_path,
-    //     .disk_threshold = (uint64_t)1024 * 1024 * 1024
-    // };
-    // num_config_set(&config);
+    araucaria_disk_config_t config = {
+        .disk_path = "/mnt/wsl/workspace/tmp",
+        .disk_threshold = 256'000'000 // ~2GiB per number; see derivation in conversation
+    };
+    araucaria_disk_config_set(&config);
 
-    uint64_t mem_budget = U64(15) * 1024 * 1024 * 1024; // 15G
-    pi(128'000'000, 16, mem_budget);
+    uint64_t mem_budget = U64(16) * 1024 * 1024 * 1024; // 16G
+    pi(1'000'000'000, 16, mem_budget);
 
     printf("\n");
     return 0;
