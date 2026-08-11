@@ -82,6 +82,7 @@ RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
 RE_MEM_BUDGET = re.compile(r"mem budget\s*\|\s*(?P<mem_budget>\d+)")
+RE_DISK_LOCK = re.compile(r"disk lock\s*\|\s*(?P<disk_lock>\d+)")
 
 
 def get_index_max(size, piece_size=None):
@@ -396,6 +397,7 @@ class State:
         self.n_process = n_process
         self.explicit_size = explicit_size
         self.mem_budget = None
+        self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.pieces_done = 0
         self.pieces_from_cache = 0
         self.joins_done = 0
@@ -518,7 +520,11 @@ def handle_join_phase(state, content):
     blocked waiting on the exclusive disk lock, and "locked" rolls into a
     global lock-wait total (both tracked here, ahead of the tree lookup, so
     they aren't dropped on runs whose tree is too large to display - see
-    TREE_NODE_CAP)."""
+    TREE_NODE_CAP). These lines still fire even when the run's disk lock is
+    compiled out (LOCK_DISK_IO undefined, see lib/big/code.c) - disk_lock()
+    just becomes a near-instant no-op then, so the counters below keep
+    accumulating tiny numbers; the display layer is what hides them once
+    state.disk_lock_enabled reads False."""
     m = RE_NODE_PROCESS.match(content)
     if not m:
         return
@@ -593,6 +599,11 @@ def handle_phase(state, content):
     m = RE_MEM_BUDGET.match(content)
     if m:
         state.mem_budget = int(m.group("mem_budget"))
+        return
+
+    m = RE_DISK_LOCK.match(content)
+    if m:
+        state.disk_lock_enabled = bool(int(m.group("disk_lock")))
         return
 
     m = RE_PHASE.match(content)
@@ -690,7 +701,7 @@ def active_mem_estimate(node):
     return total
 
 
-def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, prefix="", is_last=True, is_root=True):
+def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, disk_lock_enabled=True, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
@@ -737,7 +748,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                     label += f" | {op1} x {op2}"
                     if node.join_micro:
                         micro = node.join_micro
-                        if micro == "locking":
+                        if micro == "locking" and disk_lock_enabled:
                             micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
                         elif micro == "multiplying":
                             micro = f"{MUL_ON}{micro}{MUL_OFF}"
@@ -754,7 +765,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
         render_tree(
             child, lines, now, avg_piece_dur, avg_join_dur,
             piece_events_by_depth, join_events_by_depth, pid_rss,
-            child_prefix, i == len(node.children) - 1, is_root=False,
+            disk_lock_enabled, child_prefix, i == len(node.children) - 1, is_root=False,
         )
 
 
@@ -843,7 +854,7 @@ def render(state):
     # --- active workers / ram (right column) ---
     status_lines = []
     n_workers = state.n_process or state.active_max
-    blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids else ""
+    blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids and state.disk_lock_enabled is not False else ""
     status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}")
 
     ram_parts = []
@@ -864,7 +875,7 @@ def render(state):
         filled = int(bar_width * min(ram_used, ram_total) / ram_total)
         bar = "#" * filled + "-" * (bar_width - filled)
         status_lines.append(f"[{bar}]")
-    if state.lock_count:
+    if state.lock_count and state.disk_lock_enabled is not False:
         avg_ms = 1000.0 * state.lock_wait_total / state.lock_count
         status_lines.append(
             f"disk lock wait: {fmt_duration(state.lock_wait_total)} total "
@@ -883,6 +894,7 @@ def render(state):
         render_tree(
             state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
             state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
+            state.disk_lock_enabled is not False,
         )
     elif state.tree_skipped_reason:
         lines.append(f"tree: {state.tree_skipped_reason}")

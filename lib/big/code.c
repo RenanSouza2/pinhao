@@ -1,3 +1,5 @@
+// #define LOCK_DISK_IO
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -353,10 +355,18 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 // next term's pair of loads (nothing but a JOIN_HEADER log line in between),
 // the lock is kept held across that write-then-read boundary instead of
 // being released and immediately re-acquired -- see JOIN_WRITE_HOLD.
+//
+// Only worth it on a spinning disk, where random seeks are expensive; on an
+// SSD there's no seek penalty, so the lock is pure contention with no
+// benefit. Gated behind LOCK_DISK_IO (see top of file) -- undefine it to
+// skip locking entirely.
+#ifdef LOCK_DISK_IO
 static int g_disk_lock_fd = -1;
+#endif
 
 static void disk_lock(void)
 {
+#ifdef LOCK_DISK_IO
     if(g_disk_lock_fd < 0)
     {
         g_disk_lock_fd = open(CACHE "/disk.lock", O_CREAT | O_RDWR, 0644);
@@ -364,12 +374,26 @@ static void disk_lock(void)
     }
     int res = flock(g_disk_lock_fd, LOCK_EX);
     assert(res == 0);
+#endif
 }
 
 static void disk_unlock(void)
 {
+#ifdef LOCK_DISK_IO
     int res = flock(g_disk_lock_fd, LOCK_UN);
     assert(res == 0);
+#endif
+}
+
+// So the run's log (and dashboard.py, which reads it) can report whether
+// disk_lock()/disk_unlock() are actually locking or just timed no-ops.
+bool disk_lock_enabled(void)
+{
+#ifdef LOCK_DISK_IO
+    return true;
+#else
+    return false;
+#endif
 }
 
 // A join runs four cross multiplications between the two children (P1xP2,

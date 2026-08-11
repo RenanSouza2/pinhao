@@ -513,6 +513,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_budget)
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
     tprintf("              %-20s| " U64P(10) "", "mem budget", mem_budget);
+    tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
     if(pi_is_stored(size))
     {
