@@ -32,11 +32,11 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    araucaria_disk_config_t config = {
-        .disk_path = "/mnt/wsl/workspace/tmp",
-        .disk_threshold = 256'000'000 // ~2GiB per number; see derivation in conversation
-    };
-    araucaria_disk_config_set(&config);
+    // araucaria_disk_config_t config = {
+    //     .disk_path = "/mnt/wsl/workspace/tmp",
+    //     .disk_threshold_bytes = 2'048'000'000 // ~2GiB per number; see derivation in conversation
+    // };
+    // araucaria_disk_config_set(&config);
 
     uint64_t mem_budget = U64(16) * 1024 * 1024 * 1024; // 16G
     pi(1'000'000'000, 16, mem_budget);

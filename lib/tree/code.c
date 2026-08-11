@@ -1,5 +1,6 @@
 // #define LOCK_IN_PLACE
 
+#include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -201,7 +202,7 @@ static bool node_is_ready(node_p n)
 // largest operand of the four. Operand sizes are read from each child's
 // already-stored result via split_span_res_op_size / split_big_res_op_size
 // (index 2 = R, index 1 = Q).
-static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
+static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes)
 {
     uint64_t op_1 = 0;
     uint64_t op_2 = 0;
@@ -238,7 +239,7 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
         break;
     }
 
-    return num_mul_estimate_memory(op_1, op_2, disk_threshold);
+    return num_mul_estimate_memory(op_1, op_2, disk_threshold_bytes);
 }
 
 STRUCT(tree_task)
@@ -283,7 +284,7 @@ static node_p get_next_node(tree_scheduler_p s, node_p n, uint64_t index)
 
     if(node_is_ready(n))
     {
-        uint64_t mem_cost = node_estimate_memory(n, araucaria_disk_config_get_threshold());
+        uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX);
         if(
             index > 0 &&
             mem_cost > 0 &&
@@ -339,8 +340,7 @@ static void node_process(node_p n, uint64_t index)
                 return;
             }
 
-            uint64_t mem_avg_bytes = node_estimate_memory(n, araucaria_disk_config_get_threshold());
-            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, remainder, depth, mem_avg_bytes);
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, remainder, depth, n->mem_cost);
             TIME_SETUP
             split_big_res_join(index, size, i_0, remainder, depth);
             TIME_END(t1)
@@ -372,8 +372,7 @@ static void node_process(node_p n, uint64_t index)
                 return;
             }
 
-            uint64_t mem_avg_bytes = node_estimate_memory(n, araucaria_disk_config_get_threshold());
-            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, span, depth, mem_avg_bytes);
+            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, span, depth, n->mem_cost);
             TIME_SETUP
             split_span_res_join(index, size, i_0, span, depth);
             TIME_END(t1)
