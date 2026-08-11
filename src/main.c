@@ -14,9 +14,9 @@
 
 
 [[maybe_unused]]
-static void pi(uint64_t size, uint64_t n_process)
+static void pi(uint64_t size, uint64_t n_process, uint64_t mem_budget)
 {
-    flt_num_t flt_pi = pi_tree(size, n_process);
+    flt_num_t flt_pi = pi_tree(size, n_process, mem_budget);
     printf("\n\n");
     tprintf("              %-20s|", "display begin");
     TIME_SETUP
@@ -40,7 +40,8 @@ int main(void)
     // };
     // num_config_set(&config);
 
-    pi(128'000'000, 16);
+    uint64_t mem_budget = U64(15) * 1024 * 1024 * 1024; // 15G
+    pi(128'000'000, 16, mem_budget);
 
     printf("\n");
     return 0;

@@ -41,6 +41,7 @@ STRUCT(node)
     node_p parent;
     uint64_t type;
     bool processing;
+    uint64_t mem_cost;
     union {
         big_t b;
         span_t s;
@@ -155,7 +156,7 @@ static node_p node_expand(node_p n, uint64_t index)
     revert()
 }
 
-static bool node_is_ready(node_p n)
+static bool node_is_stored(node_p n)
 {
     switch(n->type)
     {
@@ -177,7 +178,11 @@ static bool node_is_ready(node_p n)
         }
         break;
     }
+    return false;
+}
 
+static bool node_is_ready(node_p n)
+{
     for(uint64_t i=0; i<2; i++)
     {
         if(!n->children[i].done)
@@ -187,41 +192,6 @@ static bool node_is_ready(node_p n)
     }
 
     return true;
-}
-
-static node_p get_next_node(node_p n)
-{
-    if(n->processing)
-    {
-        return NULL;
-    }
-
-    if(node_is_ready(n))
-    {
-        n->processing = true;
-        return n;
-    }
-
-    for(uint64_t i=0; i<2; i++)
-    {
-        if(n->children[i].done)
-        {
-            continue;
-        }
-
-        if(n->children[i].n == NULL)
-        {
-            n->children[i].n = node_expand(n, i);
-        }
-
-        node_p n_next = get_next_node(n->children[i].n);
-        if(n_next)
-        {
-            return n_next;
-        }
-    }
-
-    return NULL;
 }
 
 // Estimates the average memory a node's join will use, from araucaria's own
@@ -269,6 +239,83 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold)
     }
 
     return num_mul_estimate_memory(op_1, op_2, disk_threshold);
+}
+
+STRUCT(tree_task)
+{
+    pid_t pid;
+    node_p n;
+    uint64_t time_start;
+    bool active;
+};
+
+STRUCT(tree_scheduler)
+{
+    tree_task_p tasks;
+    uint64_t total_mem_cost;
+    uint64_t n_process;
+    uint64_t mem_budget;
+};
+
+static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_budget)
+{
+    tree_scheduler_t s = {
+        .tasks = calloc(n_process, sizeof(tree_task_t)),
+        .total_mem_cost = 0,
+        .n_process = n_process,
+        .mem_budget = mem_budget
+    };
+    assert(s.tasks);
+    return s;
+}
+
+static node_p get_next_node(tree_scheduler_p s, node_p n, uint64_t index)
+{
+    if(n->processing)
+    {
+        return NULL;
+    }
+
+    if(node_is_stored(n))
+    {
+        return n;
+    }
+
+    if(node_is_ready(n))
+    {
+        uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX);
+        if(
+            index > 0 &&
+            mem_cost > 0 &&
+            s->total_mem_cost + mem_cost > s->mem_budget
+        ) {
+            return NULL;
+        }
+
+        n->mem_cost = mem_cost;
+        return n;
+    }
+
+    for(uint64_t i=0; i<2; i++)
+    {
+        if(n->children[i].done)
+        {
+            continue;
+        }
+
+        if(n->children[i].n == NULL)
+        {
+            n->children[i].n = node_expand(n, i);
+        }
+
+        node_p n_next = get_next_node(s, n->children[i].n, index);
+        if(n_next)
+        {
+            return n_next;
+        }
+    }
+
+    return NULL;
 }
 
 static void node_process(node_p n, uint64_t index)
@@ -336,19 +383,11 @@ static void node_process(node_p n, uint64_t index)
     }
 }
 
-STRUCT(tree_task)
+static uint64_t get_free_index(tree_scheduler_p s)
 {
-    pid_t pid;
-    node_p n;
-    uint64_t time_start;
-    bool active;
-};
-
-static uint64_t get_free_index(tree_task_p tasks, uint64_t n_process)
-{
-    for(uint64_t i=0; i<n_process; i++)
+    for(uint64_t i=0; i<s->n_process; i++)
     {
-        if(!tasks[i].active)
+        if(!s->tasks[i].active)
         {
             return i;
         }
@@ -357,8 +396,12 @@ static uint64_t get_free_index(tree_task_p tasks, uint64_t n_process)
     revert()
 }
 
-static void task_start(tree_task_p tasks, uint64_t index, node_p n)
+static void task_start(tree_scheduler_p s, node_p n)
 {
+    uint64_t index = get_free_index(s);
+
+    n->processing = true;
+
     pid_t pid = fork_safe();
     if(pid == 0)
     {
@@ -371,19 +414,21 @@ static void task_start(tree_task_p tasks, uint64_t index, node_p n)
 
     tprintf("[" U64P(2) "][%7d] %-20s|", index, (int)pid, "task start");
 
-    tasks[index] = (tree_task_t){
+    s->tasks[index] = (tree_task_t){
         .pid = pid,
         .n = n,
         .time_start = get_time(),
         .active = true
     };
+
+    s->total_mem_cost += n->mem_cost;
 }
 
-static uint64_t get_task_index(tree_task_p tasks, pid_t pid, uint64_t n_process)
+static uint64_t get_task_index(tree_scheduler_p s, pid_t pid)
 {
-    for(uint64_t i=0; i<n_process; i++)
+    for(uint64_t i=0; i<s->n_process; i++)
     {
-        if(tasks[i].active && tasks[i].pid == pid)
+        if(s->tasks[i].active && s->tasks[i].pid == pid)
         {
             return i;
         }
@@ -392,15 +437,16 @@ static uint64_t get_task_index(tree_task_p tasks, pid_t pid, uint64_t n_process)
     revert()
 }
 
-static bool task_end(tree_task_p tasks, pid_t pid, uint64_t n_process)
+static bool task_end(tree_scheduler_p s, pid_t pid)
 {
-    uint64_t index = get_task_index(tasks, pid, n_process);
-    node_p n = tasks[index].n;
-    uint64_t time_start = tasks[index].time_start;
+    uint64_t index = get_task_index(s, pid);
+    node_p n = s->tasks[index].n;
+    uint64_t time_start = s->tasks[index].time_start;
 
     tprintf("[" U64P(2) "][%7d] %-20s| %25s | %7.1f", index, (int)pid, "task end", "", dtime(get_time() - time_start));
 
-    tasks[index].active = false;
+    s->tasks[index].active = false;
+    s->total_mem_cost -= n->mem_cost;
 
     node_p parent = n->parent;
 
@@ -424,42 +470,40 @@ static bool task_end(tree_task_p tasks, pid_t pid, uint64_t n_process)
     revert()
 }
 
-static void scheduler(uint64_t size, uint64_t n_process)
+static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_budget)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    tree_task_p tasks = calloc(n_process, sizeof(tree_task_t));
-    assert(tasks);
+    tree_scheduler_t s = tree_scheduler_create(n_process, mem_budget);
 
     uint64_t active = 0;
     for(;;)
     {
         for(; active<n_process; active++)
         {
-            node_p n = get_next_node(n_root);
+            node_p n = get_next_node(&s, n_root, active);
             if(n == NULL)
             {
                 break;
             }
 
-            uint64_t index = get_free_index(tasks, n_process);
-            task_start(tasks, index, n);
+            task_start(&s, n);
         }
 
         tprintf("              %-20s| " U64P(2) "", "active processes", active);
         pid_t pid = waitpid_safe(0, NULL);
 
-        if(task_end(tasks, pid, n_process))
+        if(task_end(&s, pid))
         {
             break;
         }
         active--;
     }
-    free(tasks);
+    free(s.tasks);
 }
 
 [[maybe_unused]]
-flt_num_t pi_tree(uint64_t size, uint64_t n_process)
+flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_budget)
 {
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
@@ -469,6 +513,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process)
 
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
+    tprintf("              %-20s| " U64P(10) "", "mem budget", mem_budget);
 
     if(pi_is_stored(size))
     {
@@ -476,7 +521,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process)
         return pi_load(size);
     }
 
-    scheduler(size, n_process);
+    scheduler(size, n_process, mem_budget);
     tprintf("              %-20s|", "binary split solved");
 
     return pi_finish(size, TREE_PIECE_SIZE);

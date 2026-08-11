@@ -8,14 +8,18 @@ import argparse
 import collections
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
 import sys
+import termios
 import time
+import tty
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
+CACHE_DIR = os.path.join(REPO_ROOT, "cache")
 
 TREE_PIECE_SIZE = None
 PIECES_PER_LEAF = None
@@ -39,6 +43,18 @@ LOCK_OFF = "\x1b[39m"
 # "multiplying" micro-phase - same 39-only reset as LOCK_OFF.
 MUL_ON = "\x1b[38;2;107;142;107m"
 MUL_OFF = "\x1b[39m"
+
+# Dusty lavender (#9B84B8) on a tree node's id once it's ready to be
+# scheduled (both children done, not yet forked) - same 39-only reset as
+# LOCK_OFF above.
+READY_ID_ON = "\x1b[38;2;155;132;184m"
+READY_ID_OFF = "\x1b[39m"
+
+# Steel blue (#6E80B8) on a done node's id - deliberately closer to the
+# #0A143C screen background than READY_ID_ON, so finished work recedes
+# instead of drawing the eye.
+DONE_ID_ON = "\x1b[38;2;110;128;184m"
+DONE_ID_OFF = "\x1b[39m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -65,6 +81,7 @@ RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
+RE_MEM_BUDGET = re.compile(r"mem budget\s*\|\s*(?P<mem_budget>\d+)")
 
 
 def get_index_max(size, piece_size=None):
@@ -340,6 +357,27 @@ def get_pid_rss(pids):
     return result
 
 
+def get_dir_size(path):
+    """Sum of file sizes under path, recursing into subdirectories. Returns
+    None if path doesn't exist (e.g. cache/ layout changed)."""
+    total = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        sub = get_dir_size(entry.path)
+                        if sub is not None:
+                            total += sub
+                    else:
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return total
+
+
 def fmt_bytes(n):
     if n is None:
         return "?"
@@ -357,6 +395,7 @@ class State:
         self.total_pieces = total_pieces
         self.n_process = n_process
         self.explicit_size = explicit_size
+        self.mem_budget = None
         self.pieces_done = 0
         self.pieces_from_cache = 0
         self.joins_done = 0
@@ -549,6 +588,11 @@ def handle_phase(state, content):
             apply_index_max(state, int(m.group("index_max")))
         return
 
+    m = RE_MEM_BUDGET.match(content)
+    if m:
+        state.mem_budget = int(m.group("mem_budget"))
+        return
+
     m = RE_PHASE.match(content)
     if not m:
         return
@@ -653,14 +697,22 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
         mark, state, status = "·", "in_progress", None
     elif node.active_count > 0:
         mark, state, status = "○", "in_progress", None
+    elif node.children and all(c.own_done for c in node.children):
+        mark, state, status = "◆", "ready", "ready"
     else:
         mark, state, status = "·", "pending", None
 
+    id_str = f"{node.i0:,}"
+    if state == "ready":
+        id_str = f"{READY_ID_ON}{id_str}{READY_ID_OFF}"
+    elif state == "done":
+        id_str = f"{DONE_ID_ON}{id_str}{DONE_ID_OFF}"
+
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
     if node.kind == "BIG":
-        label = f"[{node.depth}, B, {node.i0:,}]"
+        label = f"[{node.depth}, B, {id_str}]"
     else:
-        label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
+        label = f"[{node.depth}, {node.n2}, {id_str}]"
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
@@ -779,6 +831,9 @@ def render(state):
         completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
         completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         completion_lines.append(f"         [{bar}]")
+        numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
+        pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
+        completion_lines.append(f"         numbers: {fmt_bytes(numbers_size)}   pieces: {fmt_bytes(pieces_size)}")
         if not state.done and state.phase != "splitting":
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
             completion_lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
@@ -800,7 +855,8 @@ def render(state):
     if pid_rss or state.tree_root is not None:
         est_str = fmt_bytes(active_mem_estimate(state.tree_root)) if state.tree_root is not None else "?"
         real_str = fmt_bytes(sum(pid_rss.values())) if pid_rss else "?"
-        ram_parts.append(f"workers: {est_str} | {real_str}")
+        budget_str = f" / {fmt_bytes(state.mem_budget)}" if state.mem_budget else ""
+        ram_parts.append(f"workers: {est_str}{budget_str} | {real_str}")
     if ram_parts:
         status_lines.append("   ".join(ram_parts))
     if ram_total is not None and ram_used is not None:
@@ -895,13 +951,109 @@ def _fit_visible(line, width):
     return "".join(out)
 
 
-def draw(state):
+def read_pending_input(fd):
+    """Drain whatever's currently buffered on fd without blocking."""
+    chunks = []
+    while select.select([fd], [], [], 0)[0]:
+        chunk = os.read(fd, 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def parse_scroll_actions(raw):
+    """Turn raw stdin bytes into a list of scroll actions: ("delta", +-1),
+    ("page", +-1), ("top",), ("bottom",) or ("quit",). Arrow/PgUp/PgDn/Home/End
+    keys arrive as multi-byte "\\x1b[..." escape sequences; j/k/g/G/q are
+    plain single bytes."""
+    actions = []
+    i, n = 0, len(raw)
+    while i < n:
+        b = raw[i]
+        if b == 0x1B:
+            if i + 2 < n and raw[i + 1] == 0x5B:
+                c = raw[i + 2]
+                if c == 0x41:  # up
+                    actions.append(("delta", -1))
+                    i += 3
+                    continue
+                if c == 0x42:  # down
+                    actions.append(("delta", 1))
+                    i += 3
+                    continue
+                if c == 0x35 and i + 3 < n and raw[i + 3] == 0x7E:  # PgUp
+                    actions.append(("page", -1))
+                    i += 4
+                    continue
+                if c == 0x36 and i + 3 < n and raw[i + 3] == 0x7E:  # PgDn
+                    actions.append(("page", 1))
+                    i += 4
+                    continue
+                if c == 0x48:  # Home
+                    actions.append(("top",))
+                    i += 3
+                    continue
+                if c == 0x46:  # End
+                    actions.append(("bottom",))
+                    i += 3
+                    continue
+            i += 1
+            continue
+        ch = chr(b)
+        if ch == "j":
+            actions.append(("delta", 1))
+        elif ch == "k":
+            actions.append(("delta", -1))
+        elif ch == "g":
+            actions.append(("top",))
+        elif ch == "G":
+            actions.append(("bottom",))
+        elif ch == "q" or b == 0x03:  # q or Ctrl-C (ISIG is off in cbreak+no-echo mode)
+            actions.append(("quit",))
+        i += 1
+    return actions
+
+
+def draw(state, scroll_offset=0, actions=()):
+    """Render state, scrolled by scroll_offset lines and adjusted by actions
+    (see parse_scroll_actions), reserving the last row as a position/help
+    footer whenever the content taller than the terminal. Returns the
+    clamped scroll_offset so the caller can carry it into the next frame."""
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    content = [_fit_visible(line, cols) for line in render(state).split("\n")][:rows]
-    content += [" " * cols] * (rows - len(content))
+    all_lines = render(state).split("\n")
+    body_rows = max(1, rows - 1)
+    max_offset = max(0, len(all_lines) - body_rows)
+
+    for action in actions:
+        kind = action[0]
+        if kind == "delta":
+            scroll_offset += action[1]
+        elif kind == "page":
+            scroll_offset += action[1] * max(1, body_rows - 2)
+        elif kind == "top":
+            scroll_offset = 0
+        elif kind == "bottom":
+            scroll_offset = max_offset
+    scroll_offset = max(0, min(scroll_offset, max_offset))
+
+    visible = all_lines[scroll_offset:scroll_offset + body_rows]
+    content = [_fit_visible(line, cols) for line in visible]
+    content += [" " * cols] * (body_rows - len(content))
+
+    if max_offset > 0:
+        footer = (
+            f" lines {scroll_offset + 1}-{min(scroll_offset + body_rows, len(all_lines))}/{len(all_lines)}"
+            "   ↑/↓ j/k scroll   PgUp/PgDn page   g/G top/bottom   q quit "
+        )
+    else:
+        footer = " q quit "
+    content.append(_fit_visible(footer, cols))
+
     sys.stdout.write("\x1b[H\x1b[2J")
     sys.stdout.write("\n".join(content))
     sys.stdout.flush()
+    return scroll_offset
 
 
 def main():
@@ -918,6 +1070,17 @@ def main():
 
     state = make_state()
     done_announced = False
+    scroll_offset = 0
+
+    stdin_fd = sys.stdin.fileno()
+    is_tty = sys.stdin.isatty()
+    old_termios = None
+    if is_tty:
+        old_termios = termios.tcgetattr(stdin_fd)
+        tty.setcbreak(stdin_fd)
+        no_echo = termios.tcgetattr(stdin_fd)
+        no_echo[3] &= ~termios.ECHO  # cbreak for immediate reads, but don't echo scroll keys
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, no_echo)
 
     sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[48;2;10;20;60m")
     sys.stdout.flush()
@@ -931,8 +1094,12 @@ def main():
             if line is not None:
                 feed_line(state, line)
 
+            actions = parse_scroll_actions(read_pending_input(stdin_fd)) if is_tty else []
+            if any(action[0] == "quit" for action in actions):
+                raise KeyboardInterrupt
+
             now = time.time()
-            if now - last_render >= 1.0:
+            if actions or now - last_render >= 1.0:
                 if not state.done:
                     state.process_running = pi_process_running()
                     if state.process_running:
@@ -942,15 +1109,17 @@ def main():
                             state.run_start_time = get_run_start_time()
                     elif state.process_gone_since is None:
                         state.process_gone_since = now
-                draw(state)
+                scroll_offset = draw(state, scroll_offset, actions)
                 last_render = now
 
             if state.done and state.ever_saw_process and not done_announced:
-                draw(state)
+                scroll_offset = draw(state, scroll_offset)
                 done_announced = True
     finally:
         sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
+        if old_termios is not None:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_termios)
 
 
 def _raise_keyboard_interrupt(signum, frame):
