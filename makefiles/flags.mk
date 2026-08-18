@@ -18,7 +18,7 @@ ifeq ($(shell uname -s),Linux)
 endif
 
 ifeq ($(shell uname -s),Darwin)
-    FLAGS += -Wunreachable-code -Wunreachable-code-break -Wconditional-uninitialized -Wmissing-variable-declarations -Wcast-align -Wshadow-all -Wassign-enum -Wcomma -Wcovered-switch-default -Wthread-safety -Wconsumed
+    FLAGS += -Wunreachable-code -Wunreachable-code-break -Wconditional-uninitialized -Wmissing-variable-declarations -Wcast-align -Wshadow-all -Wassign-enum -Wcomma -Wcovered-switch-default -Wthread-safety -Wconsumed -D_DARWIN_C_SOURCE
 
     FLAGS_EXE += -Wl,-fatal_warnings -Wl,-dead_strip
 endif

@@ -14,9 +14,9 @@
 
 
 [[maybe_unused]]
-static void pi(uint64_t size, uint64_t n_process, uint64_t mem_budget)
+static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
-    flt_num_t flt_pi = pi_tree(size, n_process, mem_budget);
+    flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
     tprintf("              %-20s|", "display begin");
     TIME_SETUP
@@ -38,8 +38,11 @@ int main(void)
     // };
     // araucaria_disk_config_set(&config);
 
-    uint64_t mem_budget = U64(16) * 1024 * 1024 * 1024; // 16G
-    pi(16'000'000, 16, mem_budget);
+    // Tasks are launched while estimated worker memory is below mem_launch;
+    // a launched task may overshoot up to mem_max, which is never crossed.
+    uint64_t mem_launch = U64(45) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(50) * 1024 * 1024 * 1024;
+    pi(1'000'000'000, 6, mem_launch, mem_max);
 
     printf("\n");
     return 0;
