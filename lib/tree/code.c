@@ -140,8 +140,9 @@ static node_p node_expand(node_p n, uint64_t index)
                 {
                     return node_big_create(n, size, i_0 + B(span), remainder - B(span), depth + 1);
                 }
+
+                default: revert()
             }
-            revert()
         }
 
         case NODE_SPAN:
@@ -153,8 +154,9 @@ static node_p node_expand(node_p n, uint64_t index)
             uint64_t offset = index * B(span - 1);
             return node_span_create(n, size, i_0 + offset, span - 1, depth + 1);
         }
+
+        default: revert()
     }
-    revert()
 }
 
 static bool node_is_stored(node_p n)
@@ -178,6 +180,8 @@ static bool node_is_stored(node_p n)
             }
         }
         break;
+
+        default: revert()
     }
     return false;
 }
@@ -217,7 +221,9 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes)
             uint64_t depth = n->a.s.depth;
             if(span == TREE_PIECE_SIZE)
             {
-                return 0;
+                // return 0;
+                return 1;
+                // return UINT64_MAX / 4;
             }
 
             op_1 = split_span_res_op_size(size, i_0, span - 1, depth + 1, 2);
@@ -237,6 +243,8 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes)
             op_2 = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
         }
         break;
+
+        default: revert()
     }
 
     return num_mul_estimate_memory(op_1, op_2, disk_threshold_bytes, 1);
@@ -255,22 +263,37 @@ STRUCT(tree_scheduler)
     tree_task_p tasks;
     uint64_t total_mem_cost;
     uint64_t n_process;
-    uint64_t mem_budget;
+    uint64_t mem_launch;
+    uint64_t mem_max;
 };
 
-static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_budget)
+static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     tree_scheduler_t s = {
         .tasks = calloc(n_process, sizeof(tree_task_t)),
         .total_mem_cost = 0,
         .n_process = n_process,
-        .mem_budget = mem_budget
+        .mem_launch = mem_launch,
+        .mem_max = mem_max
     };
     assert(s.tasks);
     return s;
 }
 
-static node_p get_next_node(tree_scheduler_p s, node_p n, uint64_t index)
+static uint64_t get_free_index(tree_scheduler_p s)
+{
+    for(uint64_t i=0; i<s->n_process; i++)
+    {
+        if(!s->tasks[i].active)
+        {
+            return i;
+        }
+    }
+
+    revert()
+}
+
+static node_p get_next_node(tree_scheduler_p s, node_p n)
 {
     if(n->processing)
     {
@@ -285,10 +308,21 @@ static node_p get_next_node(tree_scheduler_p s, node_p n, uint64_t index)
     if(node_is_ready(n))
     {
         uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX);
+        uint64_t index = get_free_index(s);
+
+        // Two zones. New work is admitted only while usage is still below
+        // mem_launch; a task admitted there is allowed to overshoot into the
+        // mem_launch..mem_max band, but nothing may push usage past mem_max.
+        // Once usage sits in the band the tree stops launching until a task
+        // ends. index 0 means no other task is running, so that one always
+        // launches — the tree must keep moving whatever its estimate says.
         if(
             index > 0 &&
             mem_cost > 0 &&
-            s->total_mem_cost + mem_cost > s->mem_budget
+            (
+                s->total_mem_cost >= s->mem_launch ||
+                s->total_mem_cost + mem_cost >= s->mem_max
+            )
         ) {
             return NULL;
         }
@@ -309,7 +343,7 @@ static node_p get_next_node(tree_scheduler_p s, node_p n, uint64_t index)
             n->children[i].n = node_expand(n, i);
         }
 
-        node_p n_next = get_next_node(s, n->children[i].n, index);
+        node_p n_next = get_next_node(s, n->children[i].n);
         if(n_next)
         {
             return n_next;
@@ -379,23 +413,12 @@ static void node_process(node_p n, uint64_t index)
             tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
         }
         break;
+
+        default: revert()
     }
 }
 
-static uint64_t get_free_index(tree_scheduler_p s)
-{
-    for(uint64_t i=0; i<s->n_process; i++)
-    {
-        if(!s->tasks[i].active)
-        {
-            return i;
-        }
-    }
-
-    revert()
-}
-
-static void task_start(tree_scheduler_p s, node_p n)
+static pid_t task_start(tree_scheduler_p s, node_p n)
 {
     uint64_t index = get_free_index(s);
 
@@ -421,6 +444,8 @@ static void task_start(tree_scheduler_p s, node_p n)
     };
 
     s->total_mem_cost += n->mem_cost;
+
+    return pid;
 }
 
 static uint64_t get_task_index(tree_scheduler_p s, pid_t pid)
@@ -469,40 +494,63 @@ static bool task_end(tree_scheduler_p s, pid_t pid)
     revert()
 }
 
-static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_budget)
+static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    tree_scheduler_t s = tree_scheduler_create(n_process, mem_budget);
+    tree_scheduler_t s = tree_scheduler_create(n_process, mem_launch, mem_max);
 
+    bool done = false;
     uint64_t active = 0;
-    for(;;)
+    while(!done)
     {
-        for(; active<n_process; active++)
+        while(active < n_process)
         {
-            node_p n = get_next_node(&s, n_root, active);
+            node_p n = get_next_node(&s, n_root);
             if(n == NULL)
             {
                 break;
             }
 
-            task_start(&s, n);
+            // Check before forking: once the child runs it may create the very
+            // file this asks about, so a check after task_start could race it.
+            bool stored = node_is_stored(n);
+            pid_t pid = task_start(&s, n);
+
+            if(!stored)
+            {
+                active++;
+                continue;
+            }
+
+            // A stored node has nothing to compute, so its task exits at once.
+            // Reap that pid here instead of falling through to the wait below,
+            // which frees the index and lets the next node take it on the very
+            // next iteration. A no-op never holds a slot or counts as active.
+            waitpid_safe(pid, NULL);
+            done = task_end(&s, pid);
+            if(done)
+            {
+                break;
+            }
+        }
+
+        if(done)
+        {
+            break;
         }
 
         tprintf("              %-20s| " U64P(2) "", "active processes", active);
         pid_t pid = waitpid_safe(0, NULL);
 
-        if(task_end(&s, pid))
-        {
-            break;
-        }
+        done = task_end(&s, pid);
         active--;
     }
     free(s.tasks);
 }
 
 [[maybe_unused]]
-flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_budget)
+flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
@@ -512,7 +560,8 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_budget)
 
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
-    tprintf("              %-20s| " U64P(10) "", "mem budget", mem_budget);
+    tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
+    tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
     tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
     if(pi_is_stored(size))
@@ -521,7 +570,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_budget)
         return pi_load(size);
     }
 
-    scheduler(size, n_process, mem_budget);
+    scheduler(size, n_process, mem_launch, mem_max);
     tprintf("              %-20s|", "binary split solved");
 
     return pi_finish(size, TREE_PIECE_SIZE);

@@ -81,7 +81,8 @@ RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
-RE_MEM_BUDGET = re.compile(r"mem budget\s*\|\s*(?P<mem_budget>\d+)")
+RE_MEM_LAUNCH = re.compile(r"mem launch\s*\|\s*(?P<mem_launch>\d+)")
+RE_MEM_MAX = re.compile(r"mem max\s*\|\s*(?P<mem_max>\d+)")
 RE_DISK_LOCK = re.compile(r"disk lock\s*\|\s*(?P<disk_lock>\d+)")
 
 
@@ -396,7 +397,8 @@ class State:
         self.total_pieces = total_pieces
         self.n_process = n_process
         self.explicit_size = explicit_size
-        self.mem_budget = None
+        self.mem_launch = None  # new tasks launch only while usage is below this
+        self.mem_max = None  # a launched task may overshoot up to here, never past
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.pieces_done = 0
         self.pieces_from_cache = 0
@@ -596,9 +598,14 @@ def handle_phase(state, content):
             apply_index_max(state, int(m.group("index_max")))
         return
 
-    m = RE_MEM_BUDGET.match(content)
+    m = RE_MEM_LAUNCH.match(content)
     if m:
-        state.mem_budget = int(m.group("mem_budget"))
+        state.mem_launch = int(m.group("mem_launch"))
+        return
+
+    m = RE_MEM_MAX.match(content)
+    if m:
+        state.mem_max = int(m.group("mem_max"))
         return
 
     m = RE_DISK_LOCK.match(content)
@@ -864,10 +871,19 @@ def render(state):
             ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
         ram_parts.append(ram_part)
     if pid_rss or state.tree_root is not None:
-        est_str = fmt_bytes(active_mem_estimate(state.tree_root)) if state.tree_root is not None else "?"
+        est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
+        est_str = fmt_bytes(est) if est is not None else "?"
         real_str = fmt_bytes(sum(pid_rss.values())) if pid_rss else "?"
-        budget_str = f" / {fmt_bytes(state.mem_budget)}" if state.mem_budget else ""
-        ram_parts.append(f"workers: {est_str}{budget_str} | {real_str}")
+        # "est / launch..max": below launch new tasks start, above it the
+        # scheduler holds back until a task ends; max is never crossed.
+        if state.mem_launch and state.mem_max:
+            limit_str = f" / {fmt_bytes(state.mem_launch)}..{fmt_bytes(state.mem_max)}"
+        elif state.mem_launch or state.mem_max:
+            limit_str = f" / {fmt_bytes(state.mem_launch or state.mem_max)}"
+        else:
+            limit_str = ""
+        held = " held" if est is not None and state.mem_launch and est >= state.mem_launch else ""
+        ram_parts.append(f"workers: {est_str}{limit_str}{held} | {real_str}")
     if ram_parts:
         status_lines.append("   ".join(ram_parts))
     if ram_total is not None and ram_used is not None:
