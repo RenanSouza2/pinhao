@@ -239,7 +239,7 @@ static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes)
         break;
     }
 
-    return num_mul_estimate_memory(op_1, op_2, disk_threshold_bytes);
+    return num_mul_estimate_memory(op_1, op_2, disk_threshold_bytes, 1);
 }
 
 STRUCT(tree_task)

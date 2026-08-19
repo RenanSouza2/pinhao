@@ -39,7 +39,7 @@ int main(void)
     // araucaria_disk_config_set(&config);
 
     uint64_t mem_budget = U64(16) * 1024 * 1024 * 1024; // 16G
-    pi(16'000'000, 16, mem_budget);
+    pi(1'000'000'000, 16, mem_budget);
 
     printf("\n");
     return 0;

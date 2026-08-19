@@ -1062,10 +1062,23 @@ def draw(state, scroll_offset=0, actions=()):
         footer = " q quit "
     content.append(_fit_visible(footer, cols))
 
-    sys.stdout.write("\x1b[H\x1b[2J")
+    # Every line is already padded to exactly `cols` and there are always
+    # `rows` lines, so a full repaint doesn't need a clear - clearing then
+    # redrawing every frame is what caused the flicker (a blank frame flashes
+    # between the erase and the repaint). Only clear when the terminal was
+    # actually resized, since old content could otherwise show through around
+    # a shrunk frame.
+    if (cols, rows) != draw.last_dims:
+        sys.stdout.write("\x1b[H\x1b[2J")
+        draw.last_dims = (cols, rows)
+    else:
+        sys.stdout.write("\x1b[H")
     sys.stdout.write("\n".join(content))
     sys.stdout.flush()
     return scroll_offset
+
+
+draw.last_dims = None
 
 
 def main():

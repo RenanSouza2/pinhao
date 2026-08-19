@@ -1,4 +1,4 @@
-// #define LOCK_DISK_IO
+#define LOCK_DISK_IO
 
 #include <fcntl.h>
 #include <stdio.h>
