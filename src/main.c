@@ -38,16 +38,11 @@ int main(void)
     // };
     // araucaria_disk_config_set(&config);
 
-<<<<<<< HEAD
-    uint64_t mem_budget = U64(16) * 1024 * 1024 * 1024; // 16G
-    pi(1'000'000'000, 16, mem_budget);
-=======
     // Tasks are launched while estimated worker memory is below mem_launch;
     // a launched task may overshoot up to mem_max, which is never crossed.
-    uint64_t mem_launch = U64(45) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(50) * 1024 * 1024 * 1024;
-    pi(1'000'000'000, 6, mem_launch, mem_max);
->>>>>>> claudinho
+    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+    pi(256'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;
