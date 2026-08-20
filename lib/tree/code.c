@@ -53,9 +53,9 @@ STRUCT(node)
     bool processing;
     tree_plan_t plan;
     union {
-        big_t b;
-        span_t s;
-    } a;
+        big_t big;
+        span_t span;
+    } as;
     struct {
         bool done;
         node_p n;
@@ -79,7 +79,7 @@ static node_p node_span_create(
         .type = NODE_SPAN,
         .processing = false,
         .plan.threads = 1,
-        .a.s = (span_t){
+        .as.span = (span_t){
             .size = size,
             .i_0 = i_0,
             .span = span,
@@ -117,7 +117,7 @@ static node_p node_big_create(
         .type = NODE_BIG,
         .processing = false,
         .plan.threads = 1,
-        .a.b = (big_t){
+        .as.big = (big_t){
             .size = size,
             .i_0 = i_0,
             .remainder = remainder,
@@ -134,11 +134,11 @@ static node_p node_expand(node_p n, uint64_t index)
     {
         case NODE_BIG:
         {
-            uint64_t size = n->a.b.size;
-            uint64_t i_0 = n->a.b.i_0;
-            uint64_t remainder = n->a.b.remainder;
+            uint64_t size = n->as.big.size;
+            uint64_t i_0 = n->as.big.i_0;
+            uint64_t remainder = n->as.big.remainder;
             uint64_t span = stdc_bit_width(remainder) - 1;
-            uint64_t depth = n->a.b.depth;
+            uint64_t depth = n->as.big.depth;
 
             switch(index)
             {
@@ -158,10 +158,10 @@ static node_p node_expand(node_p n, uint64_t index)
 
         case NODE_SPAN:
         {
-            uint64_t size = n->a.s.size;
-            uint64_t i_0 = n->a.s.i_0;
-            uint64_t span = n->a.s.span;
-            uint64_t depth = n->a.s.depth;
+            uint64_t size = n->as.span.size;
+            uint64_t i_0 = n->as.span.i_0;
+            uint64_t span = n->as.span.span;
+            uint64_t depth = n->as.span.depth;
             uint64_t offset = index * B(span - 1);
             return node_span_create(n, size, i_0 + offset, span - 1, depth + 1);
         }
@@ -176,7 +176,7 @@ static bool node_is_stored(node_p n)
     {
         case NODE_BIG:
         {
-            if(split_big_res_is_stored(n->a.b.size, n->a.b.i_0, n->a.b.remainder, n->a.b.depth))
+            if(split_big_res_is_stored(n->as.big.size, n->as.big.i_0, n->as.big.remainder, n->as.big.depth))
             {
                 return true;
             }
@@ -185,7 +185,7 @@ static bool node_is_stored(node_p n)
 
         case NODE_SPAN:
         {
-            if(split_span_res_is_stored(n->a.s.size, n->a.s.i_0, n->a.s.span, n->a.s.depth))
+            if(split_span_res_is_stored(n->as.span.size, n->as.span.i_0, n->as.span.span, n->as.span.depth))
             {
                 return true;
             }
@@ -223,10 +223,10 @@ static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
     {
         case NODE_SPAN:
         {
-            uint64_t size = n->a.s.size;
-            uint64_t i_0 = n->a.s.i_0;
-            uint64_t span = n->a.s.span;
-            uint64_t depth = n->a.s.depth;
+            uint64_t size = n->as.span.size;
+            uint64_t i_0 = n->as.span.i_0;
+            uint64_t span = n->as.span.span;
+            uint64_t depth = n->as.span.depth;
             if(span == TREE_PIECE_SIZE)
             {
                 return false;
@@ -239,10 +239,10 @@ static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
 
         case NODE_BIG:
         {
-            uint64_t size = n->a.b.size;
-            uint64_t i_0 = n->a.b.i_0;
-            uint64_t remainder = n->a.b.remainder;
-            uint64_t depth = n->a.b.depth;
+            uint64_t size = n->as.big.size;
+            uint64_t i_0 = n->as.big.i_0;
+            uint64_t remainder = n->as.big.remainder;
+            uint64_t depth = n->as.big.depth;
             uint64_t span = stdc_bit_width(remainder) - 1;
 
             *out_op_1 = split_span_res_op_size(size, i_0, span, depth + 1, 2);
@@ -264,12 +264,12 @@ static uint64_t node_terms(node_p n)
     {
         case NODE_BIG:
         {
-            return n->a.b.remainder;
+            return n->as.big.remainder;
         }
 
         case NODE_SPAN:
         {
-            return B(n->a.s.span);
+            return B(n->as.span.span);
         }
 
         default: revert()
@@ -555,10 +555,10 @@ static void node_process(node_p n, uint64_t index)
     {
         case NODE_BIG:
         {
-            uint64_t size = n->a.b.size;
-            uint64_t i_0 = n->a.b.i_0;
-            uint64_t remainder = n->a.b.remainder;
-            uint64_t depth = n->a.b.depth;
+            uint64_t size = n->as.big.size;
+            uint64_t i_0 = n->as.big.i_0;
+            uint64_t remainder = n->as.big.remainder;
+            uint64_t depth = n->as.big.depth;
 
             tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
 
@@ -578,10 +578,10 @@ static void node_process(node_p n, uint64_t index)
 
         case NODE_SPAN:
         {
-            uint64_t size = n->a.s.size;
-            uint64_t i_0 = n->a.s.i_0;
-            uint64_t span = n->a.s.span;
-            uint64_t depth = n->a.s.depth;
+            uint64_t size = n->as.span.size;
+            uint64_t i_0 = n->as.span.i_0;
+            uint64_t span = n->as.span.span;
+            uint64_t depth = n->as.span.depth;
 
             tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
 
