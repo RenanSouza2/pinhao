@@ -199,13 +199,6 @@ static bool node_is_ready(node_p n)
     return true;
 }
 
-// Estimates the average memory a node's join will use, from araucaria's own
-// num_mul_estimate_memory. A join runs four cross multiplications between the two
-// children (P1xP2, Q1xQ2, P1xR2, R1xQ2); R1xQ2 is used as the representative term,
-// since R accumulates contributions from both children and so tends to be the
-// largest operand of the four. Operand sizes are read from each child's
-// already-stored result via split_span_res_op_size / split_big_res_op_size
-// (index 2 = R, index 1 = Q).
 static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes)
 {
     uint64_t op_1 = 0;
@@ -310,12 +303,6 @@ static node_p get_next_node(tree_scheduler_p s, node_p n)
         uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX);
         uint64_t index = get_free_index(s);
 
-        // Two zones. New work is admitted only while usage is still below
-        // mem_launch; a task admitted there is allowed to overshoot into the
-        // mem_launch..mem_max band, but nothing may push usage past mem_max.
-        // Once usage sits in the band the tree stops launching until a task
-        // ends. index 0 means no other task is running, so that one always
-        // launches — the tree must keep moving whatever its estimate says.
         if(
             index > 0 &&
             mem_cost > 0 &&
@@ -512,8 +499,6 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
                 break;
             }
 
-            // Check before forking: once the child runs it may create the very
-            // file this asks about, so a check after task_start could race it.
             bool stored = node_is_stored(n);
             pid_t pid = task_start(&s, n);
 
@@ -523,10 +508,6 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
                 continue;
             }
 
-            // A stored node has nothing to compute, so its task exits at once.
-            // Reap that pid here instead of falling through to the wait below,
-            // which frees the index and lets the next node take it on the very
-            // next iteration. A no-op never holds a slot or counts as active.
             waitpid_safe(pid, NULL);
             done = task_end(&s, pid);
             if(done)

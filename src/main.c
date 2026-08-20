@@ -34,12 +34,10 @@ int main(void)
 
     // araucaria_disk_config_t config = {
     //     .disk_path = "/mnt/wsl/workspace/tmp",
-    //     .disk_threshold_bytes = 2'048'000'000 // ~2GiB per number; see derivation in conversation
+    //     .disk_threshold_bytes = 2'048'000'000
     // };
     // araucaria_disk_config_set(&config);
 
-    // Tasks are launched while estimated worker memory is below mem_launch;
-    // a launched task may overshoot up to mem_max, which is never crossed.
     uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
     pi(256'000'000, 16, mem_launch, mem_max);
