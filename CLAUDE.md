@@ -54,6 +54,27 @@ for editor diagnostics only — the actual Makefile build still treats
 warnings as errors). Don't introduce code that only compiles clean because
 a warning got suppressed or disabled — fix the underlying issue instead.
 
+## Comments carry the rule, not the reasoning
+
+Comments say what the code does and what rule it enforces. They are not a
+record of how that rule was arrived at. When a change involved weighing
+alternatives, turned up a caveat, or rested on a measurement, report it as
+a short bullet list in the reply at the end of the task, and put it in the
+commit message — not in the source, where it becomes noise every future
+reader has to wade through.
+
+Don't commit:
+
+- deliberation — alternatives considered and rejected, "note this is only
+  exactly true when…", caveats addressed to whoever reviews the change,
+  or an account of what an earlier version of the code did.
+- benchmark numbers and timings quoted as evidence for a choice. They go
+  stale silently, and the commit that made the change is where they
+  belong.
+
+A comment stating a non-obvious rule, invariant, unit, or ordering
+requirement is wanted. Keep those, and keep them short.
+
 ## Performance-sensitive code
 
 `lib/big` (big-number arithmetic) and `lib/tree` (binary-splitting P/Q/R
