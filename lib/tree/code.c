@@ -18,6 +18,13 @@
 
 #define TREE_PIECE_SIZE 24
 
+// Whether a leaf is exempt from the memory budget. A leaf has no join, so
+// there are no operand sizes to estimate from. Exempt, it is charged nothing
+// and launches into any free slot; not exempt, it is charged one byte --
+// negligible against the total, but enough that a full budget holds it back
+// like any other node. Flip and rebuild to experiment.
+#define TREE_LEAF_EXEMPT true
+
 #define NODE_BIG 0
 #define NODE_SPAN 1
 
@@ -210,13 +217,21 @@ static bool node_is_ready(node_p n)
     return true;
 }
 
+// A leaf: a span node at the smallest span, computed in process by split_piece.
+// It has no children to wait on and no join, so nothing about it can be read
+// off operand sizes.
+static bool node_is_leaf(node_p n)
+{
+    return n->type == NODE_SPAN && n->as.span.span == TREE_PIECE_SIZE;
+}
+
 // Operand sizes of the multiplication a node's join is estimated by. A join runs
 // four cross multiplications between the two children (P1xP2, Q1xQ2, P1xR2,
 // R1xQ2); R1xQ2 is used as the representative term, since R accumulates
 // contributions from both children and so tends to be the largest operand of the
 // four. Sizes are read from each child's already-stored result via
 // split_span_res_op_size / split_big_res_op_size (index 2 = R, index 1 = Q).
-// Returns false for a piece, which computes in process and has no join.
+// Returns false for a leaf, which has no join.
 static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
 {
     switch(n->type)
@@ -227,7 +242,7 @@ static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
             uint64_t i_0 = n->as.span.i_0;
             uint64_t span = n->as.span.span;
             uint64_t depth = n->as.span.depth;
-            if(span == TREE_PIECE_SIZE)
+            if(node_is_leaf(n))
             {
                 return false;
             }
@@ -334,16 +349,12 @@ static uint64_t get_free_index(tree_scheduler_p s)
 
 // Estimates the average memory a node's join will use, from araucaria's own
 // num_mul_estimate_memory, for a join that will be given `threads` threads.
+// Only for a node that joins: node_can_launch settles a leaf before here.
 static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes, uint64_t threads)
 {
     uint64_t op_1;
     uint64_t op_2;
-    if(!node_op_sizes(n, &op_1, &op_2))
-    {
-        // return 0;
-        return 1;
-        // return UINT64_MAX / 4;
-    }
+    assert(node_op_sizes(n, &op_1, &op_2));
 
     return num_mul_estimate_memory(op_1, op_2, disk_threshold_bytes, threads);
 }
@@ -354,9 +365,9 @@ static bool scheduler_has_slot(tree_scheduler_p s)
     return s->active < s->n_process;
 }
 
-// A free slot 0 admits a node whatever the memory budget says. Slots fill from
-// the bottom, so this covers both an idle tree and a pool drained to its last
-// tasks; the idle case is what stops the tree wedging on its own estimate.
+// Whether slot 0 is free. Slots are filled lowest-first, so this holds both for
+// an idle tree and for a pool whose slot 0 task has just ended. It is what lets
+// a node past the memory budget, so the tree cannot wedge on its own estimate.
 static bool scheduler_at_first_slot(tree_scheduler_p s)
 {
     return get_free_index(s) == 0;
@@ -367,18 +378,14 @@ static bool scheduler_at_first_slot(tree_scheduler_p s)
 // Two zones. New work is admitted only while usage is still below mem_launch; a
 // task admitted there is allowed to overshoot into the mem_launch..mem_max band,
 // but nothing may push usage past mem_max. Once usage sits in the band the tree
-// stops launching until a task ends. The first-slot bypass below is the one
-// exception, and can cross mem_max.
+// stops launching until a task ends.
+//
+// Budget arithmetic only: node_can_launch owns the first-slot exception to it.
+//
+// A cost of zero is admitted unconditionally: it is what an exempt leaf, the
+// only caller that passes one, means by exempt.
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 {
-    // The tree must keep moving whatever the estimate says.
-    if(scheduler_at_first_slot(s))
-    {
-        return true;
-    }
-
-    // Unreachable while node_estimate_memory floors a piece at 1. Drop that
-    // floor to 0 and this branch exempts pieces from the budget.
     if(mem_cost == 0)
     {
         return true;
@@ -397,6 +404,32 @@ static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
     return true;
 }
 
+// Clamps a thread request to num_mul_threads_ceiling, then rounds it down to a
+// power of two -- the only shape num_ssm_fft_fwd_split can use, since it gives
+// its recursive phase the power-of-two floor of the workers asked for while
+// still allocating a 2n-limb scratch buffer for each of them.
+//
+// Only for a node that joins: node_can_launch settles a leaf before here.
+static uint64_t node_threads_clamp(node_p n, uint64_t threads)
+{
+    uint64_t op_1;
+    uint64_t op_2;
+    assert(node_op_sizes(n, &op_1, &op_2));
+
+    uint64_t ceiling = num_mul_threads_ceiling(op_1, op_2);
+    if(threads > ceiling)
+    {
+        threads = ceiling;
+    }
+
+    if(threads < 2)
+    {
+        return 1;
+    }
+
+    return B(stdc_bit_width(threads) - 1);
+}
+
 // How many threads a node's join should ask for.
 //
 // Threads take the cores process parallelism cannot. A node gets n_process /
@@ -404,22 +437,18 @@ static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 // (index_max / node_terms) and how many joins of its size fit in mem_launch.
 // A level still wide enough to give every process a node stays at one thread.
 //
-// The request is clamped to num_mul_threads_ceiling, then rounded down to a
-// power of two -- the only shape num_ssm_fft_fwd_split can use, since it gives
-// its recursive phase the power-of-two floor of the workers asked for while
-// still allocating a 2n-limb scratch buffer for each of them.
+// The request goes out through node_threads_clamp.
 //
 // No cap beyond that: simultaneously runnable nodes cover disjoint index ranges
 // and their thread counts sum to about n_process, so the machine is not
 // oversubscribed.
+//
+// Only for a node that joins: node_can_launch settles a leaf before here.
 static uint64_t node_threads(tree_scheduler_p s, node_p n)
 {
     uint64_t op_1;
     uint64_t op_2;
-    if(!node_op_sizes(n, &op_1, &op_2))
-    {
-        return 1;
-    }
+    assert(node_op_sizes(n, &op_1, &op_2));
 
     uint64_t width = s->index_max / node_terms(n);
 
@@ -439,20 +468,7 @@ static uint64_t node_threads(tree_scheduler_p s, node_p n)
         concurrent = 1;
     }
 
-    uint64_t threads = s->n_process / concurrent;
-
-    uint64_t ceiling = num_mul_threads_ceiling(op_1, op_2);
-    if(threads > ceiling)
-    {
-        threads = ceiling;
-    }
-
-    if(threads < 2)
-    {
-        return 1;
-    }
-
-    return B(stdc_bit_width(threads) - 1);
+    return node_threads_clamp(n, s->n_process / concurrent);
 }
 
 // Whether the walk may look inside a node for work. A node being processed owns
@@ -467,8 +483,15 @@ static bool node_is_open(node_p n)
 //
 // A node already stored on disk is always launchable, at no memory cost and no
 // threads; its plan is marked is_noop so the scheduler reaps it at once instead
-// of counting it against the process budget. Any other node needs both children
-// done and room in the memory budget.
+// of counting it against the process budget.
+//
+// A leaf has no children to wait on and no join to estimate, so it is charged
+// what TREE_LEAF_EXEMPT says and nothing more. Any other node needs both
+// children done and room in the memory budget.
+//
+// A free slot 0 is the one way past that budget. A node admitted there on the
+// budget's own terms runs alongside whatever else is live, so it takes its
+// ordinary thread count; a node admitted over the budget takes every thread.
 static bool node_can_launch(tree_scheduler_p s, node_p n)
 {
     if(!node_is_open(n))
@@ -486,6 +509,23 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         return true;
     }
 
+    if(node_is_leaf(n))
+    {
+        uint64_t mem_cost = TREE_LEAF_EXEMPT ? 0 : 1;
+
+        if(!scheduler_has_memory(s, mem_cost) && !scheduler_at_first_slot(s))
+        {
+            return false;
+        }
+
+        n->plan = (tree_plan_t){
+            .mem_cost = mem_cost,
+            .threads = 1,
+            .is_noop = false
+        };
+        return true;
+    }
+
     if(!node_is_ready(n))
     {
         return false;
@@ -496,7 +536,15 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
 
     if(!scheduler_has_memory(s, mem_cost))
     {
-        return false;
+        if(!scheduler_at_first_slot(s))
+        {
+            return false;
+        }
+
+        // Over the budget and admitted anyway: it runs at full width, and its
+        // cost is re-estimated for the count it will actually get.
+        threads = node_threads_clamp(n, s->n_process);
+        mem_cost = node_estimate_memory(n, UINT64_MAX, threads);
     }
 
     n->plan = (tree_plan_t){
@@ -621,9 +669,11 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
     pid_t pid = fork_safe();
     if(pid == 0)
     {
+
 #ifdef LOCK_IN_PLACE
         fork_lock_processor(index);
 #endif
+
         node_process(n, index);
         exit(EXIT_SUCCESS);
     }

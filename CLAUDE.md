@@ -4,6 +4,18 @@ Guidance for Claude Code when working in this repo. See `README.md` for
 project overview, build commands, and directory layout — this file only
 covers what isn't obvious from the code.
 
+## Ask before acting
+
+Before starting work on a request, ask clarifying questions first. Don't
+jump straight into editing, building, or running things — state back what
+you understood the request to be, raise anything ambiguous about scope,
+approach, or trade-offs, and wait for the answer before making changes.
+
+This holds even when the request looks obvious: a short question costs far
+less than a wrong change in a hot path or a long run started on the wrong
+parameters. Once the answers are in, do the whole task without stopping to
+re-ask about things already settled.
+
 ## Cross-platform: Linux and macOS
 
 This project must build and run on both Linux and macOS. Avoid
