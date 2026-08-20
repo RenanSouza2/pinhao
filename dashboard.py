@@ -74,16 +74,27 @@ RE_NODE_PROCESS = re.compile(
 RE_PIECE = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
 )
-RE_TASK_START = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|")
+# SUM (the scheduler's running total at launch) is matched but not captured:
+# the total shown is rebuilt from the per-task THR counts, which also fall as
+# tasks end, where SUM only ever states the value at one launch.
+RE_TASK_START = re.compile(
+    _TASK_ID + r"\s*(?P<action>.+?)\s*\|"
+    r"(?:\s*THR\s+(?P<thr>\d+)\s+SUM\s+\d+)?"
+)
 RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
+RE_N_PROCESS = re.compile(r"n process\s*\|\s*(?P<n_process>\d+)")
 RE_MEM_LAUNCH = re.compile(r"mem launch\s*\|\s*(?P<mem_launch>\d+)")
 RE_MEM_MAX = re.compile(r"mem max\s*\|\s*(?P<mem_max>\d+)")
 RE_DISK_LOCK = re.compile(r"disk lock\s*\|\s*(?P<disk_lock>\d+)")
+
+# Leading task id of any per-task line, used only to advance the thread-time
+# accumulator to the newest log timestamp (see thread_tick).
+RE_TS = re.compile(_TASK_ID)
 
 
 def get_index_max(size, piece_size=None):
@@ -110,7 +121,7 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "pid", "start_time", "active_count", "parent", "children",
+        "own_done", "in_progress", "task_idx", "pid", "threads", "start_time", "active_count", "parent", "children",
         "mem_estimate", "join_term", "join_micro",
     )
 
@@ -125,6 +136,7 @@ class TreeNode:
         self.in_progress = False
         self.task_idx = None
         self.pid = None
+        self.threads = None  # threads this node's task was granted, from its "task start" line
         self.start_time = None
         self.active_count = 0
         self.parent = parent
@@ -197,6 +209,7 @@ def mark_node_done(node):
     node.in_progress = False
     node.task_idx = None
     node.pid = None
+    node.threads = None
     node.start_time = None
     node.join_term = None
     node.join_micro = None
@@ -211,6 +224,7 @@ def mark_node_done_from_cache(node):
     node.in_progress = False
     node.task_idx = None
     node.pid = None
+    node.threads = None
     node.start_time = None
     node.join_term = None
     node.join_micro = None
@@ -395,7 +409,8 @@ class State:
         self.start_time = None
         self.last_line_time = None
         self.total_pieces = total_pieces
-        self.n_process = n_process
+        self.n_process = n_process  # from --n-process
+        self.n_process_logged = None  # from the log's "n process" line, after pi_tree's clamp to core count
         self.explicit_size = explicit_size
         self.mem_launch = None  # new tasks launch only while usage is below this
         self.mem_max = None  # a launched task may overshoot up to here, never past
@@ -411,8 +426,13 @@ class State:
         self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
         self.lock_count = 0
         self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
-        self.active = {}  # pid -> {"start", "depth", "i0"}
+        self.active = {}  # pid -> {"start", "depth", "i0", "threads"}
         self.active_max = 0
+        self.threads_seen = False  # a "task start" line carried THR/SUM (older builds don't log it)
+        self.threads_reported = None  # scheduler's own "active threads" total, used until THR arrives
+        self.thread_time = 0.0  # thread-seconds, in log time, for the utilization average
+        self.thread_span = 0.0  # seconds those thread-seconds cover
+        self.thread_last_ts = None  # log timestamp the two above are folded up to
         self.phase = "splitting"
         self.phase_start_time = None  # set by set_phase() on every transition away from "splitting"
         self.tree_root = None
@@ -432,6 +452,48 @@ class State:
     @property
     def total_joins(self):
         return self.total_pieces - 1 if self.total_pieces else None
+
+
+def active_threads(state):
+    """Threads currently booked by running tasks. Falls back to the
+    scheduler's own "active threads" line while no "task start" line has
+    carried THR yet - either the dashboard attached mid-run, or the run comes
+    from a build that doesn't log it."""
+    if not state.threads_seen:
+        return state.threads_reported
+    return sum(entry.get("threads") or 0 for entry in state.active.values())
+
+
+def thread_tick(state, ts):
+    """Fold the thread total up to log timestamp ts into the utilization
+    accumulator. Called before every state change, so the total folded in is
+    the one that held over the interval just closed. Log timestamps, not wall
+    clock, so replaying a finished log gives the same average as watching it
+    live.
+
+    The cursor only ever moves forward: every worker writes to the one log and
+    stamps its line before the write, so lines interleave out of order. Letting
+    ts move the cursor back would fold the stretch between it and the newer
+    timestamp in twice, at two different thread totals."""
+    if not state.threads_seen:
+        return
+    if ts > state.thread_last_ts:
+        dt = ts - state.thread_last_ts
+        state.thread_time += (active_threads(state) or 0) * dt
+        state.thread_span += dt
+        state.thread_last_ts = ts
+
+
+def attach_threads(state, pid, tree_node):
+    """A task's thread count and its node identity arrive on two separate
+    lines ("task start" and "begin") whose order isn't guaranteed - the child
+    logs "begin" as soon as it's forked, the parent logs "task start" after.
+    Both sides call this, so whichever lands second attaches the count."""
+    if tree_node is None:
+        return
+    entry = state.active.get(pid)
+    if entry is not None and entry.get("threads") is not None:
+        tree_node.threads = entry["threads"]
 
 
 def set_phase(state, phase):
@@ -464,6 +526,7 @@ def handle_node_process(state, content):
             tree_node.task_idx = idx
             tree_node.pid = pid
             tree_node.start_time = ts
+            attach_threads(state, pid, tree_node)
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
@@ -561,7 +624,17 @@ def handle_task_start(state, content):
     if not m:
         return
     pid = int(m.group("pid"))
-    state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
+    entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
+
+    thr = m.group("thr")
+    if thr is None:
+        return
+    if not state.threads_seen:
+        state.threads_seen = True
+        state.thread_last_ts = float(m.group("ts"))
+    entry["threads"] = int(thr)
+    if state.tree_by_key and entry.get("i0") is not None:
+        attach_threads(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
 
 
 def handle_task_end(state, content):
@@ -580,6 +653,8 @@ def handle_scheduler(state, content):
     action = m.group("action").strip()
     if action == "active processes":
         state.active_max = max(state.active_max, int(m.group("val")))
+    elif action == "active threads":
+        state.threads_reported = int(m.group("val"))
     elif action in ("pi already stored", "binary split solved"):
         set_phase(state, action)
 
@@ -596,6 +671,11 @@ def handle_phase(state, content):
     if m:
         if state.total_pieces is None:
             apply_index_max(state, int(m.group("index_max")))
+        return
+
+    m = RE_N_PROCESS.match(content)
+    if m:
+        state.n_process_logged = int(m.group("n_process"))
         return
 
     m = RE_MEM_LAUNCH.match(content)
@@ -673,6 +753,9 @@ def feed_line(state, line):
     if handler is None:
         return
     state.touch()
+    m = RE_TS.match(content)
+    if m:
+        thread_tick(state, float(m.group("ts")))
     handler(state, content)
 
 
@@ -697,6 +780,21 @@ def depth_avg(events_by_depth, depth, fallback):
         if durs:
             return sum(durs) / len(durs)
     return fallback
+
+
+def thread_util(state, now):
+    """Time-weighted average thread occupancy over the run so far. The stretch
+    since the last logged line is extrapolated from wall clock at the current
+    thread total - without it a single long join, which logs nothing for
+    minutes, would leave the average frozen at whatever preceded it."""
+    acc, span = state.thread_time, state.thread_span
+    if state.last_line_time is not None and not state.done:
+        tail = max(0.0, now - state.last_line_time)
+        acc += (active_threads(state) or 0) * tail
+        span += tail
+    if span <= 0:
+        return 0.0
+    return acc / span
 
 
 def active_mem_estimate(node):
@@ -750,6 +848,8 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                     est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
                     cur_str = fmt_bytes(current) if current is not None else "?"
                     label += f" {est_str} - {cur_str}"
+                if node.threads is not None:
+                    label += f" x{node.threads}"
                 if node.join_term:
                     op1, _, op2 = node.join_term.partition("x")
                     label += f" | {op1} x {op2}"
@@ -860,9 +960,20 @@ def render(state):
 
     # --- active workers / ram (right column) ---
     status_lines = []
-    n_workers = state.n_process or state.active_max
+    n_workers = state.n_process_logged or state.n_process or state.active_max
+    # active_max counts processes, so it is no stand-in for the thread budget:
+    # one 16-thread task runs as a single process.
+    thread_budget = state.n_process_logged or state.n_process
     blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids and state.disk_lock_enabled is not False else ""
-    status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}")
+    worker_line = f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}"
+    # The scheduler spends one budget on both: n_process caps processes and
+    # threads alike, so a task asking for 8 threads takes 8 of the same slots
+    # eight single-threaded tasks would.
+    threads_now = active_threads(state)
+    if threads_now is not None:
+        full = " full" if thread_budget and threads_now >= thread_budget else ""
+        worker_line += f"   threads: {threads_now}/{thread_budget or '?'}{full}"
+    status_lines.append(worker_line)
 
     ram_parts = []
     if ram_total is not None:
@@ -891,6 +1002,10 @@ def render(state):
         filled = int(bar_width * min(ram_used, ram_total) / ram_total)
         bar = "#" * filled + "-" * (bar_width - filled)
         status_lines.append(f"[{bar}]")
+    if state.thread_span > 0:
+        util = thread_util(state, now)
+        pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
+        status_lines.append(f"thread util: {util:.1f}/{thread_budget or '?'} avg{pct}")
     if state.lock_count and state.disk_lock_enabled is not False:
         avg_ms = 1000.0 * state.lock_wait_total / state.lock_count
         status_lines.append(

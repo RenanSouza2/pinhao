@@ -1,9 +1,8 @@
-// #define LOCK_IN_PLACE
-
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "debug.h"
 #include "../big/internal.h"
 
@@ -17,13 +16,6 @@
 #endif
 
 #define TREE_PIECE_SIZE 24
-
-// Whether a leaf is exempt from the memory budget. A leaf has no join, so
-// there are no operand sizes to estimate from. Exempt, it is charged nothing
-// and launches into any free slot; not exempt, it is charged one byte --
-// negligible against the total, but enough that a full budget holds it back
-// like any other node. Flip and rebuild to experiment.
-#define TREE_LEAF_EXEMPT true
 
 #define NODE_BIG 0
 #define NODE_SPAN 1
@@ -85,7 +77,6 @@ static node_p node_span_create(
         .parent = parent,
         .type = NODE_SPAN,
         .processing = false,
-        .plan.threads = 1,
         .as.span = (span_t){
             .size = size,
             .i_0 = i_0,
@@ -123,7 +114,6 @@ static node_p node_big_create(
         .parent = parent,
         .type = NODE_BIG,
         .processing = false,
-        .plan.threads = 1,
         .as.big = (big_t){
             .size = size,
             .i_0 = i_0,
@@ -378,7 +368,7 @@ static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
     return true;
 }
 
-static bool scheduler_free_threads(tree_scheduler_p s)
+static uint64_t scheduler_free_threads(tree_scheduler_p s)
 {
     if(s->total_threads >= s->n_process)
     {
@@ -490,7 +480,7 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         {
             return node_set_plan(n, mem_cost, 1);
         }
-        
+
         return false;
     }
 
@@ -636,8 +626,6 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
         exit(EXIT_SUCCESS);
     }
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s|", index, (int)pid, get_wall_time(), "task start");
-
     s->tasks[index] = (tree_task_t){
         .pid = pid,
         .n = n,
@@ -651,6 +639,11 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
     {
         s->active++;
     }
+
+    // Logged after the accounting above: THR is this task's thread count, SUM
+    // the scheduler total with it already booked.
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| THR " U64P(3) " SUM " U64P(3) "",
+        index, (int)pid, get_wall_time(), "task start", n->plan.threads, s->total_threads);
 
     return pid;
 }
@@ -723,8 +716,6 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
                 break;
             }
 
-            // Read off the plan, not re-checked: once the child runs it may
-            // create the very file node_is_stored asks about.
             bool is_noop = n->plan.is_noop;
             pid_t pid = task_start(&s, n);
 
@@ -733,8 +724,6 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
                 continue;
             }
 
-            // A no-op exits at once, so reap it here rather than at the wait
-            // below; its slot is then free on the next iteration.
             waitpid_safe(pid, NULL);
             done = task_end(&s, pid);
             if(done)
@@ -749,6 +738,7 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
         }
 
         tprintf("              %-20s| " U64P(2) "", "active processes", s.active);
+        tprintf("              %-20s| " U64P(2) "", "active threads", s.total_threads);
         pid_t pid = waitpid_safe(0, NULL);
 
         done = task_end(&s, pid);
@@ -759,6 +749,12 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 [[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+    if(pi_is_stored(size))
+    {
+        tprintf("              %-20s|", "pi already stored");
+        return pi_load(size);
+    }
+
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
     {
@@ -767,19 +763,15 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
 
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
+    // Logged after the clamp above: it is the budget for processes and
+    // threads alike, so it is what both are measured against.
+    tprintf("              %-20s| " U64P(10) "", "n process", n_process);
     tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
     tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
     tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
-    if(pi_is_stored(size))
-    {
-        tprintf("              %-20s|", "pi already stored");
-        return pi_load(size);
-    }
-
     scheduler(size, n_process, mem_launch, mem_max);
     tprintf("              %-20s|", "binary split solved");
 
-    // pi_finish runs after the tree is solved, alone, so it takes the machine.
     return pi_finish(size, TREE_PIECE_SIZE, n_process);
 }

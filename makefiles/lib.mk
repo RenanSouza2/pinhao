@@ -9,13 +9,13 @@ dbg d: debug.o
 
 
 
-lib.o: code.c
+lib.o: code.c $(CFG_FILE)
 	echo "building $(PRJ_NAME) object $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP)
+	gcc -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP)
 
-debug.o: code.c
+debug.o: code.c $(CFG_FILE)
 	echo "building $(PRJ_NAME) debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
+	gcc -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
 
 
 

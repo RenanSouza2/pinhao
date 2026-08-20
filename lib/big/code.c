@@ -1,10 +1,9 @@
-#define LOCK_DISK_IO
-
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/file.h>
 
+#include "config.h"
 #include "debug.h" // IWYU pragma: keep
 #include "../../mods/clu/header.h" // IWYU pragma: keep
 #include "../../mods/macros/assert.h"
@@ -358,7 +357,7 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 //
 // Only worth it on a spinning disk, where random seeks are expensive; on an
 // SSD there's no seek penalty, so the lock is pure contention with no
-// benefit. Gated behind LOCK_DISK_IO (see top of file) -- undefine it to
+// benefit. Gated behind LOCK_DISK_IO (see config.h) -- undefine it to
 // skip locking entirely.
 #ifdef LOCK_DISK_IO
 static int g_disk_lock_fd = -1;

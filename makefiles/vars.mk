@@ -1,6 +1,7 @@
 PRJ_NAME = pi
 PRJ_DIR ?= $(shell git rev-parse --show-toplevel)
 LIB_DIR = $(PRJ_DIR)/lib
+CFG_FILE = $(PRJ_DIR)/config.h
 AUC_DIR = $(PRJ_DIR)/mods/araucaria/lib
 DBG_FILE = $(LIB_DIR)/debug.o
 LIB_FILE = $(LIB_DIR)/lib.o

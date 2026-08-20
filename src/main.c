@@ -42,7 +42,7 @@ int main(void)
     // a launched task may overshoot up to mem_max, which is never crossed.
     uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
-    pi(64'000'000, 16, mem_launch, mem_max);
+    pi(128'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;
