@@ -452,7 +452,7 @@ bool disk_lock_enabled(void)
         JOIN_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
     } while(0)
 
-void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t threads)
 {
     int pid = (int)getpid();
 
@@ -482,7 +482,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
             sig_num_t sig;
             JOIN_MUL(index, pid, i_0, span, depth,
-                sig = sig_num_mul(sig_1, sig_2);
+                sig = sig_num_mul_threads(sig_1, sig_2, threads);
             );
 
             JOIN_WRITE_HOLD(index, pid, i_0, span, depth,
@@ -505,7 +505,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         sig_num_t sig_r_1;
         JOIN_MUL(index, pid, i_0, span, depth,
-            sig_r_1 = sig_num_mul(sig_1, sig_2);
+            sig_r_1 = sig_num_mul_threads(sig_1, sig_2, threads);
         );
 
         JOIN_HEADER("R1xQ2", index, pid, i_0, span, depth);
@@ -521,7 +521,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         sig_num_t sig_r_2;
         JOIN_MUL(index, pid, i_0, span, depth,
-            sig_r_2 = sig_num_mul(sig_1, sig_2);
+            sig_r_2 = sig_num_mul_threads(sig_1, sig_2, threads);
         );
         JOIN_WRITE(index, pid, i_0, span, depth,
             sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
@@ -560,7 +560,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         union_num_t u;
         JOIN_MUL(index, pid, i_0, span, depth,
-            u = union_num_mul(u_1, u_2);
+            u = union_num_mul_threads(u_1, u_2, threads);
         );
 
         JOIN_WRITE_HOLD(index, pid, i_0, span, depth,
@@ -583,7 +583,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
     union_num_t u_r_1;
     JOIN_MUL(index, pid, i_0, span, depth,
-        u_r_1 = union_num_mul(u_1, u_2);
+        u_r_1 = union_num_mul_threads(u_1, u_2, threads);
         if(araucaria_disk_config_is_set())
         {
             u_r_1 = union_num_realloc_disk(u_r_1);
@@ -603,7 +603,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
     union_num_t u_r_2;
     JOIN_MUL(index, pid, i_0, span, depth,
-        u_r_2 = union_num_mul(u_1, u_2);
+        u_r_2 = union_num_mul_threads(u_1, u_2, threads);
     );
     JOIN_WRITE(index, pid, i_0, span, depth,
         u_r_1 = union_num_add(u_r_1, u_r_2);
@@ -641,7 +641,7 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
-    split_span_res_join(index, size, i_0, span, depth);
+    split_span_res_join(index, size, i_0, span, depth, 1);
     TIME_END(t1)
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
@@ -694,7 +694,7 @@ uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, 
     return union_res_op_size(size, i_0, remainder, depth, index);
 }
 
-void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t threads)
 {
     int pid = (int)getpid();
 
@@ -724,7 +724,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
         union_num_t u;
         JOIN_MUL(index, pid, i_0, remainder, depth,
-            u = union_num_mul(u_1, u_2);
+            u = union_num_mul_threads(u_1, u_2, threads);
         );
 
         JOIN_WRITE_HOLD(index, pid, i_0, remainder, depth,
@@ -747,7 +747,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
     union_num_t u_r_1;
     JOIN_MUL(index, pid, i_0, remainder, depth,
-        u_r_1 = union_num_mul(u_1, u_2);
+        u_r_1 = union_num_mul_threads(u_1, u_2, threads);
         if(araucaria_disk_config_is_set())
         {
             u_r_1 = union_num_realloc_disk(u_r_1);
@@ -767,7 +767,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
     union_num_t u_r_2;
     JOIN_MUL(index, pid, i_0, remainder, depth,
-        u_r_2 = union_num_mul(u_1, u_2);
+        u_r_2 = union_num_mul_threads(u_1, u_2, threads);
     );
 
     union_num_t u;
@@ -807,7 +807,7 @@ static void split_big(uint64_t index, uint64_t size, uint64_t i_0, uint64_t rema
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
-    split_big_res_join(index, size, i_0, remainder, depth);
+    split_big_res_join(index, size, i_0, remainder, depth, 1);
     TIME_END(t1)
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
@@ -860,7 +860,7 @@ uint64_t get_index_max(uint64_t size, uint64_t piece_size)
     return index_max + B(piece_size) - aux;
 }
 
-flt_num_t pi_finish(uint64_t size, uint64_t piece_size)
+flt_num_t pi_finish(uint64_t size, uint64_t piece_size, uint64_t threads)
 {
     uint64_t index_max = get_index_max(size, piece_size);
 
@@ -875,7 +875,7 @@ flt_num_t pi_finish(uint64_t size, uint64_t piece_size)
 
     tprintf("              %-20s|", "dividing");
     TIME_SETUP
-    flt_pi = flt_num_div(flt_pi, flt_q);
+    flt_pi = flt_num_div_threads(flt_pi, flt_q, threads);
     TIME_END(t1)
     tprintf("              %-20s| %7.1f", "divided", dtime(t1));
 
@@ -897,7 +897,7 @@ flt_num_t pi_big(uint64_t size)
     split_big(0, size, 1, index_max, 0);
     tprintf("              %-20s|", "binary split solved");
 
-    return pi_finish(size, PIECE_SIZE);
+    return pi_finish(size, PIECE_SIZE, 1);
 }
 
 void prepare(
