@@ -749,6 +749,12 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 [[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+    // Logged ahead of the stored-result check: a run that finds pi on disk
+    // returns without ever reaching the scheduler, and these two are the only
+    // lines that state the size of the run it skipped.
+    tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
+    tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
+
     if(pi_is_stored(size))
     {
         tprintf("              %-20s|", "pi already stored");
@@ -761,8 +767,6 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
         n_process = (uint64_t)n_proc_avail;
     }
 
-    tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
-    tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
     // Logged after the clamp above: it is the budget for processes and
     // threads alike, so it is what both are measured against.
     tprintf("              %-20s| " U64P(10) "", "n process", n_process);

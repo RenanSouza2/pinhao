@@ -56,6 +56,14 @@ READY_ID_OFF = "\x1b[39m"
 DONE_ID_ON = "\x1b[38;2;110;128;184m"
 DONE_ID_OFF = "\x1b[39m"
 
+# Bold teal (#4FB3A5) on the thread badge of a task granted more than one
+# thread. The badge is only printed in that case, so any badge at all is the
+# signal and the color is what makes it carry across a full tree. Cleared
+# with 22;39 (normal intensity + default foreground) rather than a bare
+# reset - see IO_ATTN_OFF above for why.
+MULTI_THR_ON = "\x1b[1;38;2;79;179;165m"
+MULTI_THR_OFF = "\x1b[22;39m"
+
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -419,8 +427,8 @@ class State:
         self.pieces_from_cache = 0
         self.joins_done = 0
         self.joins_from_cache = 0
-        self.piece_events = collections.deque(maxlen=2000)  # (time, dur)
-        self.join_events = collections.deque(maxlen=2000)  # (time, dur)
+        self.piece_events = collections.deque(maxlen=2000)  # durations, seconds
+        self.join_events = collections.deque(maxlen=2000)  # durations, seconds
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
@@ -548,8 +556,8 @@ def handle_node_process(state, content):
         dur = m.group("dur")
         if dur is not None:
             dur = float(dur)
-            state.join_events.append((time.time(), dur))
-            state.join_events_by_depth[depth].append((time.time(), dur))
+            state.join_events.append(dur)
+            state.join_events_by_depth[depth].append(dur)
         if tree_node is not None:
             mark_node_done(tree_node)
 
@@ -560,12 +568,12 @@ def handle_piece(state, content):
         return
     dur = float(m.group("dur"))
     state.pieces_done += 1
-    state.piece_events.append((time.time(), dur))
+    state.piece_events.append(dur)
 
     entry = state.active.get(int(m.group("pid")))
     depth = entry["depth"] if entry else None
     if depth is not None:
-        state.piece_events_by_depth[depth].append((time.time(), dur))
+        state.piece_events_by_depth[depth].append(dur)
 
     if state.tree_by_key:
         i0 = int(m.group("i0"))
@@ -655,8 +663,6 @@ def handle_scheduler(state, content):
         state.active_max = max(state.active_max, int(m.group("val")))
     elif action == "active threads":
         state.threads_reported = int(m.group("val"))
-    elif action in ("pi already stored", "binary split solved"):
-        set_phase(state, action)
 
 
 def handle_phase(state, content):
@@ -669,8 +675,14 @@ def handle_phase(state, content):
 
     m = RE_RUN_SIZE.match(content)
     if m:
-        if state.total_pieces is None:
-            apply_index_max(state, int(m.group("index_max")))
+        # The log wins over --size, which only exists to fill the totals in one
+        # line earlier: a --size left over from an earlier run would otherwise
+        # size the tree, the progress bar and every ETA for the whole run.
+        # Rebuilds only on a real disagreement, so a matching --size keeps the
+        # tree it already built.
+        index_max = int(m.group("index_max"))
+        if state.total_pieces != index_max // PIECES_PER_LEAF:
+            apply_index_max(state, index_max)
         return
 
     m = RE_N_PROCESS.match(content)
@@ -776,9 +788,7 @@ def fmt_duration(seconds):
 def depth_avg(events_by_depth, depth, fallback):
     events = events_by_depth.get(depth) if depth is not None else None
     if events:
-        durs = [d for _, d in events]
-        if durs:
-            return sum(durs) / len(durs)
+        return sum(events) / len(events)
     return fallback
 
 
@@ -848,8 +858,10 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                     est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
                     cur_str = fmt_bytes(current) if current is not None else "?"
                     label += f" {est_str} - {cur_str}"
-                if node.threads is not None:
-                    label += f" x{node.threads}"
+                # Single-threaded tasks get no badge at all: its presence is
+                # what flags a task holding more than one thread slot.
+                if node.threads is not None and node.threads > 1:
+                    label += f" {MULTI_THR_ON}x{node.threads}{MULTI_THR_OFF}"
                 if node.join_term:
                     op1, _, op2 = node.join_term.partition("x")
                     label += f" | {op1} x {op2}"
@@ -911,9 +923,9 @@ def render(state):
         run_elapsed = now - state.run_start_time
         lines.append(f"run:     {fmt_duration(run_elapsed)} (since process start)")
 
-    piece_durs = [d for _, d in state.piece_events]
+    piece_durs = list(state.piece_events)
     avg_piece_dur = sum(piece_durs) / len(piece_durs) if piece_durs else None
-    join_durs = [d for _, d in state.join_events]
+    join_durs = list(state.join_events)
     avg_join_dur = sum(join_durs) / len(join_durs) if join_durs else None
 
     if state.done:
@@ -1037,8 +1049,21 @@ RESTARTED = object()
 
 
 def tail(path):
+    """Yield whole log records as they land, RESTARTED when the file is replaced.
+
+    tprintf() writes a record as "\\n" + payload + "\\t", so the newline that
+    separates two records belongs to the later one and the newest record in the
+    file carries no terminator of its own - which is why an unterminated read
+    cannot simply be held back, or a finished run's "display end" would never
+    arrive. A record is complete once it ends in the tab; short of that the
+    writer (tee, whose reads split a busy pipe mid-record) is caught halfway,
+    and the fragment is held until the rest lands. Feeding the halves through
+    separately would lose the record entirely - neither half parses, and a
+    dropped piece or join never comes back.
+    """
     inode = None
     f = None
+    pending = ""
     try:
         while True:
             try:
@@ -1048,6 +1073,7 @@ def tail(path):
                     f.close()
                     f = None
                     inode = None
+                    pending = ""
                     yield RESTARTED
                 yield None
                 time.sleep(0.3)
@@ -1058,14 +1084,19 @@ def tail(path):
                     f.close()
                 f = open(path, "r", errors="replace")
                 inode = st.st_ino
+                pending = ""
                 yield RESTARTED
 
-            line = f.readline()
-            if line:
-                yield line
-            else:
+            chunk = f.readline()
+            if not chunk:
                 yield None
                 time.sleep(0.2)
+                continue
+
+            pending += chunk
+            if pending.endswith("\n") or pending.endswith("\t"):
+                line, pending = pending, ""
+                yield line
     finally:
         if f is not None:
             f.close()
