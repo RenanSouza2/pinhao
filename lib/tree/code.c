@@ -231,9 +231,12 @@ static bool node_is_leaf(node_p n)
 // contributions from both children and so tends to be the largest operand of the
 // four. Sizes are read from each child's already-stored result via
 // split_span_res_op_size / split_big_res_op_size (index 2 = R, index 1 = Q).
-// Returns false for a leaf, which has no join.
-static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
+//
+// Only for a node that joins: a leaf has none.
+static void node_op_sizes(uint64_t *out_op_1, uint64_t *out_op_2, node_p n)
 {
+    assert(!node_is_leaf(n));
+
     switch(n->type)
     {
         case NODE_SPAN:
@@ -242,10 +245,6 @@ static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
             uint64_t i_0 = n->as.span.i_0;
             uint64_t span = n->as.span.span;
             uint64_t depth = n->as.span.depth;
-            if(node_is_leaf(n))
-            {
-                return false;
-            }
 
             *out_op_1 = split_span_res_op_size(size, i_0, span - 1, depth + 1, 2);
             *out_op_2 = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
@@ -267,28 +266,6 @@ static bool node_op_sizes(node_p n, uint64_t *out_op_1, uint64_t *out_op_2)
 
         default: revert()
     }
-
-    return true;
-}
-
-// How many series terms a node covers -- what decides both its place in the tree
-// and how wide its level is.
-static uint64_t node_terms(node_p n)
-{
-    switch(n->type)
-    {
-        case NODE_BIG:
-        {
-            return n->as.big.remainder;
-        }
-
-        case NODE_SPAN:
-        {
-            return B(n->as.span.span);
-        }
-
-        default: revert()
-    }
 }
 
 STRUCT(tree_task)
@@ -304,22 +281,22 @@ STRUCT(tree_scheduler)
     tree_task_p tasks;
     uint64_t active;
     uint64_t total_mem_cost;
+    uint64_t total_threads;
     uint64_t n_process;
     uint64_t mem_launch;
     uint64_t mem_max;
-    uint64_t index_max;
 };
 
-static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_launch, uint64_t mem_max, uint64_t index_max)
+static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     tree_scheduler_t s = {
         .tasks = calloc(n_process, sizeof(tree_task_t)),
         .active = 0,
         .total_mem_cost = 0,
+        .total_threads = 0,
         .n_process = n_process,
         .mem_launch = mem_launch,
-        .mem_max = mem_max,
-        .index_max = index_max
+        .mem_max = mem_max
     };
     assert(s.tasks);
     return s;
@@ -348,15 +325,20 @@ static uint64_t get_free_index(tree_scheduler_p s)
 // ---------------------------------------------------------------------------
 
 // Estimates the average memory a node's join will use, from araucaria's own
-// num_mul_estimate_memory, for a join that will be given `threads` threads.
+// num_mul_estimate_memory.
+//
+// Always priced at a single thread: a node's memory cost is the same whatever
+// thread count it ends up with, so the memory budget and the thread budget can
+// be decided independently of each other.
+//
 // Only for a node that joins: node_can_launch settles a leaf before here.
-static uint64_t node_estimate_memory(node_p n, uint64_t disk_threshold_bytes, uint64_t threads)
+static uint64_t node_estimate_memory(node_p n)
 {
     uint64_t op_1;
     uint64_t op_2;
-    assert(node_op_sizes(n, &op_1, &op_2));
+    node_op_sizes(&op_1, &op_2, n);
 
-    return num_mul_estimate_memory(op_1, op_2, disk_threshold_bytes, threads);
+    return num_mul_estimate_memory(op_1, op_2, UINT64_MAX, 1);
 }
 
 // A process slot has to be free before anything can be launched into one.
@@ -370,7 +352,7 @@ static bool scheduler_has_slot(tree_scheduler_p s)
 // a node past the memory budget, so the tree cannot wedge on its own estimate.
 static bool scheduler_at_first_slot(tree_scheduler_p s)
 {
-    return get_free_index(s) == 0;
+    return !s->tasks[0].active;
 }
 
 // Whether the memory budget can take a task estimated at `mem_cost`.
@@ -381,16 +363,8 @@ static bool scheduler_at_first_slot(tree_scheduler_p s)
 // stops launching until a task ends.
 //
 // Budget arithmetic only: node_can_launch owns the first-slot exception to it.
-//
-// A cost of zero is admitted unconditionally: it is what an exempt leaf, the
-// only caller that passes one, means by exempt.
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 {
-    if(mem_cost == 0)
-    {
-        return true;
-    }
-
     if(s->total_mem_cost >= s->mem_launch)
     {
         return false;
@@ -404,71 +378,50 @@ static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
     return true;
 }
 
+static bool scheduler_free_threads(tree_scheduler_p s)
+{
+    if(s->total_threads >= s->n_process)
+    {
+        return 0;
+    }
+
+    return s->n_process - s->total_threads;
+}
+
+// Whether the thread budget can take a task asking for `threads`.
+//
+// Threads are cores: the counts of all active tasks sum to at most n_process,
+// so nothing is oversubscribed. A node that cannot be given a single free
+// thread waits rather than launching alongside a full machine.
+//
+// total_threads can sit above n_process after node_can_launch's first-slot
+// exception, so this compares sums rather than subtracting them.
+//
+// Budget arithmetic only: node_can_launch owns the first-slot exception to it.
+static bool scheduler_has_threads(tree_scheduler_p s)
+{
+    return scheduler_free_threads(s) > 0;
+}
+
 // Clamps a thread request to num_mul_threads_ceiling, then rounds it down to a
 // power of two -- the only shape num_ssm_fft_fwd_split can use, since it gives
 // its recursive phase the power-of-two floor of the workers asked for while
 // still allocating a 2n-limb scratch buffer for each of them.
 //
 // Only for a node that joins: node_can_launch settles a leaf before here.
-static uint64_t node_threads_clamp(node_p n, uint64_t threads)
+static uint64_t node_threads(node_p n, uint64_t max_threads)
 {
     uint64_t op_1;
     uint64_t op_2;
-    assert(node_op_sizes(n, &op_1, &op_2));
+    node_op_sizes(&op_1, &op_2, n);
 
-    uint64_t ceiling = num_mul_threads_ceiling(op_1, op_2);
-    if(threads > ceiling)
+    uint64_t threads_ceiling = num_mul_threads_ceiling(op_1, op_2);
+    if(threads_ceiling < max_threads)
     {
-        threads = ceiling;
+        return threads_ceiling;
     }
 
-    if(threads < 2)
-    {
-        return 1;
-    }
-
-    return B(stdc_bit_width(threads) - 1);
-}
-
-// How many threads a node's join should ask for.
-//
-// Threads take the cores process parallelism cannot. A node gets n_process /
-// concurrent, where concurrent is the smaller of its level's tree width
-// (index_max / node_terms) and how many joins of its size fit in mem_launch.
-// A level still wide enough to give every process a node stays at one thread.
-//
-// The request goes out through node_threads_clamp.
-//
-// No cap beyond that: simultaneously runnable nodes cover disjoint index ranges
-// and their thread counts sum to about n_process, so the machine is not
-// oversubscribed.
-//
-// Only for a node that joins: node_can_launch settles a leaf before here.
-static uint64_t node_threads(tree_scheduler_p s, node_p n)
-{
-    uint64_t op_1;
-    uint64_t op_2;
-    assert(node_op_sizes(n, &op_1, &op_2));
-
-    uint64_t width = s->index_max / node_terms(n);
-
-    // At one thread: peak RSS barely moves with thread count, which breaks the
-    // circularity between this estimate and the count it feeds.
-    uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX, 1);
-    uint64_t fit = mem_cost ? s->mem_launch / mem_cost : s->n_process;
-
-    uint64_t concurrent = width < fit ? width : fit;
-    if(concurrent > s->n_process)
-    {
-        concurrent = s->n_process;
-    }
-
-    if(concurrent == 0)
-    {
-        concurrent = 1;
-    }
-
-    return node_threads_clamp(n, s->n_process / concurrent);
+    return max_threads;
 }
 
 // Whether the walk may look inside a node for work. A node being processed owns
@@ -476,6 +429,16 @@ static uint64_t node_threads(tree_scheduler_p s, node_p n)
 static bool node_is_open(node_p n)
 {
     return !n->processing;
+}
+
+static bool node_set_plan(node_p n, uint64_t mem_cost, uint64_t threads)
+{
+    n->plan = (tree_plan_t){
+        .mem_cost = mem_cost,
+        .threads = threads,
+        .is_noop = false
+    };
+    return true;
 }
 
 // May this node be launched now, and on what terms. On true the node's plan is
@@ -486,12 +449,14 @@ static bool node_is_open(node_p n)
 // of counting it against the process budget.
 //
 // A leaf has no children to wait on and no join to estimate, so it is charged
-// what TREE_LEAF_EXEMPT says and nothing more. Any other node needs both
-// children done and room in the memory budget.
+// what TREE_LEAF_EXEMPT says and the single thread it runs on. Any other node
+// needs both children done, room in the memory budget, and a thread to run on.
 //
-// A free slot 0 is the one way past that budget. A node admitted there on the
-// budget's own terms runs alongside whatever else is live, so it takes its
-// ordinary thread count; a node admitted over the budget takes every thread.
+// A free slot 0 is the one way past either budget, and the only place the
+// thread ceiling may be broken: a node too big for the budgets is also the node
+// everything else is waiting on, so it launches at full width and the machine
+// stays oversubscribed until it ends. Nothing else launches meanwhile -- the
+// budgets it went over hold every other node back.
 static bool node_can_launch(tree_scheduler_p s, node_p n)
 {
     if(!node_is_open(n))
@@ -502,28 +467,14 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
     if(node_is_stored(n))
     {
         n->plan = (tree_plan_t){
-            .mem_cost = 0,
-            .threads = 1,
             .is_noop = true
         };
         return true;
     }
 
-    if(node_is_leaf(n))
+    if(!scheduler_has_threads(s))
     {
-        uint64_t mem_cost = TREE_LEAF_EXEMPT ? 0 : 1;
-
-        if(!scheduler_has_memory(s, mem_cost) && !scheduler_at_first_slot(s))
-        {
-            return false;
-        }
-
-        n->plan = (tree_plan_t){
-            .mem_cost = mem_cost,
-            .threads = 1,
-            .is_noop = false
-        };
-        return true;
+        return false;
     }
 
     if(!node_is_ready(n))
@@ -531,9 +482,20 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         return false;
     }
 
-    uint64_t threads = node_threads(s, n);
-    uint64_t mem_cost = node_estimate_memory(n, UINT64_MAX, threads);
+    if(node_is_leaf(n))
+    {
+        uint64_t mem_cost = TREE_LEAF_EXEMPT ? 0 : 1;
 
+        if(scheduler_has_memory(s, mem_cost) || scheduler_at_first_slot(s))
+        {
+            return node_set_plan(n, mem_cost, 1);
+        }
+        
+        return false;
+    }
+
+
+    uint64_t mem_cost = node_estimate_memory(n);
     if(!scheduler_has_memory(s, mem_cost))
     {
         if(!scheduler_at_first_slot(s))
@@ -541,18 +503,14 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
             return false;
         }
 
-        // Over the budget and admitted anyway: it runs at full width, and its
-        // cost is re-estimated for the count it will actually get.
-        threads = node_threads_clamp(n, s->n_process);
-        mem_cost = node_estimate_memory(n, UINT64_MAX, threads);
+        // Over a budget and admitted anyway: it runs at full width, whatever
+        // the other tasks already hold.
+        uint64_t threads = node_threads(n, s->n_process);
+        return node_set_plan(n, mem_cost, threads);
     }
 
-    n->plan = (tree_plan_t){
-        .mem_cost = mem_cost,
-        .threads = threads,
-        .is_noop = false
-    };
-    return true;
+    uint64_t threads = scheduler_free_threads(s);
+    return node_set_plan(n, mem_cost, threads);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +646,7 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
     };
 
     s->total_mem_cost += n->plan.mem_cost;
+    s->total_threads += n->plan.threads;
     if(!n->plan.is_noop)
     {
         s->active++;
@@ -719,6 +678,7 @@ static bool task_end(tree_scheduler_p s, pid_t pid)
 
     s->tasks[index].active = false;
     s->total_mem_cost -= n->plan.mem_cost;
+    s->total_threads -= n->plan.threads;
     if(!n->plan.is_noop)
     {
         s->active--;
@@ -750,7 +710,7 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    tree_scheduler_t s = tree_scheduler_create(n_process, mem_launch, mem_max, index_max);
+    tree_scheduler_t s = tree_scheduler_create(n_process, mem_launch, mem_max);
 
     bool done = false;
     while(!done)
