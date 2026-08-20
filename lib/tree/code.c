@@ -405,13 +405,13 @@ static uint64_t node_threads(node_p n, uint64_t max_threads)
     uint64_t op_2;
     node_op_sizes(&op_1, &op_2, n);
 
-    uint64_t threads_ceiling = num_mul_threads_ceiling(op_1, op_2);
-    if(threads_ceiling < max_threads)
+    uint64_t threads = num_mul_threads_ceiling(op_1, op_2);
+    if(threads > max_threads)
     {
-        return threads_ceiling;
+        threads = max_threads;
     }
 
-    return max_threads;
+    return B(stdc_bit_width(threads) - 1);
 }
 
 // Whether the walk may look inside a node for work. A node being processed owns
@@ -499,7 +499,7 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         return node_set_plan(n, mem_cost, threads);
     }
 
-    uint64_t threads = scheduler_free_threads(s);
+    uint64_t threads = node_threads(n, scheduler_free_threads(s));
     return node_set_plan(n, mem_cost, threads);
 }
 
