@@ -1046,11 +1046,13 @@ def render(state):
     two_col = left_w >= TWO_COL_MIN
     if not two_col:
         left_w = right_w = avail
-    # inner width, less "\u2502 ", the row's own indent, the brackets, and a
-    # trailing column so a full bar doesn't butt against the right border
+    # Every box shares one label column, and every bar is indented to it.
+    LABEL_W = 9
+    # inner width, less "\u2502 ", the indent, the brackets, and a trailing
+    # column so a full bar doesn't butt against the right border
     done_bar_w = max(10, left_w - 15)
-    thread_bar_w = max(10, right_w - 6)
-    ram_bar_w = max(10, avail - 6)
+    thread_bar_w = max(10, right_w - 15)
+    ram_bar_w = max(10, left_w - 15)
 
     # --- box 1: overall completion ---
     completion_lines = []
@@ -1072,10 +1074,7 @@ def render(state):
         if state.phase == "splitting":
             completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}")
         completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
-        completion_lines.append(f"         [{bar}]")
-        numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
-        pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
-        completion_lines.append(f"         numbers: {fmt_bytes(numbers_size)}   pieces: {fmt_bytes(pieces_size)}")
+        completion_lines.append(" " * LABEL_W + f"[{bar}]")
     else:
         completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)")
 
@@ -1089,24 +1088,24 @@ def render(state):
     waiting, io = blocked_threads(state)
     blocked_total = waiting + io
 
-    # One label column for both rows, so the counts line up under each other.
-    VALUE_COL = 24
+    # Same shape as the completion box: a label column, values aligned under it,
+    # and the bar indented to the value column instead of flush to the border.
+    PAIR_COL = 25
     lock_on = state.disk_lock_enabled is not False
-    workers_row = f"workers: {len(state.active)}/{n_workers or '?'}"
+    workers_row = f"workers: {len(state.active)} / {n_workers or '?'}"
     if lock_on:
-        workers_row = workers_row.ljust(VALUE_COL) + f"(blocked: {len(state.locking_pids)})"
+        workers_row = workers_row.ljust(PAIR_COL) + f"({len(state.locking_pids)} blocked)"
     thread_lines.append(workers_row)
 
     if threads_now is not None:
-        full = " full" if thread_budget and threads_now >= thread_budget else ""
         why = ", ".join(
             part for part in (
-                f"{waiting} waiting on lock" if waiting else "",
-                f"{io} in I/O" if io else "",
+                f"{waiting} lock" if waiting else "",
+                f"{io} I/O" if io else "",
             ) if part
         )
-        threads_row = f"threads: {threads_now}/{thread_budget or '?'}{full}".ljust(VALUE_COL)
-        threads_row += f"blocked: {blocked_total}" + (f" ({why})" if why else "")
+        threads_row = f"threads: {threads_now} / {thread_budget or '?'}".ljust(PAIR_COL)
+        threads_row += f"blocked: {blocked_total}" + (f"  ({why})" if why else "")
         thread_lines.append(threads_row)
 
     if thread_budget and threads_now is not None:
@@ -1124,30 +1123,21 @@ def render(state):
         fills = [int(r) for r in raw]
         for i in sorted(range(3), key=lambda i: raw[i] - fills[i], reverse=True)[:bar_width - sum(fills)]:
             fills[i] += 1
-        thread_lines.append("[" + "#" * fills[0] + "\u25cb" * fills[1] + "-" * fills[2] + "]")
+        thread_lines.append(" " * LABEL_W + "[" + "#" * fills[0] + "\u25cb" * fills[1] + "-" * fills[2] + "]")
 
     if state.thread_span > 0:
         util = thread_util(state, now)
         pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
-        thread_lines.append(f"thread util: {util:.1f}/{thread_budget or '?'} avg{pct}")
-    if state.lock_requests and state.disk_lock_enabled is not False:
-        if state.lock_tokens_seen:
-            pct = 100.0 * state.lock_misses / state.lock_requests
-            misses = f"{state.lock_misses} misses ({pct:.0f}%)"
-        else:
-            # No "locked" line carried HIT/MISS: a log from a build predating
-            # them. Zero misses would read as no contention rather than no data.
-            misses = "misses n/a (stale build)"
-        thread_lines.append(f"disk lock: {state.lock_requests} requests, {misses}")
+        thread_lines.append(" " * LABEL_W + f"util: {util:.1f} / {thread_budget or '?'} avg{pct}")
+
 
     # --- box 3: ram usage ---
     ram_lines = []
-    ram_parts = []
     if ram_total is not None:
-        ram_part = f"ram: {fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
+        row = "ram:".ljust(LABEL_W) + f"{fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
         if ram_used is not None:
-            ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
-        ram_parts.append(ram_part)
+            row += f" ({100.0 * ram_used / ram_total:4.1f}%)"
+        ram_lines.append(row)
     if pid_rss or state.tree_root is not None:
         est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
         est_str = fmt_bytes(est) if est is not None else "?"
@@ -1161,25 +1151,48 @@ def render(state):
         else:
             limit_str = ""
         held = " held" if est is not None and state.mem_launch and est >= state.mem_launch else ""
-        ram_parts.append(f"workers: {est_str}{limit_str}{held} | {real_str}")
-    if ram_parts:
-        ram_lines.append("   ".join(ram_parts))
+        ram_lines.append("workers:".ljust(LABEL_W) + f"{est_str}{limit_str}{held} | {real_str}")
     if ram_total is not None and ram_used is not None:
         bar_width = ram_bar_w
         filled = int(bar_width * min(ram_used, ram_total) / ram_total)
         bar = "#" * filled + "-" * (bar_width - filled)
-        ram_lines.append(f"[{bar}]")
+        ram_lines.append(" " * LABEL_W + f"[{bar}]")
+
+    # --- box 4: disk ---
+    disk_lines = []
+    numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
+    pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
+    disk_lines.append(
+        "cache:".ljust(LABEL_W) + f"numbers {fmt_bytes(numbers_size)}   pieces {fmt_bytes(pieces_size)}"
+    )
+    if state.lock_requests and state.disk_lock_enabled is not False:
+        if state.lock_tokens_seen:
+            pct = 100.0 * state.lock_misses / state.lock_requests
+            misses = f"{state.lock_misses} misses ({pct:.0f}%)"
+        else:
+            # No "locked" line carried HIT/MISS: a log from a build predating
+            # them. Zero misses would read as no contention rather than no data.
+            misses = "misses n/a (stale build)"
+        disk_lines.append("lock:".ljust(LABEL_W) + f"{state.lock_requests} requests, {misses}")
 
     inset = " " * BOX_INSET
-    pair = [(t, r) for t, r in (("completion", completion_lines), ("threads", thread_lines)) if r]
-    if two_col and len(pair) == 2:
-        boxes = [render_box(t, r, w) for (t, r), w in zip(pair, (left_w, right_w))]
-        lines.extend(inset + row for row in render_row(boxes, BOX_GAP))
-    else:
-        for title, rows in pair:
-            lines.extend(inset + row for row in render_box(title, rows, avail))
-    if ram_lines:
-        lines.extend(inset + row for row in render_box("ram", ram_lines, avail))
+    grid = (
+        (("completion", completion_lines), ("threads", thread_lines)),
+        (("ram", ram_lines), ("disk", disk_lines)),
+    )
+    for pair in grid:
+        present = [(t, r) for t, r in pair if r]
+        if not present:
+            continue
+        if two_col and len(present) == 2:
+            # Pad the shorter of a pair so both frames close on the same row.
+            height = max(len(rows) for _, rows in present)
+            present = [(t, rows + [""] * (height - len(rows))) for t, rows in present]
+            boxes = [render_box(t, r, w) for (t, r), w in zip(present, (left_w, right_w))]
+            lines.extend(inset + row for row in render_row(boxes, BOX_GAP))
+        else:
+            for title, rows in present:
+                lines.extend(inset + row for row in render_box(title, rows, avail))
 
     # Only while the tree is being walked: past that every node is done and the
     # view says nothing the completion box doesn't.
