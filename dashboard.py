@@ -25,61 +25,55 @@ TREE_PIECE_SIZE = None
 PIECES_PER_LEAF = None
 
 # Muted amber (#C9A66B) for the "loading"/"writing" micro-phases (actively
-# blocked in the I/O syscall). Not a full \x1b[0m reset: the screen
-# background is set once (SGR 48) when the alt-screen is entered and never
-# reapplied per frame, so a bare reset here would strip it for the rest of
-# the run. 39 (default foreground) clears just the color this pair set,
-# leaving the background alone.
+# blocked in the I/O syscall).
 IO_ATTN_ON = "\x1b[38;2;201;166;107m"
-IO_ATTN_OFF = "\x1b[39m"
 
-# Wine (#722F37), not vibrant red, to flag the "locking" micro-phase. 39
-# (default foreground) is enough to clear it - see IO_ATTN_OFF comment
-# above for why a bare reset is avoided.
+# What every colour below is cleared with. Never a bare \x1b[0m reset: the
+# screen background is set once (SGR 48) when the alt-screen is entered and
+# never reapplied per frame, so a full reset would strip it for the rest of
+# the run. 39 is "default foreground" - it clears the colour and leaves the
+# background alone.
+OFF = "\x1b[39m"
+
+# Wine (#722F37), not vibrant red, to flag the "locking" micro-phase.
 LOCK_ON = "\x1b[38;2;114;47;55m"
-LOCK_OFF = "\x1b[39m"
 
 # Sage (#6B8E6B), a muted green rather than a vibrant one, for the
-# "multiplying" micro-phase - same 39-only reset as LOCK_OFF.
+# "multiplying" micro-phase.
 MUL_ON = "\x1b[38;2;107;142;107m"
-MUL_OFF = "\x1b[39m"
 
-# Tree node states on two axes. Hue says what kind of node it is - green for
-# work behind you, violet for work still ahead, sky for work available now,
+# Tree node states on two axes. Hue says what kind of node it is - deep teal
+# for work behind you, violet for work still ahead, sky for work available now,
 # muted blue for the trail down to a running worker, and MUL_ON's green on the
 # node that is running - the same green its "multiplying" phase is written in,
-# so the node and the work it is doing read as one thing.
+# so the node and the work it is doing read as one thing. Green belongs to the
+# running node alone: a done node in the same hue read as still working.
 #
 # Brightness says how much to care, and ready deliberately outranks the trail:
 # a node waiting only on a free slot is the next thing that will happen, while
 # an ancestor of a running one is just a breadcrumb. Ready and the trail share
 # a family, so they are held far apart within it - saturated sky against a
 # desaturated periwinkle. At the other end NODE_DONE and NODE_PENDING are
-# within 0.03 of each other in contrast against the #0A143C ground, too close
+# within 0.5 of each other in contrast against the #0A143C ground, too close
 # to tell apart by weight - hue alone separates them, so neither has to get
 # loud and the boundary between the two draws the frontier of the computation.
+# Teal against violet is the widest hue gap available down at that brightness
+# once green is spoken for, and that gap is the frontier's whole legibility.
 # A ready node dims to NODE_STARVED while the scheduler has no slot to give it,
 # so the whole launch queue dims when the machine is full and brightens the
-# moment something frees up. Cleared with 39 (default foreground) rather than
-# a bare reset - see IO_ATTN_OFF above for why.
+# moment something frees up.
 NODE_RUNNING = "\x1b[38;2;107;142;107m"  # #6B8E6B  green,    contrast  4.84
 NODE_READY = "\x1b[38;2;99;180;228m"     # #63B4E4  sky,                7.79
 NODE_ACTIVE = "\x1b[38;2;142;156;200m"   # #8E9CC8  blue,               6.57
-NODE_DONE = "\x1b[38;2;47;92;74m"        # #2F5C4A  green,              2.33
+NODE_DONE = "\x1b[38;2;39;92;107m"       # #275C6B  teal,               2.40
 NODE_STARVED = "\x1b[38;2;154;127;192m"  # #9A7FC0  violet,             5.24
 NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,             1.88
-NODE_OFF = "\x1b[39m"
 
-# Bold teal (#4FB3A5) on the thread badge of a task granted more than one
-# thread. The badge is only printed in that case, so any badge at all is the
-# signal and the color is what makes it carry across a full tree. Cleared
-# with 22;39 (normal intensity + default foreground) rather than a bare
-# reset - see IO_ATTN_OFF above for why.
 # Coral (#E07A5F) for the few states that mean something is going wrong: the
 # run has gone quiet, the scheduler has stopped admitting work, or the disk
 # lock is contended more often than not. Spent sparingly on purpose - a colour
 # that is usually absent carries far more than one that is always on screen.
-# Cleared with 22;39 (normal intensity + default foreground) since it is bold.
+# Bold, so it clears with 22;39 rather than the shared OFF.
 ALERT_ON = "\x1b[1;38;2;224;122;95m"
 ALERT_OFF = "\x1b[22;39m"
 
@@ -87,7 +81,6 @@ ALERT_OFF = "\x1b[22;39m"
 # beside it in the default foreground: the estimate is what the scheduler acts
 # on, the measurement is the check on it, so only one of the pair reads loud.
 RSS_ON = "\x1b[38;2;124;128;140m"
-RSS_OFF = "\x1b[39m"
 
 # Cyan (#4396A2) on a task holding more than one thread slot. Flat across every
 # width: the badge says a task is wide, the number beside it says how wide.
@@ -95,7 +88,6 @@ RSS_OFF = "\x1b[39m"
 # already means something is wrong (coral alert, wine lock, amber I/O), so a
 # warm badge would read as a condition rather than as a count.
 MULTI_THR_ON = "\x1b[38;2;67;150;162m"
-MULTI_THR_OFF = "\x1b[39m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -107,10 +99,7 @@ BAR_NONE = " "
 # Slate (#6E80B8) over the whole bar, the same tone a done node's id gets: a
 # full-width run of \u2588 in the default foreground is the highest-contrast shape
 # on the screen, which puts the loudest element on the least surprising state.
-# Cleared with 39 (default foreground) rather than a bare reset - see
-# IO_ATTN_OFF above for why.
 BAR_ON = "\x1b[38;2;110;128;184m"
-BAR_OFF = "\x1b[39m"
 
 # The hard-limit mark on a bar, in the coral of ALERT_ON without its bold
 # weight: a bar is already a loud shape, so the tone alone carries it.
@@ -317,10 +306,16 @@ def mark_active(node, delta):
         n = n.parent
 
 
-def mark_node_done(node, was_active=True):
-    """was_active=False for a node that was never marked active (no "begin"
-    line seen) - e.g. a fully-cached run where pi_tree() finds the result
-    already stored and returns before the scheduler runs."""
+def mark_node_done(node):
+    """in_progress is the record of whether this node was ever counted active:
+    "begin" is the only line that sets it, and it does so alongside the
+    matching mark_active(+1). Deciding from it rather than from the call site
+    keeps the two in step even when a "begin" never arrives - for a node found
+    already stored before the scheduler ran, or for one whose "begin" record
+    was lost to interleaved writes. Decrementing unconditionally would drive
+    active_count negative on every ancestor, and a negative count reads as
+    "nothing running below here" for the rest of the run."""
+    was_active = node.in_progress
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
@@ -824,7 +819,7 @@ def handle_phase(state, content):
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
-            mark_node_done(state.tree_root, was_active=False)
+            mark_node_done(state.tree_root)
     elif action == "display begin":
         set_phase(state, "displaying", ts)
     elif action == "display end":
@@ -968,8 +963,6 @@ TreeView = collections.namedtuple(
 
 
 def render_tree(node, view, prefix="", is_last=True, is_root=True):
-    (lines, now, avg_piece_dur, avg_join_dur,
-     piece_events_by_depth, join_events_by_depth, pid_rss, disk_lock_enabled, starved) = view
     # `state` drives the recursion cutoff below; `tint` is separate because a
     # node can be partly chewed through with nothing running in it, which must
     # stay expanded but reads as work still ahead.
@@ -984,7 +977,7 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
     elif node.children and all(c.own_done for c in node.children):
         # Ready either way; the tint says whether it could actually start.
         mark, state, status = "\u00b7", "ready", None
-        tint = NODE_STARVED if starved else NODE_READY
+        tint = NODE_STARVED if view.starved else NODE_READY
     elif node.active_count > 0:
         mark, state, status, tint = "\u25cb", "in_progress", None, NODE_ACTIVE
     elif node.leaves_done > 0:
@@ -997,16 +990,16 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
         label = f"[{node.depth}, B, {node.i0:,}]"
     else:
         label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
-    label = f"{tint}{label}{NODE_OFF}"
+    label = f"{tint}{label}{OFF}"
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
-            node_elapsed = now - node.start_time
+            node_elapsed = view.now - node.start_time
             label += f" {fmt_duration(node_elapsed)}"
             if node.in_progress:
                 is_leaf = node.leaves_total == 1
-                events_by_depth = piece_events_by_depth if is_leaf else join_events_by_depth
-                fallback = avg_piece_dur if is_leaf else avg_join_dur
+                events_by_depth = view.piece_events_by_depth if is_leaf else view.join_events_by_depth
+                fallback = view.avg_piece_dur if is_leaf else view.avg_join_dur
                 avg = depth_avg(events_by_depth, node.depth, fallback)
                 if avg is not None:
                     remaining = avg - node_elapsed
@@ -1019,32 +1012,32 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
                         else "+" + fmt_duration(-remaining)
                     )
                     label += f" ({eta_str})"
-                current = pid_rss.get(node.pid) if node.pid is not None else None
+                current = view.pid_rss.get(node.pid) if node.pid is not None else None
                 if node.mem_estimate is not None or current is not None:
                     est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
                     cur_str = fmt_bytes(current) if current is not None else "?"
                     # Estimate first, measured second - the order is what says
                     # which is which, so it never varies.
-                    label += f" | {est_str} / {RSS_ON}{cur_str}{RSS_OFF}"
+                    label += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
                 # Single-threaded tasks get no badge at all: its presence is
                 # what flags a task holding more than one thread slot. "x" is
                 # already the multiply in the term below, so the badge takes
                 # the multiplication sign to keep the two apart.
                 if node.threads is not None and node.threads > 1:
-                    label += f" | {MULTI_THR_ON}\u00d7{node.threads}{MULTI_THR_OFF}"
+                    label += f" | {MULTI_THR_ON}\u00d7{node.threads}{OFF}"
                 if node.term:
                     op1, _, op2 = node.term.partition("x")
                     label += f" | {op1} x {op2}"
                 if node.micro:
                     micro = node.micro
-                    if micro == "locking" and disk_lock_enabled:
-                        micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
+                    if micro == "locking" and view.disk_lock_enabled:
+                        micro = f"{LOCK_ON}{micro}{OFF}"
                     elif micro in ("multiplying", "evaluating"):
-                        micro = f"{MUL_ON}{micro}{MUL_OFF}"
+                        micro = f"{MUL_ON}{micro}{OFF}"
                     elif micro.startswith("loading") or micro == "writing":
-                        micro = f"{IO_ATTN_ON}{micro}{IO_ATTN_OFF}"
+                        micro = f"{IO_ATTN_ON}{micro}{OFF}"
                     label += f" | {micro}"
-    lines.append(f"{prefix}{connector}{tint}{mark}{NODE_OFF} {label}")
+    view.lines.append(f"{prefix}{connector}{tint}{mark}{OFF} {label}")
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
         return
@@ -1148,7 +1141,7 @@ def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks
     if at is not None:
         # Left in the default foreground so it reads against the bar rather
         # than as part of it.
-        inserts.append((at, (BAR_OFF, tick)))
+        inserts.append((at, (OFF, tick)))
     for value, glyph, pen in ticks:
         inserts.append((min(max(round(width * value / total), 0), width), (pen, glyph)))
     # Rightmost first, so an insertion never shifts one still to be placed.
@@ -1161,7 +1154,7 @@ def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks
             current = t
         out.append(g)
     # Only the segments are tinted; the brackets frame the bar and stay default.
-    return "[" + "".join(out) + BAR_OFF + "]"
+    return "[" + "".join(out) + OFF + "]"
 
 
 def cursor_glyph(state):
@@ -1200,6 +1193,200 @@ def render_row(boxes, gap):
         (" " * gap).join(b[i] if i < len(b) else " " * w for b, w in zip(boxes, widths))
         for i in range(height)
     ]
+
+
+# Every box shares one label column, and every bar is indented to it.
+LABEL_W = 9
+
+
+def _completion_rows(state, bar_w):
+    rows = []
+    phase_line = "phase:".ljust(LABEL_W) + state.phase
+    if not state.done and state.phase != "splitting" and state.phase_start_time:
+        phase_line += f"   {fmt_duration(time.time() - state.phase_start_time)} elapsed"
+    rows.append(phase_line)
+    if not state.total_pieces:
+        rows.append(
+            "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)"
+        )
+        return rows
+    total_joins = state.total_joins
+    split_units = state.total_pieces + total_joins
+    total_units = split_units + POST_SPLIT_UNITS
+    done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
+    pct = 100.0 * done_units / total_units
+    # The cursor adds a cell, so give the segments one less and the bar keeps
+    # the width it has once the run finishes and the cursor goes away.
+    remaining = total_units - done_units
+    bar = render_bar(
+        bar_w - 1 if remaining else bar_w,
+        (done_units, remaining),
+        BAR_FULL + BAR_NONE, cursor=cursor_glyph(state),
+    )
+    # The split tree's own counts only mean anything while it is being
+    # walked; past that the phase line carries the progress.
+    if state.phase == "splitting":
+        rows.append(
+            "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
+        )
+    rows.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({pct:5.1f}%)")
+    rows.append(" " * LABEL_W + bar)
+    return rows
+
+
+def _threads_rows(state, bar_w, now, budget, threads_now):
+    rows = []
+    n_workers = state.n_process_logged or state.n_process or state.active_max
+    waiting, io_blocked = blocked_threads(state)
+    blocked_total = waiting + io_blocked
+
+    # Same shape as the completion box: a label column, values aligned under it,
+    # and the bar indented to the value column instead of flush to the border.
+    PAIR_COL = 25
+
+    def pair(left, right):
+        """Two halves of a row, the right one starting at PAIR_COL. ljust is a
+        no-op once the left half has run past the column, so pad by hand rather
+        than let the halves run together."""
+        if not right:
+            return left
+        return (left.ljust(PAIR_COL) if len(left) < PAIR_COL else left + "  ") + right
+
+    # Both rows carry the same "blocked: n" half, and neither carries it while
+    # nothing is blocked: a standing "0" is noise on a healthy run.
+    workers_blocked = len(state.locking_pids)
+    rows.append(pair(
+        f"workers: {len(state.active)} / {n_workers or '?'}",
+        f"blocked: {workers_blocked}" if workers_blocked else "",
+    ))
+
+    if threads_now is not None:
+        threads_row = f"threads: {threads_now} / {budget or '?'}"
+        if budget and threads_now > budget:
+            threads_row += f" (+{threads_now - budget} over)"
+        why = ", ".join(
+            part for part in (
+                f"{waiting} lock" if waiting else "",
+                f"{io_blocked} I/O" if io_blocked else "",
+            ) if part
+        )
+        blocked_half = ""
+        if blocked_total:
+            blocked_half = f"blocked: {blocked_total}" + (f"  ({why})" if why else "")
+        rows.append(pair(threads_row, blocked_half))
+
+    if budget and threads_now is not None:
+        # Booked and running, booked but parked on the lock or on I/O, and
+        # unbooked. The counts sum to max(threads_now, budget), so every booked
+        # thread keeps a cell when the scheduler has overbooked, and the marker
+        # says where n_process falls among them.
+        parked = min(blocked_total, threads_now)
+        counts = (threads_now - parked, parked, max(0, budget - threads_now))
+        mark = budget if threads_now > budget else None
+        # The marker adds a cell, so give the segments one less and the bar
+        # keeps the width it has when nothing is overbooked.
+        # Inverted severity: a full bar is the good end, so the ramp reads
+        # 1 - working/budget. Alarm at 0.5 puts half the threads idle already
+        # at the hottest tone - on a run this size, half the machine doing
+        # nothing is not a shade of concern, it is the failure.
+        #
+        # Working and parked share the tone; only the glyph tells them apart.
+        # The colour answers one question - how much of the budget is doing
+        # work - and parked threads are already counted against it, so giving
+        # them a second colour would state the same fact twice.
+        tint = severity_colour(1.0 - counts[0] / budget, alarm=0.5)
+        rows.append(" " * LABEL_W + render_bar(
+            bar_w - 1 if mark else bar_w, counts,
+            BAR_FULL + BAR_HELD + BAR_NONE, mark, colour=(tint, tint, BAR_ON),
+        ))
+
+    if state.thread_span > 0:
+        util = thread_util(state, now)
+        pct = f" ({100.0 * util / budget:.0f}%)" if budget else ""
+        rows.append(" " * LABEL_W + f"util: {util:.1f} / {budget or '?'} avg{pct}")
+    return rows
+
+
+def _ram_rows(state, bar_w, ram_used, ram_total, pid_rss, est, real, over_launch):
+    rows = []
+    if ram_total is not None:
+        row = "ram:".ljust(LABEL_W) + f"{fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
+        if ram_used is not None:
+            row += f" ({100.0 * ram_used / ram_total:4.1f}%)"
+        rows.append(row)
+    if pid_rss or state.tree_root is not None:
+        # "est / launch..max": below launch new tasks start, above it the
+        # scheduler holds back until a task ends; max is never crossed.
+        if state.mem_launch and state.mem_max:
+            limit_str = f" / {fmt_bytes(state.mem_launch)}..{fmt_bytes(state.mem_max)}"
+        elif state.mem_launch or state.mem_max:
+            limit_str = f" / {fmt_bytes(state.mem_launch or state.mem_max)}"
+        else:
+            limit_str = ""
+        # "held": usage has reached mem_launch, so nothing new launches until a
+        # task ends. Worth flagging - it is the state a stalling run sits in.
+        held = f" {ALERT_ON}held{ALERT_OFF}" if over_launch else ""
+        rows.append("workers:".ljust(LABEL_W)
+                    + f"{fmt_bytes(est)}{limit_str}{held} | {fmt_bytes(real)}")
+    mem_budget = state.mem_max or state.mem_launch
+    if est is not None and mem_budget:
+        # The bar ends at the budget and stretches only far enough to keep an
+        # overshoot on screen, snapping back once it is gone: the limit marks
+        # then sit still for as long as nothing is wrong, and moving marks are
+        # themselves the signal that something is.
+        scale = max(mem_budget, est, real or 0)
+        # A dotted rule at each limit: launch in the default foreground, max in
+        # coral, since one holds launches back and the other is the ceiling.
+        ticks = []
+        if state.mem_launch and state.mem_launch != state.mem_max:
+            ticks.append((state.mem_launch, BAR_LIMIT, OFF))
+        if state.mem_max:
+            ticks.append((state.mem_max, BAR_LIMIT, BAR_ALERT))
+        # Measured RSS alongside the estimate the scheduler actually gates on:
+        # the gap between them is the estimator being wrong, which is worth
+        # seeing at the moment it happens rather than afterwards.
+        if real is not None:
+            ticks.append((real, BAR_MEASURED, OFF))
+        rows.append(" " * LABEL_W + render_bar(
+            bar_w - len(ticks), (est, scale - est), BAR_FULL + BAR_NONE,
+            colour=severity_colour(est / mem_budget), ticks=tuple(ticks),
+        ))
+    elif ram_total is not None and ram_used is not None:
+        # No budget in the log yet, so fall back to the machine's own usage.
+        # Memory is comfortable well past half the machine; it only starts to
+        # matter once the page cache has nowhere left to go. See RAM_CALM/ALARM.
+        used = min(ram_used, ram_total)
+        rows.append(" " * LABEL_W + render_bar(
+            bar_w, (used, ram_total - used), BAR_FULL + BAR_NONE,
+            colour=severity_colour(used / ram_total, RAM_CALM, RAM_ALARM),
+        ))
+    return rows
+
+
+def _disk_rows(state, bar_w):
+    rows = ["cache:".ljust(LABEL_W)
+            + f"numbers {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'numbers')))}"
+            + f"   pieces {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'pieces')))}"]
+    if not (state.lock_requests and state.disk_lock_enabled is not False):
+        return rows
+    if state.lock_tokens_seen:
+        pct = 100.0 * state.lock_misses / state.lock_requests
+        misses = f"{state.lock_misses} misses ({pct:.0f}%)"
+    else:
+        # No "locked" line carried HIT/MISS: a log from a build predating
+        # them. Zero misses would read as no contention rather than no data.
+        misses = "misses n/a (stale build)"
+    rows.append("lock:".ljust(LABEL_W) + f"{state.lock_requests} requests, {misses}")
+    if state.lock_tokens_seen:
+        # The miss ratio is the worry, so the bar is tinted by its own value
+        # rather than by the slate every other bar uses.
+        rows.append(" " * LABEL_W + render_bar(
+            bar_w,
+            (state.lock_misses, state.lock_requests - state.lock_misses),
+            BAR_FULL + BAR_NONE,
+            colour=severity_colour(state.lock_misses / state.lock_requests),
+        ))
+    return rows
 
 
 def render(state):
@@ -1261,8 +1448,6 @@ def render(state):
     two_col = left_w >= TWO_COL_MIN
     if not two_col:
         left_w = right_w = avail
-    # Every box shares one label column, and every bar is indented to it.
-    LABEL_W = 9
     # inner width, less "\u2502 ", the indent, the brackets, and a trailing
     # column so a full bar doesn't butt against the right border
     done_bar_w = max(10, left_w - 15)
@@ -1270,202 +1455,16 @@ def render(state):
     ram_bar_w = max(10, left_w - 15)
     disk_bar_w = max(10, right_w - 15)
 
-    # --- box 1: overall completion ---
-    completion_lines = []
-    phase_line = "phase:".ljust(LABEL_W) + state.phase
-    if not state.done and state.phase != "splitting" and state.phase_start_time:
-        phase_line += f"   {fmt_duration(time.time() - state.phase_start_time)} elapsed"
-    completion_lines.append(phase_line)
-    if state.total_pieces:
-        total_joins = state.total_joins
-        split_units = state.total_pieces + total_joins
-        total_units = split_units + POST_SPLIT_UNITS
-        done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
-        pct = 100.0 * done_units / total_units
-        # The cursor adds a cell, so give the segments one less and the bar keeps
-        # the width it has once the run finishes and the cursor goes away.
-        remaining = total_units - done_units
-        bar = render_bar(
-            done_bar_w - 1 if remaining else done_bar_w,
-            (done_units, remaining),
-            BAR_FULL + BAR_NONE, cursor=cursor_glyph(state),
-        )
-        # The split tree's own counts only mean anything while it is being
-        # walked; past that the phase line carries the progress.
-        if state.phase == "splitting":
-            completion_lines.append(
-                "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
-            )
-        completion_lines.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({pct:5.1f}%)")
-        completion_lines.append(" " * LABEL_W + bar)
-    else:
-        completion_lines.append(
-            "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)"
-        )
-
-    # --- box 2: thread occupancy ---
-    thread_lines = []
-    n_workers = state.n_process_logged or state.n_process or state.active_max
-    # active_max counts processes, so it is no stand-in for the thread budget:
-    # one 16-thread task runs as a single process.
+    est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
+    real = sum(pid_rss.values()) if pid_rss else None
+    over_launch = bool(est is not None and state.mem_launch and est >= state.mem_launch)
     budget = thread_budget(state)
     threads_now = active_threads(state)
-    waiting, io = blocked_threads(state)
-    blocked_total = waiting + io
 
-    # Same shape as the completion box: a label column, values aligned under it,
-    # and the bar indented to the value column instead of flush to the border.
-    PAIR_COL = 25
-
-    def pair(left, right):
-        """Two halves of a row, the right one starting at PAIR_COL. ljust is a
-        no-op once the left half has run past the column, so pad by hand rather
-        than let the halves run together."""
-        if not right:
-            return left
-        return (left.ljust(PAIR_COL) if len(left) < PAIR_COL else left + "  ") + right
-
-    # Both rows carry the same "blocked: n" half, and neither carries it while
-    # nothing is blocked: a standing "0" is noise on a healthy run.
-    workers_blocked = len(state.locking_pids)
-    thread_lines.append(pair(
-        f"workers: {len(state.active)} / {n_workers or '?'}",
-        f"blocked: {workers_blocked}" if workers_blocked else "",
-    ))
-
-    if threads_now is not None:
-        threads_row = f"threads: {threads_now} / {budget or '?'}"
-        if budget and threads_now > budget:
-            threads_row += f" (+{threads_now - budget} over)"
-        why = ", ".join(
-            part for part in (
-                f"{waiting} lock" if waiting else "",
-                f"{io} I/O" if io else "",
-            ) if part
-        )
-        blocked_half = ""
-        if blocked_total:
-            blocked_half = f"blocked: {blocked_total}" + (f"  ({why})" if why else "")
-        thread_lines.append(pair(threads_row, blocked_half))
-
-    if budget and threads_now is not None:
-        # Booked and running, booked but parked on the lock or on I/O, and
-        # unbooked. The counts sum to max(threads_now, budget), so every booked
-        # thread keeps a cell when the scheduler has overbooked, and the marker
-        # says where n_process falls among them.
-        parked = min(blocked_total, threads_now)
-        counts = (threads_now - parked, parked, max(0, budget - threads_now))
-        mark = budget if threads_now > budget else None
-        # The marker adds a cell, so give the segments one less and the bar
-        # keeps the width it has when nothing is overbooked.
-        bar_w = thread_bar_w - 1 if mark else thread_bar_w
-        # Inverted severity: a full bar is the good end, so the ramp reads
-        # 1 - working/budget. Alarm at 0.5 puts half the threads idle already
-        # at the hottest tone - on a run this size, half the machine doing
-        # nothing is not a shade of concern, it is the failure.
-        working_frac = counts[0] / budget
-        # Working and parked share the tone; only the glyph tells them apart.
-        # The colour answers one question - how much of the budget is doing
-        # work - and parked threads are already counted against it, so giving
-        # them a second colour would state the same fact twice.
-        tint = severity_colour(1.0 - working_frac, alarm=0.5)
-        tints = (tint, tint, BAR_ON)
-        thread_lines.append(" " * LABEL_W + render_bar(
-            bar_w, counts, BAR_FULL + BAR_HELD + BAR_NONE, mark, colour=tints,
-        ))
-
-    if state.thread_span > 0:
-        util = thread_util(state, now)
-        pct = f" ({100.0 * util / budget:.0f}%)" if budget else ""
-        thread_lines.append(" " * LABEL_W + f"util: {util:.1f} / {budget or '?'} avg{pct}")
-
-
-    # --- box 3: ram usage ---
-    ram_lines = []
-    over_launch = False
-    est = real = None
-    if ram_total is not None:
-        row = "ram:".ljust(LABEL_W) + f"{fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
-        if ram_used is not None:
-            row += f" ({100.0 * ram_used / ram_total:4.1f}%)"
-        ram_lines.append(row)
-    if pid_rss or state.tree_root is not None:
-        est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
-        real = sum(pid_rss.values()) if pid_rss else None
-        est_str = fmt_bytes(est) if est is not None else "?"
-        real_str = fmt_bytes(real) if real is not None else "?"
-        # "est / launch..max": below launch new tasks start, above it the
-        # scheduler holds back until a task ends; max is never crossed.
-        if state.mem_launch and state.mem_max:
-            limit_str = f" / {fmt_bytes(state.mem_launch)}..{fmt_bytes(state.mem_max)}"
-        elif state.mem_launch or state.mem_max:
-            limit_str = f" / {fmt_bytes(state.mem_launch or state.mem_max)}"
-        else:
-            limit_str = ""
-        # "held": usage has reached mem_launch, so nothing new launches until a
-        # task ends. Worth flagging - it is the state a stalling run sits in.
-        over_launch = est is not None and state.mem_launch and est >= state.mem_launch
-        held = f" {ALERT_ON}held{ALERT_OFF}" if over_launch else ""
-        ram_lines.append("workers:".ljust(LABEL_W) + f"{est_str}{limit_str}{held} | {real_str}")
-    mem_budget = state.mem_max or state.mem_launch
-    if est is not None and mem_budget:
-        # The bar ends at the budget and stretches only far enough to keep an
-        # overshoot on screen, snapping back once it is gone: the limit marks
-        # then sit still for as long as nothing is wrong, and moving marks are
-        # themselves the signal that something is.
-        scale = max(mem_budget, est, real or 0)
-        # A dotted rule at each limit: launch in the default foreground, max in
-        # coral, since one holds launches back and the other is the ceiling.
-        ticks = []
-        if state.mem_launch and state.mem_launch != state.mem_max:
-            ticks.append((state.mem_launch, BAR_LIMIT, BAR_OFF))
-        if state.mem_max:
-            ticks.append((state.mem_max, BAR_LIMIT, BAR_ALERT))
-        # Measured RSS alongside the estimate the scheduler actually gates on:
-        # the gap between them is the estimator being wrong, which is worth
-        # seeing at the moment it happens rather than afterwards.
-        if real is not None:
-            ticks.append((real, BAR_MEASURED, BAR_OFF))
-        ram_lines.append(" " * LABEL_W + render_bar(
-            ram_bar_w - len(ticks), (est, scale - est), BAR_FULL + BAR_NONE,
-            colour=severity_colour(est / mem_budget), ticks=tuple(ticks),
-        ))
-    elif ram_total is not None and ram_used is not None:
-        # No budget in the log yet, so fall back to the machine's own usage.
-        # Memory is comfortable well past half the machine; it only starts to
-        # matter once the page cache has nowhere left to go. See RAM_CALM/ALARM.
-        used = min(ram_used, ram_total)
-        ram_lines.append(" " * LABEL_W + render_bar(
-            ram_bar_w, (used, ram_total - used), BAR_FULL + BAR_NONE,
-            colour=severity_colour(used / ram_total, RAM_CALM, RAM_ALARM),
-        ))
-
-    # --- box 4: disk ---
-    disk_lines = []
-    numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
-    pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
-    disk_lines.append(
-        "cache:".ljust(LABEL_W) + f"numbers {fmt_bytes(numbers_size)}   pieces {fmt_bytes(pieces_size)}"
-    )
-    if state.lock_requests and state.disk_lock_enabled is not False:
-        if state.lock_tokens_seen:
-            pct = 100.0 * state.lock_misses / state.lock_requests
-            misses = f"{state.lock_misses} misses ({pct:.0f}%)"
-        else:
-            # No "locked" line carried HIT/MISS: a log from a build predating
-            # them. Zero misses would read as no contention rather than no data.
-            misses = "misses n/a (stale build)"
-        disk_lines.append("lock:".ljust(LABEL_W) + f"{state.lock_requests} requests, {misses}")
-        if state.lock_tokens_seen:
-            # The miss ratio is the worry, so the bar is tinted by its own value
-            # rather than by the slate every other bar uses.
-            frac = state.lock_misses / state.lock_requests
-            disk_lines.append(" " * LABEL_W + render_bar(
-                disk_bar_w,
-                (state.lock_misses, state.lock_requests - state.lock_misses),
-                BAR_FULL + BAR_NONE,
-                colour=severity_colour(frac),
-            ))
+    completion_lines = _completion_rows(state, done_bar_w)
+    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now)
+    ram_lines = _ram_rows(state, ram_bar_w, ram_used, ram_total, pid_rss, est, real, over_launch)
+    disk_lines = _disk_rows(state, disk_bar_w)
 
     inset = " " * BOX_INSET
     grid = (
