@@ -14,7 +14,7 @@
 // lock. Only worth it on a spinning disk, where random seeks are expensive;
 // on an SSD it is pure contention with no benefit.
 // Presence toggle: comment out to disable.
-#define LOCK_DISK_IO
+// #define LOCK_DISK_IO
 
 // lib/tree: whether a leaf is exempt from the memory budget. A leaf has no
 // join, so there are no operand sizes to estimate from. Exempt, it is charged
