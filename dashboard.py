@@ -45,28 +45,29 @@ MUL_ON = "\x1b[38;2;107;142;107m"
 MUL_OFF = "\x1b[39m"
 
 # Tree node states on two axes. Hue says what kind of node it is - green for
-# work behind you, violet for work still ahead, orchid for work available now,
-# blue for the trail down to a running worker, and no hue at all for the node
-# that is running.
+# work behind you, violet for work still ahead, sky for work available now,
+# muted blue for the trail down to a running worker, and MUL_ON's green on the
+# node that is running - the same green its "multiplying" phase is written in,
+# so the node and the work it is doing read as one thing.
 #
 # Brightness says how much to care, and ready deliberately outranks the trail:
 # a node waiting only on a free slot is the next thing that will happen, while
-# an ancestor of a running one is just a breadcrumb. At the other end NODE_DONE
-# and NODE_PENDING are within 0.03 of each other in contrast against the
-# #0A143C ground, too close to tell apart by weight - hue alone separates them,
-# so neither has to get loud and the boundary between the two draws the
-# frontier of the computation. Pending shares its hue with ready, one dim and
-# one bright, so a node visibly brightens into being launchable when its last
-# child finishes, and dims again to NODE_STARVED while the scheduler has no
-# slot to give it - so the whole launch queue visibly dims when the machine is
-# full and brightens the moment something frees up. Cleared with 39 (default
-# foreground) rather than a bare reset - see IO_ATTN_OFF above for why.
-NODE_RUNNING = "\x1b[38;2;237;240;250m"  # #EDF0FA  neutral, contrast 15.66
-NODE_READY = "\x1b[38;2;208;140;230m"    # #D08CE6  orchid,   7.28
-NODE_ACTIVE = "\x1b[38;2;142;156;200m"   # #8E9CC8  blue,     6.57
-NODE_DONE = "\x1b[38;2;47;92;74m"        # #2F5C4A  green,    2.33
-NODE_STARVED = "\x1b[38;2;154;127;192m"  # #9A7FC0  violet,   5.24
-NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,   1.88
+# an ancestor of a running one is just a breadcrumb. Ready and the trail share
+# a family, so they are held far apart within it - saturated sky against a
+# desaturated periwinkle. At the other end NODE_DONE and NODE_PENDING are
+# within 0.03 of each other in contrast against the #0A143C ground, too close
+# to tell apart by weight - hue alone separates them, so neither has to get
+# loud and the boundary between the two draws the frontier of the computation.
+# A ready node dims to NODE_STARVED while the scheduler has no slot to give it,
+# so the whole launch queue dims when the machine is full and brightens the
+# moment something frees up. Cleared with 39 (default foreground) rather than
+# a bare reset - see IO_ATTN_OFF above for why.
+NODE_RUNNING = "\x1b[38;2;107;142;107m"  # #6B8E6B  green,    contrast  4.84
+NODE_READY = "\x1b[38;2;99;180;228m"     # #63B4E4  sky,                7.79
+NODE_ACTIVE = "\x1b[38;2;142;156;200m"   # #8E9CC8  blue,               6.57
+NODE_DONE = "\x1b[38;2;47;92;74m"        # #2F5C4A  green,              2.33
+NODE_STARVED = "\x1b[38;2;154;127;192m"  # #9A7FC0  violet,             5.24
+NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,             1.88
 NODE_OFF = "\x1b[39m"
 
 # Bold teal (#4FB3A5) on the thread badge of a task granted more than one
@@ -78,12 +79,23 @@ NODE_OFF = "\x1b[39m"
 # run has gone quiet, the scheduler has stopped admitting work, or the disk
 # lock is contended more often than not. Spent sparingly on purpose - a colour
 # that is usually absent carries far more than one that is always on screen.
-# Cleared with 22;39 (normal intensity + default foreground), as MULTI_THR_OFF.
+# Cleared with 22;39 (normal intensity + default foreground) since it is bold.
 ALERT_ON = "\x1b[1;38;2;224;122;95m"
 ALERT_OFF = "\x1b[22;39m"
 
-MULTI_THR_ON = "\x1b[1;38;2;79;179;165m"
-MULTI_THR_OFF = "\x1b[22;39m"
+# Neutral grey (#7C808C) for a task's measured RSS, set against the estimate
+# beside it in the default foreground: the estimate is what the scheduler acts
+# on, the measurement is the check on it, so only one of the pair reads loud.
+RSS_ON = "\x1b[38;2;124;128;140m"
+RSS_OFF = "\x1b[39m"
+
+# Cyan (#4CA7B4) on a task holding more than one thread slot. Flat across every
+# width: the badge says a task is wide, the number beside it says how wide.
+# The only cyan on the dashboard, and cool on purpose - every warm hue here
+# already means something is wrong (coral alert, wine lock, amber I/O), so a
+# warm badge would read as a condition rather than as a count.
+MULTI_THR_ON = "\x1b[38;2;76;167;180m"
+MULTI_THR_OFF = "\x1b[39m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -998,17 +1010,28 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
                 avg = depth_avg(events_by_depth, node.depth, fallback)
                 if avg is not None:
                     remaining = avg - node_elapsed
-                    eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
+                    # Signed against the depth's average: unsigned is time
+                    # left, "+" is time overrun, and the overrun keeps growing
+                    # on screen. A phrase like "any moment" reads calmest
+                    # exactly when a task is worst overdue.
+                    eta_str = (
+                        fmt_duration(remaining) if remaining > 0
+                        else "+" + fmt_duration(-remaining)
+                    )
                     label += f" ({eta_str})"
                 current = pid_rss.get(node.pid) if node.pid is not None else None
                 if node.mem_estimate is not None or current is not None:
                     est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
                     cur_str = fmt_bytes(current) if current is not None else "?"
-                    label += f" {est_str} - {cur_str}"
+                    # Estimate first, measured second - the order is what says
+                    # which is which, so it never varies.
+                    label += f" | {est_str} / {RSS_ON}{cur_str}{RSS_OFF}"
                 # Single-threaded tasks get no badge at all: its presence is
-                # what flags a task holding more than one thread slot.
+                # what flags a task holding more than one thread slot. "x" is
+                # already the multiply in the term below, so the badge takes
+                # the multiplication sign to keep the two apart.
                 if node.threads is not None and node.threads > 1:
-                    label += f" {MULTI_THR_ON}x{node.threads}{MULTI_THR_OFF}"
+                    label += f" | {MULTI_THR_ON}\u00d7{node.threads}{MULTI_THR_OFF}"
                 if node.term:
                     op1, _, op2 = node.term.partition("x")
                     label += f" | {op1} x {op2}"
