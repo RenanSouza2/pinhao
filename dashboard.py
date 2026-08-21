@@ -77,7 +77,7 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
-    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B))?"
+    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B)(?:\s+(?P<lock>HIT|MISS))?)?"
 )
 RE_PIECE = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
@@ -432,8 +432,9 @@ class State:
         self.join_events = collections.deque(maxlen=2000)  # durations, seconds
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
-        self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
-        self.lock_count = 0
+        self.lock_requests = 0  # "locked" lines seen, across all workers
+        self.lock_misses = 0  # of those, the ones that found the lock already held
+        self.lock_tokens_seen = False  # a "locked" line carried HIT/MISS (older builds log neither)
         self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
         self.active = {}  # pid -> {"start", "depth", "i0", "threads"}
         self.active_max = 0
@@ -595,8 +596,9 @@ def handle_phase_line(state, content):
     as node_process, so RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
     "locking"/"locked" additionally maintain the set of pids currently
-    blocked waiting on the exclusive disk lock, and "locked" rolls into a
-    global lock-wait total (both tracked here, ahead of the tree lookup, so
+    blocked waiting on the exclusive disk lock, and "locked" counts the
+    request and, on MISS, the contention (all tracked here, ahead of the tree
+    lookup, so
     they aren't dropped on runs whose tree is too large to display - see
     TREE_NODE_CAP). These lines still fire even when the run's disk lock is
     compiled out (LOCK_DISK_IO undefined, see lib/big/code.c) - disk_lock()
@@ -613,10 +615,12 @@ def handle_phase_line(state, content):
         state.locking_pids.add(pid)
     elif action == "locked":
         state.locking_pids.discard(pid)
-        dur = m.group("dur")
-        if dur is not None:
-            state.lock_wait_total += float(dur)
-            state.lock_count += 1
+        state.lock_requests += 1
+        token = m.group("lock")
+        if token is not None:
+            state.lock_tokens_seen = True
+            if token == "MISS":
+                state.lock_misses += 1
 
     if not state.tree_by_key:
         return
@@ -1027,12 +1031,15 @@ def render(state):
         util = thread_util(state, now)
         pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
         status_lines.append(f"thread util: {util:.1f}/{thread_budget or '?'} avg{pct}")
-    if state.lock_count and state.disk_lock_enabled is not False:
-        avg_ms = 1000.0 * state.lock_wait_total / state.lock_count
-        status_lines.append(
-            f"disk lock wait: {fmt_duration(state.lock_wait_total)} total "
-            f"({state.lock_count} acquires, avg {avg_ms:.0f}ms)"
-        )
+    if state.lock_requests and state.disk_lock_enabled is not False:
+        if state.lock_tokens_seen:
+            pct = 100.0 * state.lock_misses / state.lock_requests
+            misses = f"{state.lock_misses} misses ({pct:.0f}%)"
+        else:
+            # No "locked" line carried HIT/MISS: a log from a build predating
+            # them. Zero misses would read as no contention rather than no data.
+            misses = "misses n/a (stale build)"
+        status_lines.append(f"disk lock: {state.lock_requests} requests, {misses}")
 
     col_width = max((len(l) for l in completion_lines), default=0) + 4
     for i in range(max(len(completion_lines), len(status_lines))):

@@ -678,13 +678,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
         return pi_load(size);
     }
 
-    long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
-    if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
-    {
-        n_process = (uint64_t)n_proc_avail;
-    }
-
-    // Logged after the clamp: n_process bounds both processes and threads.
+    // n_process bounds both processes and threads.
     tprintf("              %-20s| " U64P(10) "", "n process", n_process);
     tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
     tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
