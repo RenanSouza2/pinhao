@@ -969,18 +969,26 @@ BOX_MIN_WIDTH = 24
 
 
 def render_box(title, rows, width):
-    """A full-width rectangle with its title set into the top edge. Rows are
-    padded to the inner width; ANSI is stripped only for measuring, so a
-    colored row still lines up with the right edge."""
+    """A rectangle with its title set into the top edge. Rows are padded or
+    clipped to the inner width, so every line is exactly `width` columns."""
     inner = max(BOX_MIN_WIDTH, width - 2)
     head = f"\u250c\u2500 {title} " if title else "\u250c"
     head += "\u2500" * max(0, inner + 2 - len(head) - 1) + "\u2510"
     out = [head]
     for row in rows:
-        pad = inner - 1 - len(ANSI_SGR_RE.sub("", row))
-        out.append(f"\u2502 {row}{' ' * max(0, pad)}\u2502")
+        out.append("\u2502 " + _fit_visible(row, inner - 1) + "\u2502")
     out.append("\u2514" + "\u2500" * inner + "\u2518")
     return out
+
+
+def render_row(boxes, gap):
+    """Lay rendered boxes side by side, padding the shorter to the taller."""
+    widths = [len(ANSI_SGR_RE.sub("", b[0])) for b in boxes]
+    height = max(len(b) for b in boxes)
+    return [
+        (" " * gap).join(b[i] if i < len(b) else " " * w for b, w in zip(boxes, widths))
+        for i in range(height)
+    ]
 
 
 def render(state):
@@ -1025,10 +1033,27 @@ def render(state):
     ram_used, ram_total = get_system_ram()
     pid_rss = get_pid_rss(state.active.keys())
 
+    # Geometry first: completion and threads share a row, ram spans beneath, so
+    # each bar has to be sized to the column it lands in.
+    BOX_INSET = 2
+    BOX_GAP = 2
+    avail = shutil.get_terminal_size(fallback=(80, 24)).columns - 2 * BOX_INSET
+    left_w = (avail - BOX_GAP) // 2
+    right_w = avail - BOX_GAP - left_w
+    # Side by side only while a half can still hold the widest row either box
+    # has; below that they stack full width rather than clipping their own text.
+    TWO_COL_MIN = 50
+    two_col = left_w >= TWO_COL_MIN
+    if not two_col:
+        left_w = right_w = avail
+    # inner width, less "\u2502 ", the row's own indent, the brackets, and a
+    # trailing column so a full bar doesn't butt against the right border
+    done_bar_w = max(10, left_w - 15)
+    thread_bar_w = max(10, right_w - 6)
+    ram_bar_w = max(10, avail - 6)
+
     # --- box 1: overall completion ---
     completion_lines = []
-    cached_units = state.pieces_from_cache + state.joins_from_cache
-    cache_note = f"  ({cached_units} from cache)" if cached_units else ""
     phase_line = f"phase:   {state.phase}"
     if not state.done and state.phase != "splitting" and state.phase_start_time:
         phase_line += f"   {fmt_duration(time.time() - state.phase_start_time)} elapsed"
@@ -1039,20 +1064,20 @@ def render(state):
         total_units = split_units + POST_SPLIT_UNITS
         done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
         pct = 100.0 * done_units / total_units
-        bar_width = 40
+        bar_width = done_bar_w
         filled = int(bar_width * done_units / total_units)
         bar = "#" * filled + "-" * (bar_width - filled)
         # The split tree's own counts only mean anything while it is being
         # walked; past that the phase line carries the progress.
         if state.phase == "splitting":
-            completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
+            completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}")
         completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         completion_lines.append(f"         [{bar}]")
         numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
         pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
         completion_lines.append(f"         numbers: {fmt_bytes(numbers_size)}   pieces: {fmt_bytes(pieces_size)}")
     else:
-        completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
+        completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)")
 
     # --- box 2: thread occupancy ---
     thread_lines = []
@@ -1089,15 +1114,18 @@ def render(state):
         # the lock or on I/O, and unbooked. Apportioned by largest remainder so
         # they always sum to the full width -- plain truncation leaves a stray
         # cell of "unbooked" when every thread is in fact booked.
-        bar_width = 40
+        bar_width = thread_bar_w
         parked = min(blocked_total, threads_now)
         counts = (threads_now - parked, parked, max(0, thread_budget - threads_now))
-        raw = [bar_width * c / thread_budget for c in counts]
+        # node_can_launch's first-slot exception can book past n_process, so the
+        # bar scales to whichever is larger rather than overflowing its width.
+        scale = max(thread_budget, threads_now)
+        raw = [bar_width * c / scale for c in counts]
         fills = [int(r) for r in raw]
         for i in sorted(range(3), key=lambda i: raw[i] - fills[i], reverse=True)[:bar_width - sum(fills)]:
             fills[i] += 1
-        bar = "#" * fills[0] + "\u25cb" * fills[1] + "-" * fills[2]
-        thread_lines.append(f"[{bar}]")
+        thread_lines.append("[" + "#" * fills[0] + "\u25cb" * fills[1] + "-" * fills[2] + "]")
+
     if state.thread_span > 0:
         util = thread_util(state, now)
         pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
@@ -1137,27 +1165,35 @@ def render(state):
     if ram_parts:
         ram_lines.append("   ".join(ram_parts))
     if ram_total is not None and ram_used is not None:
-        bar_width = 40
+        bar_width = ram_bar_w
         filled = int(bar_width * min(ram_used, ram_total) / ram_total)
         bar = "#" * filled + "-" * (bar_width - filled)
         ram_lines.append(f"[{bar}]")
 
-    # Inset one column, so the frame doesn't sit flush against either edge.
-    box_width = shutil.get_terminal_size(fallback=(80, 24)).columns - 2
-    for title, rows in (("completion", completion_lines), ("threads", thread_lines), ("ram", ram_lines)):
-        if rows:
-            lines.extend(" " + row for row in render_box(title, rows, box_width))
+    inset = " " * BOX_INSET
+    pair = [(t, r) for t, r in (("completion", completion_lines), ("threads", thread_lines)) if r]
+    if two_col and len(pair) == 2:
+        boxes = [render_box(t, r, w) for (t, r), w in zip(pair, (left_w, right_w))]
+        lines.extend(inset + row for row in render_row(boxes, BOX_GAP))
+    else:
+        for title, rows in pair:
+            lines.extend(inset + row for row in render_box(title, rows, avail))
+    if ram_lines:
+        lines.extend(inset + row for row in render_box("ram", ram_lines, avail))
 
-    lines.append("")
-    if state.tree_root is not None:
-        lines.append("tree (finished/pending subtrees collapsed):")
-        render_tree(
-            state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
-            state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
-            state.disk_lock_enabled is not False,
-        )
-    elif state.tree_skipped_reason:
-        lines.append(f"tree: {state.tree_skipped_reason}")
+    # Only while the tree is being walked: past that every node is done and the
+    # view says nothing the completion box doesn't.
+    if state.phase == "splitting":
+        lines.append("")
+        if state.tree_root is not None:
+            lines.append("tree")
+            render_tree(
+                state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
+                state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
+                state.disk_lock_enabled is not False,
+            )
+        elif state.tree_skipped_reason:
+            lines.append(f"tree: {state.tree_skipped_reason}")
 
     return "\n".join(lines)
 
