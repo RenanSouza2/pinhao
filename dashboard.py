@@ -66,6 +66,19 @@ MULTI_THR_OFF = "\x1b[22;39m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# Bar segments, heaviest to lightest: in use, held but not working, nothing.
+BAR_FULL = "\u2588"
+BAR_HELD = "\u2591"
+BAR_NONE = " "
+
+# Slate (#6E80B8) over the whole bar, the same tone a done node's id gets: a
+# full-width run of \u2588 in the default foreground is the highest-contrast shape
+# on the screen, which puts the loudest element on the least surprising state.
+# Cleared with 39 (default foreground) rather than a bare reset - see
+# IO_ATTN_OFF above for why.
+BAR_ON = "\x1b[38;2;110;128;184m"
+BAR_OFF = "\x1b[39m"
+
 
 def apply_piece_size(piece_size):
     global TREE_PIECE_SIZE, PIECES_PER_LEAF
@@ -462,6 +475,13 @@ def active_threads(state):
     return sum(entry.get("threads") or 0 for entry in state.active.values())
 
 
+def thread_budget(state):
+    """The run's thread ceiling: n_process, from the log's own header line or
+    from --n-process. pi_tree logs it on every run, so this is None only for a
+    log from an older build."""
+    return state.n_process_logged or state.n_process
+
+
 def thread_tick(state, ts):
     """Fold the thread total up to log timestamp ts into the utilization
     accumulator. Called before every state change, so the total folded in is
@@ -804,12 +824,19 @@ def blocked_threads(state):
 
 
 def working_threads(state):
-    """Booked threads minus the ones parked on the lock or on I/O."""
+    """Booked threads minus the ones parked on the lock or on I/O, capped at
+    n_process: the scheduler can book past its own ceiling (a node overshooting
+    mem_max is granted the full width in the first slot, on top of what the
+    running tasks already hold), and those extra threads contend for the same
+    cores rather than adding any. Uncapped, an oversubscribed stretch would
+    bias the utilization average up for the rest of the run."""
     booked = active_threads(state)
     if booked is None:
         return None
     waiting, io = blocked_threads(state)
-    return max(0, booked - waiting - io)
+    runnable = max(0, booked - waiting - io)
+    budget = thread_budget(state)
+    return min(runnable, budget) if budget else runnable
 
 
 def thread_util(state, now):
@@ -947,15 +974,16 @@ def post_split_done(state):
 BOX_MIN_WIDTH = 24
 
 
-def render_bar(width, counts, glyphs):
+def render_bar(width, counts, glyphs, mark=None):
     """A bracketed bar of `width` cells split between `glyphs` in proportion to
     `counts`. Apportioned by largest remainder, so the segments always sum to
     the full width and a segment is empty only when its count really is zero --
     flooring each independently leaves a stray cell of the last glyph.
 
-    Rounds against the sum of counts, so an oversubscribed total (the tree
-    scheduler's first-slot exception can book past n_process) scales rather
-    than overflowing."""
+    `mark` is a position in the same units as `counts`: a "|" is inserted
+    there, widening the bar by one cell. Used to show where n_process falls
+    once the scheduler has booked past it, so an oversubscribed bar still
+    shows every booked thread instead of rescaling the overshoot away."""
     total = sum(counts)
     if total <= 0:
         return "[" + glyphs[-1] * width + "]"
@@ -973,7 +1001,14 @@ def render_bar(width, counts, glyphs):
             if fills[donor] > 1:
                 fills[donor] -= 1
                 fills[i] += 1
-    return "[" + "".join(g * n for g, n in zip(glyphs, fills)) + "]"
+    bar = "".join(g * n for g, n in zip(glyphs, fills))
+    if mark is not None and 0 < mark < total:
+        # Clamped inside the bar: a marker on either bracket would read as the
+        # ceiling being unreached or unexceeded, which is the opposite of why
+        # it is drawn.
+        at = min(max(round(width * mark / total), 1), width - 1)
+        bar = bar[:at] + "|" + bar[at:]
+    return "[" + bar + "]"
 
 
 def render_box(title, rows, width):
@@ -1078,7 +1113,7 @@ def render(state):
         total_units = split_units + POST_SPLIT_UNITS
         done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
         pct = 100.0 * done_units / total_units
-        bar = render_bar(done_bar_w, (done_units, total_units - done_units), "#-")
+        bar = BAR_ON + render_bar(done_bar_w, (done_units, total_units - done_units), BAR_FULL + BAR_NONE) + BAR_OFF
         # The split tree's own counts only mean anything while it is being
         # walked; past that the phase line carries the progress.
         if state.phase == "splitting":
@@ -1097,7 +1132,7 @@ def render(state):
     n_workers = state.n_process_logged or state.n_process or state.active_max
     # active_max counts processes, so it is no stand-in for the thread budget:
     # one 16-thread task runs as a single process.
-    thread_budget = state.n_process_logged or state.n_process
+    budget = thread_budget(state)
     threads_now = active_threads(state)
     waiting, io = blocked_threads(state)
     blocked_total = waiting + io
@@ -1118,20 +1153,32 @@ def render(state):
                 f"{io} I/O" if io else "",
             ) if part
         )
-        threads_row = f"threads: {threads_now} / {thread_budget or '?'}".ljust(PAIR_COL)
+        threads_row = f"threads: {threads_now} / {budget or '?'}"
+        if budget and threads_now > budget:
+            threads_row += f" (+{threads_now - budget} over)"
+        # ljust is a no-op once the overshoot tag has pushed past the column,
+        # so pad by hand rather than let the two halves run together.
+        threads_row = threads_row.ljust(PAIR_COL) if len(threads_row) < PAIR_COL else threads_row + "  "
         threads_row += f"blocked: {blocked_total}" + (f"  ({why})" if why else "")
         thread_lines.append(threads_row)
 
-    if thread_budget and threads_now is not None:
-        # Computing, held but parked on the lock or on I/O, and unbooked.
+    if budget and threads_now is not None:
+        # Booked and running, booked but parked on the lock or on I/O, and
+        # unbooked. The counts sum to max(threads_now, budget), so every booked
+        # thread keeps a cell when the scheduler has overbooked, and the marker
+        # says where n_process falls among them.
         parked = min(blocked_total, threads_now)
-        counts = (threads_now - parked, parked, max(0, thread_budget - threads_now))
-        thread_lines.append(" " * LABEL_W + render_bar(thread_bar_w, counts, "#\u25cb-"))
+        counts = (threads_now - parked, parked, max(0, budget - threads_now))
+        mark = budget if threads_now > budget else None
+        # The marker adds a cell, so give the segments one less and the bar
+        # keeps the width it has when nothing is overbooked.
+        bar_w = thread_bar_w - 1 if mark else thread_bar_w
+        thread_lines.append(" " * LABEL_W + BAR_ON + render_bar(bar_w, counts, BAR_FULL + BAR_HELD + BAR_NONE, mark) + BAR_OFF)
 
     if state.thread_span > 0:
         util = thread_util(state, now)
-        pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
-        thread_lines.append(" " * LABEL_W + f"util: {util:.1f} / {thread_budget or '?'} avg{pct}")
+        pct = f" ({100.0 * util / budget:.0f}%)" if budget else ""
+        thread_lines.append(" " * LABEL_W + f"util: {util:.1f} / {budget or '?'} avg{pct}")
 
 
     # --- box 3: ram usage ---
@@ -1157,7 +1204,7 @@ def render(state):
         ram_lines.append("workers:".ljust(LABEL_W) + f"{est_str}{limit_str}{held} | {real_str}")
     if ram_total is not None and ram_used is not None:
         used = min(ram_used, ram_total)
-        ram_lines.append(" " * LABEL_W + render_bar(ram_bar_w, (used, ram_total - used), "#-"))
+        ram_lines.append(" " * LABEL_W + BAR_ON + render_bar(ram_bar_w, (used, ram_total - used), BAR_FULL + BAR_NONE) + BAR_OFF)
 
     # --- box 4: disk ---
     disk_lines = []

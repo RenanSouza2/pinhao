@@ -673,22 +673,22 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 [[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
-    // Logged before the stored-result check: that path returns without reaching
-    // the scheduler.
+    // The whole header goes out before the stored-result check: that path
+    // returns without reaching the scheduler, and readers of the log must not
+    // have to guess these values from which lines happened to appear.
+    // n_process bounds both processes and threads.
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
+    tprintf("              %-20s| " U64P(10) "", "n process", n_process);
+    tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
+    tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
+    tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
     if(pi_is_stored(size))
     {
         tprintf("[%17.6f] %-20s|", get_wall_time(), "pi already stored");
         return pi_load(size);
     }
-
-    // n_process bounds both processes and threads.
-    tprintf("              %-20s| " U64P(10) "", "n process", n_process);
-    tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
-    tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
-    tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
     scheduler(size, n_process, mem_launch, mem_max);
     tprintf("[%17.6f] %-20s|", get_wall_time(), "binary split solved");
