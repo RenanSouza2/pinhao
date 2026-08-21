@@ -508,7 +508,7 @@ static void node_process(node_p n, uint64_t index)
             if(span == TREE_PIECE_SIZE)
             {
                 TIME_SETUP
-                split_piece(i_0, span);
+                split_piece(index, i_0, span, depth);
                 TIME_END(t1)
                 tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, get_wall_time(), "piece", i_0, span, "", dtime(t1));
                 return;

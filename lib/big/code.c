@@ -104,15 +104,6 @@ static void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
     sig_num_free(res[2]);
 }
 
-void split_piece(uint64_t i_0, uint64_t span)
-{
-    sig_num_t res[3];
-    split_sig(res, i_0, span);
-    sig_res_save(res, i_0, span);
-}
-
-
-
 static void sig_res_delete(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
@@ -436,6 +427,23 @@ bool disk_lock_enabled(void)
         JOIN_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
     } while(0)
 
+// A leaf: evaluating the series terms over the piece's range into P, Q, R, then
+// writing them out. Phases are logged in the same shape as a join's, so the
+// dashboard reads both through one path.
+void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t depth)
+{
+    int pid = (int)getpid();
+
+    sig_num_t res[3];
+    JOIN_PHASE("evaluating", "evaluated", index, pid, i_0, span, depth,
+        split_sig(res, i_0, span);
+    );
+
+    JOIN_WRITE(index, pid, i_0, span, depth,
+        sig_res_save(res, i_0, span);
+    );
+}
+
 void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t threads)
 {
     int pid = (int)getpid();
@@ -616,7 +624,7 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
 
     if(span == PIECE_SIZE)
     {
-        split_piece(i_0, span);
+        split_piece(index, i_0, span, depth);
         return;
     }
 

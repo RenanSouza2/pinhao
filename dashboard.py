@@ -131,7 +131,7 @@ class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
         "own_done", "in_progress", "task_idx", "pid", "threads", "start_time", "active_count", "parent", "children",
-        "mem_estimate", "join_term", "join_micro",
+        "mem_estimate", "term", "micro",
     )
 
     def __init__(self, i0, depth, kind, n2, parent):
@@ -151,8 +151,8 @@ class TreeNode:
         self.parent = parent
         self.children = []
         self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
-        self.join_term = None  # e.g. "P1xP2", from a split_*_res_join "mul ..." header line
-        self.join_micro = None  # e.g. "loading P1" / "multiplying", from a split_*_res_join phase line
+        self.term = None  # e.g. "P1xP2", from a join's "mul ..." header line; leaves have none
+        self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
 
 
 def _build_span(i0, span, depth, parent, by_key):
@@ -220,8 +220,8 @@ def mark_node_done(node):
     node.pid = None
     node.threads = None
     node.start_time = None
-    node.join_term = None
-    node.join_micro = None
+    node.term = None
+    node.micro = None
     mark_active(node, -1)
 
 
@@ -235,8 +235,8 @@ def mark_node_done_from_cache(node):
     node.pid = None
     node.threads = None
     node.start_time = None
-    node.join_term = None
-    node.join_micro = None
+    node.term = None
+    node.micro = None
 
 
 def pi_process_running():
@@ -588,11 +588,11 @@ def handle_piece(state, content):
             mark_node_done(tree_node)
 
 
-def handle_join_phase(state, content):
-    """split_span_res_join / split_big_res_join log their own header ("mul
-    P1xP2") and phase (loading/loaded/multiplying/.../written/locking/locked)
-    lines with the same [idx][pid] | i0 n2 depth shape as node_process, so
-    RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
+def handle_phase_line(state, content):
+    """split_piece, split_span_res_join and split_big_res_join log phase lines
+    (evaluating/loading/multiplying/.../written/locking/locked) and, for joins
+    only, a "mul P1xP2" header, all in the same [idx][pid] | i0 n2 depth shape
+    as node_process, so RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
     "locking"/"locked" additionally maintain the set of pids currently
     blocked waiting on the exclusive disk lock, and "locked" rolls into a
@@ -627,9 +627,9 @@ def handle_join_phase(state, content):
         return
     term = action.removeprefix("mul ")
     if term != action:
-        tree_node.join_term = term
+        tree_node.term = term
     else:
-        tree_node.join_micro = action
+        tree_node.micro = action
 
 
 def handle_task_start(state, content):
@@ -748,7 +748,7 @@ def handle_untracked(state, content):
 
 DISPATCH = {
     "node_process": handle_node_process,
-    "split_piece": handle_piece,
+    "split_piece": handle_phase_line,
     "task_start": handle_task_start,
     "task_end": handle_task_end,
     "scheduler": handle_scheduler,
@@ -758,8 +758,8 @@ DISPATCH = {
     "pi": handle_phase,
     "split_span": handle_untracked,
     "split_big": handle_untracked,
-    "split_span_res_join": handle_join_phase,
-    "split_big_res_join": handle_join_phase,
+    "split_span_res_join": handle_phase_line,
+    "split_big_res_join": handle_phase_line,
 }
 
 
@@ -871,18 +871,18 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                 # what flags a task holding more than one thread slot.
                 if node.threads is not None and node.threads > 1:
                     label += f" {MULTI_THR_ON}x{node.threads}{MULTI_THR_OFF}"
-                if node.join_term:
-                    op1, _, op2 = node.join_term.partition("x")
+                if node.term:
+                    op1, _, op2 = node.term.partition("x")
                     label += f" | {op1} x {op2}"
-                    if node.join_micro:
-                        micro = node.join_micro
-                        if micro == "locking" and disk_lock_enabled:
-                            micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
-                        elif micro == "multiplying":
-                            micro = f"{MUL_ON}{micro}{MUL_OFF}"
-                        elif micro.startswith("loading") or micro == "writing":
-                            micro = f"{IO_ATTN_ON}{micro}{IO_ATTN_OFF}"
-                        label += f" | {micro}"
+                if node.micro:
+                    micro = node.micro
+                    if micro == "locking" and disk_lock_enabled:
+                        micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
+                    elif micro in ("multiplying", "evaluating"):
+                        micro = f"{MUL_ON}{micro}{MUL_OFF}"
+                    elif micro.startswith("loading") or micro == "writing":
+                        micro = f"{IO_ATTN_ON}{micro}{IO_ATTN_OFF}"
+                    label += f" | {micro}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
