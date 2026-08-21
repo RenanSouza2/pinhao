@@ -319,6 +319,13 @@ static bool scheduler_at_first_slot(tree_scheduler_p s)
     return !s->tasks[0].active;
 }
 
+// Whether a task would push usage past the hard ceiling, as opposed to merely
+// being held back by mem_launch.
+static bool scheduler_over_mem_max(tree_scheduler_p s, uint64_t mem_cost)
+{
+    return s->total_mem_cost + mem_cost >= s->mem_max;
+}
+
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 {
     if(s->total_mem_cost >= s->mem_launch)
@@ -326,12 +333,7 @@ static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
         return false;
     }
 
-    if(s->total_mem_cost + mem_cost >= s->mem_max)
-    {
-        return false;
-    }
-
-    return true;
+    return !scheduler_over_mem_max(s, mem_cost);
 }
 
 static uint64_t scheduler_free_threads(tree_scheduler_p s)
@@ -421,7 +423,11 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         return false;
     }
 
-    uint64_t threads = node_threads(n, s->n_process);
+    // Full width only for a node that overshoots mem_max: that one is what
+    // everything else is waiting on. A node merely held back by mem_launch
+    // takes the ordinary allotment.
+    uint64_t max_threads = scheduler_over_mem_max(s, mem_cost) ? s->n_process : scheduler_free_threads(s);
+    uint64_t threads = node_threads(n, max_threads);
     return node_set_plan(n, mem_cost, threads);
 }
 
