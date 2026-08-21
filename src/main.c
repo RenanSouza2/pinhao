@@ -47,9 +47,9 @@ int main(void)
 
     // Tasks are launched while estimated worker memory is below mem_launch;
     // a launched task may overshoot up to mem_max, which is never crossed.
-    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
-    pi(256'000'000, 8, mem_launch, mem_max);
+    uint64_t mem_launch = U64(4) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(6) * 1024 * 1024 * 1024;
+    pi(64'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;
