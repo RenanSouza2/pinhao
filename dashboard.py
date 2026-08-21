@@ -489,7 +489,7 @@ def thread_tick(state, ts):
         return
     if ts > state.thread_last_ts:
         dt = ts - state.thread_last_ts
-        state.thread_time += (active_threads(state) or 0) * dt
+        state.thread_time += (working_threads(state) or 0) * dt
         state.thread_span += dt
         state.thread_last_ts = ts
 
@@ -610,6 +610,10 @@ def handle_phase_line(state, content):
         return
     action = re.sub(r"\s+", " ", m.group("action").strip())
     pid = int(m.group("pid"))
+
+    entry = state.active.get(pid)
+    if entry is not None:
+        entry["micro"] = action
 
     if action == "locking":
         state.locking_pids.add(pid)
@@ -805,15 +809,46 @@ def depth_avg(events_by_depth, depth, fallback):
     return fallback
 
 
+def blocked_threads(state):
+    """Threads a worker holds but isn't computing on, split by why. A worker
+    waiting on the disk lock has all of them idle; one in a read or write has
+    all but the thread in the syscall. Anything else counts as working.
+
+    Read off each worker's latest phase line, kept per pid so it survives a run
+    whose tree is too large to display (see TREE_NODE_CAP)."""
+    waiting = 0
+    io = 0
+    for entry in state.active.values():
+        threads = entry.get("threads")
+        micro = entry.get("micro")
+        if not threads or micro is None:
+            continue
+        if micro == "locking":
+            waiting += threads
+        elif micro.startswith("loading") or micro == "writing":
+            io += threads - 1
+    return waiting, io
+
+
+def working_threads(state):
+    """Booked threads minus the ones parked on the lock or on I/O."""
+    booked = active_threads(state)
+    if booked is None:
+        return None
+    waiting, io = blocked_threads(state)
+    return max(0, booked - waiting - io)
+
+
 def thread_util(state, now):
-    """Time-weighted average thread occupancy over the run so far. The stretch
+    """Time-weighted average of threads actually computing over the run so far
+    - booked threads less those parked on the lock or on I/O. The stretch
     since the last logged line is extrapolated from wall clock at the current
     thread total - without it a single long join, which logs nothing for
     minutes, would leave the average frozen at whatever preceded it."""
     acc, span = state.thread_time, state.thread_span
     if state.last_line_time is not None and not state.done:
         tail = max(0.0, now - state.last_line_time)
-        acc += (active_threads(state) or 0) * tail
+        acc += (working_threads(state) or 0) * tail
         span += tail
     if span <= 0:
         return 0.0
@@ -916,6 +951,38 @@ def render_status_screen(state):
     return "\n".join(lines)
 
 
+# The two steps after the split tree: one big division, then the decimal
+# display. Each is a single long step with no sub-progress to count, so each
+# counts as one unit against the total.
+POST_SPLIT_UNITS = 2
+
+
+def post_split_done(state):
+    if state.done:
+        return POST_SPLIT_UNITS
+    if state.phase in ("divided", "displaying"):
+        return 1
+    return 0
+
+
+BOX_MIN_WIDTH = 24
+
+
+def render_box(title, rows, width):
+    """A full-width rectangle with its title set into the top edge. Rows are
+    padded to the inner width; ANSI is stripped only for measuring, so a
+    colored row still lines up with the right edge."""
+    inner = max(BOX_MIN_WIDTH, width - 2)
+    head = f"\u250c\u2500 {title} " if title else "\u250c"
+    head += "\u2500" * max(0, inner + 2 - len(head) - 1) + "\u2510"
+    out = [head]
+    for row in rows:
+        pad = inner - 1 - len(ANSI_SGR_RE.sub("", row))
+        out.append(f"\u2502 {row}{' ' * max(0, pad)}\u2502")
+    out.append("\u2514" + "\u2500" * inner + "\u2518")
+    return out
+
+
 def render(state):
     process_gone_recently = (
         state.process_gone_since is not None
@@ -930,7 +997,6 @@ def render(state):
 
     now = time.time()
     elapsed = now - state.start_time if state.start_time else 0
-    lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
     if state.run_start_time is not None:
         run_elapsed = now - state.run_start_time
@@ -959,47 +1025,95 @@ def render(state):
     ram_used, ram_total = get_system_ram()
     pid_rss = get_pid_rss(state.active.keys())
 
-    # --- overall completion (left column) ---
+    # --- box 1: overall completion ---
     completion_lines = []
     cached_units = state.pieces_from_cache + state.joins_from_cache
     cache_note = f"  ({cached_units} from cache)" if cached_units else ""
+    phase_line = f"phase:   {state.phase}"
+    if not state.done and state.phase != "splitting" and state.phase_start_time:
+        phase_line += f"   {fmt_duration(time.time() - state.phase_start_time)} elapsed"
+    completion_lines.append(phase_line)
     if state.total_pieces:
         total_joins = state.total_joins
-        total_units = state.total_pieces + total_joins
-        done_units = min(state.pieces_done + state.joins_done, total_units)
+        split_units = state.total_pieces + total_joins
+        total_units = split_units + POST_SPLIT_UNITS
+        done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
         pct = 100.0 * done_units / total_units
         bar_width = 40
         filled = int(bar_width * done_units / total_units)
         bar = "#" * filled + "-" * (bar_width - filled)
-        completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
+        # The split tree's own counts only mean anything while it is being
+        # walked; past that the phase line carries the progress.
+        if state.phase == "splitting":
+            completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
         completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
         completion_lines.append(f"         [{bar}]")
         numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
         pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
         completion_lines.append(f"         numbers: {fmt_bytes(numbers_size)}   pieces: {fmt_bytes(pieces_size)}")
-        if not state.done and state.phase != "splitting":
-            phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
-            completion_lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
         completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
 
-    # --- active workers / ram (right column) ---
-    status_lines = []
+    # --- box 2: thread occupancy ---
+    thread_lines = []
     n_workers = state.n_process_logged or state.n_process or state.active_max
     # active_max counts processes, so it is no stand-in for the thread budget:
     # one 16-thread task runs as a single process.
     thread_budget = state.n_process_logged or state.n_process
-    blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids and state.disk_lock_enabled is not False else ""
-    worker_line = f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}"
-    # The scheduler spends one budget on both: n_process caps processes and
-    # threads alike, so a task asking for 8 threads takes 8 of the same slots
-    # eight single-threaded tasks would.
     threads_now = active_threads(state)
+    waiting, io = blocked_threads(state)
+    blocked_total = waiting + io
+
+    # One label column for both rows, so the counts line up under each other.
+    VALUE_COL = 24
+    lock_on = state.disk_lock_enabled is not False
+    workers_row = f"workers: {len(state.active)}/{n_workers or '?'}"
+    if lock_on:
+        workers_row = workers_row.ljust(VALUE_COL) + f"(blocked: {len(state.locking_pids)})"
+    thread_lines.append(workers_row)
+
     if threads_now is not None:
         full = " full" if thread_budget and threads_now >= thread_budget else ""
-        worker_line += f"   threads: {threads_now}/{thread_budget or '?'}{full}"
-    status_lines.append(worker_line)
+        why = ", ".join(
+            part for part in (
+                f"{waiting} waiting on lock" if waiting else "",
+                f"{io} in I/O" if io else "",
+            ) if part
+        )
+        threads_row = f"threads: {threads_now}/{thread_budget or '?'}{full}".ljust(VALUE_COL)
+        threads_row += f"blocked: {blocked_total}" + (f" ({why})" if why else "")
+        thread_lines.append(threads_row)
 
+    if thread_budget and threads_now is not None:
+        # Three segments over the thread budget: computing, held but parked on
+        # the lock or on I/O, and unbooked. Apportioned by largest remainder so
+        # they always sum to the full width -- plain truncation leaves a stray
+        # cell of "unbooked" when every thread is in fact booked.
+        bar_width = 40
+        parked = min(blocked_total, threads_now)
+        counts = (threads_now - parked, parked, max(0, thread_budget - threads_now))
+        raw = [bar_width * c / thread_budget for c in counts]
+        fills = [int(r) for r in raw]
+        for i in sorted(range(3), key=lambda i: raw[i] - fills[i], reverse=True)[:bar_width - sum(fills)]:
+            fills[i] += 1
+        bar = "#" * fills[0] + "\u25cb" * fills[1] + "-" * fills[2]
+        thread_lines.append(f"[{bar}]")
+    if state.thread_span > 0:
+        util = thread_util(state, now)
+        pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
+        thread_lines.append(f"thread util: {util:.1f}/{thread_budget or '?'} avg{pct}")
+    if state.lock_requests and state.disk_lock_enabled is not False:
+        if state.lock_tokens_seen:
+            pct = 100.0 * state.lock_misses / state.lock_requests
+            misses = f"{state.lock_misses} misses ({pct:.0f}%)"
+        else:
+            # No "locked" line carried HIT/MISS: a log from a build predating
+            # them. Zero misses would read as no contention rather than no data.
+            misses = "misses n/a (stale build)"
+        thread_lines.append(f"disk lock: {state.lock_requests} requests, {misses}")
+
+    # --- box 3: ram usage ---
+    ram_lines = []
     ram_parts = []
     if ram_total is not None:
         ram_part = f"ram: {fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
@@ -1021,31 +1135,18 @@ def render(state):
         held = " held" if est is not None and state.mem_launch and est >= state.mem_launch else ""
         ram_parts.append(f"workers: {est_str}{limit_str}{held} | {real_str}")
     if ram_parts:
-        status_lines.append("   ".join(ram_parts))
+        ram_lines.append("   ".join(ram_parts))
     if ram_total is not None and ram_used is not None:
         bar_width = 40
         filled = int(bar_width * min(ram_used, ram_total) / ram_total)
         bar = "#" * filled + "-" * (bar_width - filled)
-        status_lines.append(f"[{bar}]")
-    if state.thread_span > 0:
-        util = thread_util(state, now)
-        pct = f" ({100.0 * util / thread_budget:.0f}%)" if thread_budget else ""
-        status_lines.append(f"thread util: {util:.1f}/{thread_budget or '?'} avg{pct}")
-    if state.lock_requests and state.disk_lock_enabled is not False:
-        if state.lock_tokens_seen:
-            pct = 100.0 * state.lock_misses / state.lock_requests
-            misses = f"{state.lock_misses} misses ({pct:.0f}%)"
-        else:
-            # No "locked" line carried HIT/MISS: a log from a build predating
-            # them. Zero misses would read as no contention rather than no data.
-            misses = "misses n/a (stale build)"
-        status_lines.append(f"disk lock: {state.lock_requests} requests, {misses}")
+        ram_lines.append(f"[{bar}]")
 
-    col_width = max((len(l) for l in completion_lines), default=0) + 4
-    for i in range(max(len(completion_lines), len(status_lines))):
-        left = completion_lines[i] if i < len(completion_lines) else ""
-        right = status_lines[i] if i < len(status_lines) else ""
-        lines.append(left.ljust(col_width) + right)
+    # Inset one column, so the frame doesn't sit flush against either edge.
+    box_width = shutil.get_terminal_size(fallback=(80, 24)).columns - 2
+    for title, rows in (("completion", completion_lines), ("threads", thread_lines), ("ram", ram_lines)):
+        if rows:
+            lines.extend(" " + row for row in render_box(title, rows, box_width))
 
     lines.append("")
     if state.tree_root is not None:
