@@ -89,12 +89,12 @@ ALERT_OFF = "\x1b[22;39m"
 RSS_ON = "\x1b[38;2;124;128;140m"
 RSS_OFF = "\x1b[39m"
 
-# Cyan (#4CA7B4) on a task holding more than one thread slot. Flat across every
+# Cyan (#4396A2) on a task holding more than one thread slot. Flat across every
 # width: the badge says a task is wide, the number beside it says how wide.
 # The only cyan on the dashboard, and cool on purpose - every warm hue here
 # already means something is wrong (coral alert, wine lock, amber I/O), so a
 # warm badge would read as a condition rather than as a count.
-MULTI_THR_ON = "\x1b[38;2;76;167;180m"
+MULTI_THR_ON = "\x1b[38;2;67;150;162m"
 MULTI_THR_OFF = "\x1b[39m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -112,9 +112,9 @@ BAR_NONE = " "
 BAR_ON = "\x1b[38;2;110;128;184m"
 BAR_OFF = "\x1b[39m"
 
-# Parked threads, in the coral of ALERT_ON without its bold weight: a bar is
-# already a loud shape, so the tone alone carries it.
-BAR_BLOCKED = "\x1b[38;2;224;122;95m"
+# The hard-limit mark on a bar, in the coral of ALERT_ON without its bold
+# weight: a bar is already a loud shape, so the tone alone carries it.
+BAR_ALERT = "\x1b[38;2;224;122;95m"
 
 # Marks laid on a bar: a dotted rule for a threshold, a half cell for a
 # measured value. Shape says which kind of reading it is, so colour is left
@@ -1364,11 +1364,12 @@ def render(state):
         # at the hottest tone - on a run this size, half the machine doing
         # nothing is not a shade of concern, it is the failure.
         working_frac = counts[0] / budget
-        tints = (
-            severity_colour(1.0 - working_frac, alarm=0.5),
-            BAR_BLOCKED,
-            BAR_ON,
-        )
+        # Working and parked share the tone; only the glyph tells them apart.
+        # The colour answers one question - how much of the budget is doing
+        # work - and parked threads are already counted against it, so giving
+        # them a second colour would state the same fact twice.
+        tint = severity_colour(1.0 - working_frac, alarm=0.5)
+        tints = (tint, tint, BAR_ON)
         thread_lines.append(" " * LABEL_W + render_bar(
             bar_w, counts, BAR_FULL + BAR_HELD + BAR_NONE, mark, colour=tints,
         ))
@@ -1419,7 +1420,7 @@ def render(state):
         if state.mem_launch and state.mem_launch != state.mem_max:
             ticks.append((state.mem_launch, BAR_LIMIT, BAR_OFF))
         if state.mem_max:
-            ticks.append((state.mem_max, BAR_LIMIT, BAR_BLOCKED))
+            ticks.append((state.mem_max, BAR_LIMIT, BAR_ALERT))
         # Measured RSS alongside the estimate the scheduler actually gates on:
         # the gap between them is the estimator being wrong, which is worth
         # seeing at the moment it happens rather than afterwards.
