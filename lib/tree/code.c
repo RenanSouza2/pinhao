@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "config.h"
 #include "debug.h"
 #include "../big/internal.h"
 
@@ -16,6 +15,7 @@
 #endif
 
 #define TREE_PIECE_SIZE 24
+#define TREE_LEAF_COST_BYTES (U64(512) * 1024 * 1024)
 
 #define NODE_BIG 0
 #define NODE_SPAN 1
@@ -36,8 +36,7 @@ STRUCT(span)
     uint64_t depth;
 };
 
-// What the policy section decided about a node, filled in by node_can_launch
-// and read by everything downstream of it.
+// What node_can_launch decided about a node.
 STRUCT(tree_plan)
 {
     uint64_t mem_cost;
@@ -207,22 +206,11 @@ static bool node_is_ready(node_p n)
     return true;
 }
 
-// A leaf: a span node at the smallest span, computed in process by split_piece.
-// It has no children to wait on and no join, so nothing about it can be read
-// off operand sizes.
 static bool node_is_leaf(node_p n)
 {
     return n->type == NODE_SPAN && n->as.span.span == TREE_PIECE_SIZE;
 }
 
-// Operand sizes of the multiplication a node's join is estimated by. A join runs
-// four cross multiplications between the two children (P1xP2, Q1xQ2, P1xR2,
-// R1xQ2); R1xQ2 is used as the representative term, since R accumulates
-// contributions from both children and so tends to be the largest operand of the
-// four. Sizes are read from each child's already-stored result via
-// split_span_res_op_size / split_big_res_op_size (index 2 = R, index 1 = Q).
-//
-// Only for a node that joins: a leaf has none.
 static void node_op_sizes(uint64_t *out_op_1, uint64_t *out_op_2, node_p n)
 {
     assert(!node_is_leaf(n));
@@ -305,25 +293,15 @@ static uint64_t get_free_index(tree_scheduler_p s)
     revert()
 }
 
-// ---------------------------------------------------------------------------
-// Policy
-//
-// Every decision about whether a node may be launched, and with what resources
-// it runs, lives in this section. Nothing outside it consults a budget or a
-// limit: get_next_node walks the tree, task_start forks, the scheduler loop
-// reaps.
-// ---------------------------------------------------------------------------
 
-// Estimates the average memory a node's join will use, from araucaria's own
-// num_mul_estimate_memory.
-//
-// Always priced at a single thread: a node's memory cost is the same whatever
-// thread count it ends up with, so the memory budget and the thread budget can
-// be decided independently of each other.
-//
-// Only for a node that joins: node_can_launch settles a leaf before here.
+
 static uint64_t node_estimate_memory(node_p n)
 {
+    if(node_is_leaf(n))
+    {
+        return TREE_LEAF_COST_BYTES;
+    }
+
     uint64_t op_1;
     uint64_t op_2;
     node_op_sizes(&op_1, &op_2, n);
@@ -331,28 +309,16 @@ static uint64_t node_estimate_memory(node_p n)
     return num_mul_estimate_memory(op_1, op_2, UINT64_MAX, 1);
 }
 
-// A process slot has to be free before anything can be launched into one.
 static bool scheduler_has_slot(tree_scheduler_p s)
 {
     return s->active < s->n_process;
 }
 
-// Whether slot 0 is free. Slots are filled lowest-first, so this holds both for
-// an idle tree and for a pool whose slot 0 task has just ended. It is what lets
-// a node past the memory budget, so the tree cannot wedge on its own estimate.
 static bool scheduler_at_first_slot(tree_scheduler_p s)
 {
     return !s->tasks[0].active;
 }
 
-// Whether the memory budget can take a task estimated at `mem_cost`.
-//
-// Two zones. New work is admitted only while usage is still below mem_launch; a
-// task admitted there is allowed to overshoot into the mem_launch..mem_max band,
-// but nothing may push usage past mem_max. Once usage sits in the band the tree
-// stops launching until a task ends.
-//
-// Budget arithmetic only: node_can_launch owns the first-slot exception to it.
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 {
     if(s->total_mem_cost >= s->mem_launch)
@@ -378,29 +344,18 @@ static uint64_t scheduler_free_threads(tree_scheduler_p s)
     return s->n_process - s->total_threads;
 }
 
-// Whether the thread budget can take a task asking for `threads`.
-//
-// Threads are cores: the counts of all active tasks sum to at most n_process,
-// so nothing is oversubscribed. A node that cannot be given a single free
-// thread waits rather than launching alongside a full machine.
-//
-// total_threads can sit above n_process after node_can_launch's first-slot
-// exception, so this compares sums rather than subtracting them.
-//
-// Budget arithmetic only: node_can_launch owns the first-slot exception to it.
 static bool scheduler_has_threads(tree_scheduler_p s)
 {
     return scheduler_free_threads(s) > 0;
 }
 
-// Clamps a thread request to num_mul_threads_ceiling, then rounds it down to a
-// power of two -- the only shape num_ssm_fft_fwd_split can use, since it gives
-// its recursive phase the power-of-two floor of the workers asked for while
-// still allocating a 2n-limb scratch buffer for each of them.
-//
-// Only for a node that joins: node_can_launch settles a leaf before here.
 static uint64_t node_threads(node_p n, uint64_t max_threads)
 {
+    if(node_is_leaf(n))
+    {
+        return 1;
+    }
+
     uint64_t op_1;
     uint64_t op_2;
     node_op_sizes(&op_1, &op_2, n);
@@ -414,8 +369,6 @@ static uint64_t node_threads(node_p n, uint64_t max_threads)
     return B(stdc_bit_width(threads) - 1);
 }
 
-// Whether the walk may look inside a node for work. A node being processed owns
-// its whole subtree until it finishes.
 static bool node_is_open(node_p n)
 {
     return !n->processing;
@@ -431,22 +384,6 @@ static bool node_set_plan(node_p n, uint64_t mem_cost, uint64_t threads)
     return true;
 }
 
-// May this node be launched now, and on what terms. On true the node's plan is
-// filled in and the caller may hand it to task_start.
-//
-// A node already stored on disk is always launchable, at no memory cost and no
-// threads; its plan is marked is_noop so the scheduler reaps it at once instead
-// of counting it against the process budget.
-//
-// A leaf has no children to wait on and no join to estimate, so it is charged
-// what TREE_LEAF_EXEMPT says and the single thread it runs on. Any other node
-// needs both children done, room in the memory budget, and a thread to run on.
-//
-// A free slot 0 is the one way past either budget, and the only place the
-// thread ceiling may be broken: a node too big for the budgets is also the node
-// everything else is waiting on, so it launches at full width and the machine
-// stays oversubscribed until it ends. Nothing else launches meanwhile -- the
-// budgets it went over hold every other node back.
 static bool node_can_launch(tree_scheduler_p s, node_p n)
 {
     if(!node_is_open(n))
@@ -472,40 +409,21 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         return false;
     }
 
-    if(node_is_leaf(n))
-    {
-        uint64_t mem_cost = TREE_LEAF_EXEMPT ? 0 : 1;
-
-        if(scheduler_has_memory(s, mem_cost) || scheduler_at_first_slot(s))
-        {
-            return node_set_plan(n, mem_cost, 1);
-        }
-
-        return false;
-    }
-
-
     uint64_t mem_cost = node_estimate_memory(n);
-    if(!scheduler_has_memory(s, mem_cost))
+    if(scheduler_has_memory(s, mem_cost))
     {
-        if(!scheduler_at_first_slot(s))
-        {
-            return false;
-        }
-
-        // Over a budget and admitted anyway: it runs at full width, whatever
-        // the other tasks already hold.
-        uint64_t threads = node_threads(n, s->n_process);
+        uint64_t threads = node_threads(n, scheduler_free_threads(s));
         return node_set_plan(n, mem_cost, threads);
     }
 
-    uint64_t threads = node_threads(n, scheduler_free_threads(s));
+    if(!scheduler_at_first_slot(s))
+    {
+        return false;
+    }
+
+    uint64_t threads = node_threads(n, s->n_process);
     return node_set_plan(n, mem_cost, threads);
 }
-
-// ---------------------------------------------------------------------------
-// End of policy
-// ---------------------------------------------------------------------------
 
 // Walks the tree for a node the policy will take, deepest-first and child 0
 // before child 1. Descends into a node only while it is open.
@@ -640,10 +558,10 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
         s->active++;
     }
 
-    // Logged after the accounting above: THR is this task's thread count, SUM
-    // the scheduler total with it already booked.
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| THR " U64P(3) " SUM " U64P(3) "",
-        index, (int)pid, get_wall_time(), "task start", n->plan.threads, s->total_threads);
+    // THR is this task's thread count, SUM the scheduler total including it,
+    // MEM the memory it was booked at -- the only line that states a leaf's cost.
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| THR " U64P(3) " SUM " U64P(3) " MEM " U64P(12) "",
+        index, (int)pid, get_wall_time(), "task start", n->plan.threads, s->total_threads, n->plan.mem_cost);
 
     return pid;
 }
@@ -749,9 +667,8 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 [[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
-    // Logged ahead of the stored-result check: a run that finds pi on disk
-    // returns without ever reaching the scheduler, and these two are the only
-    // lines that state the size of the run it skipped.
+    // Logged before the stored-result check: that path returns without reaching
+    // the scheduler.
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
 
@@ -767,8 +684,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
         n_process = (uint64_t)n_proc_avail;
     }
 
-    // Logged after the clamp above: it is the budget for processes and
-    // threads alike, so it is what both are measured against.
+    // Logged after the clamp: n_process bounds both processes and threads.
     tprintf("              %-20s| " U64P(10) "", "n process", n_process);
     tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
     tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);

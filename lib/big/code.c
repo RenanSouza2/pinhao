@@ -236,9 +236,9 @@ static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder,
     return true;
 }
 
-// Exact limb count of a stored union_num at the given index (0=P, 1=Q, 2=R), read
-// from its file header instead of loaded in full: a SIG-typed entry's count sits
-// right after the signal field; a FLT-typed entry is already fixed-precision at `size`.
+// Exact limb count of a stored union_num at the given index (0=P, 1=Q, 2=R),
+// read from its file header: a SIG-typed entry's count sits right after the
+// signal field; a FLT-typed entry is fixed-precision at `size`.
 static uint64_t union_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t index)
 {
     FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
@@ -345,20 +345,12 @@ static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 
 
 
-// All processes read/write cache/*.bin over the same physical disk; this
-// lock turns concurrent I/O from every forked worker into a single queue so
-// a spinning disk isn't seeking between unrelated offsets. Held around a
-// matched pair of loads (both operands read in before releasing) and around
-// each write, but never across a JOIN_MUL -- so multiplication still
-// overlaps other processes' I/O. When a write is immediately followed by the
-// next term's pair of loads (nothing but a JOIN_HEADER log line in between),
-// the lock is kept held across that write-then-read boundary instead of
-// being released and immediately re-acquired -- see JOIN_WRITE_HOLD.
+// All processes read/write cache/*.bin over the same physical disk; this lock
+// serialises that I/O. Held around a matched pair of loads and around each
+// write, never across a JOIN_MUL. A write immediately followed by the next
+// term's loads keeps the lock across the boundary -- see JOIN_WRITE_HOLD.
 //
-// Only worth it on a spinning disk, where random seeks are expensive; on an
-// SSD there's no seek penalty, so the lock is pure contention with no
-// benefit. Gated behind LOCK_DISK_IO (see config.h) -- undefine it to
-// skip locking entirely.
+// Gated behind LOCK_DISK_IO (see config.h): worth it only on a spinning disk.
 #ifdef LOCK_DISK_IO
 static int g_disk_lock_fd = -1;
 #endif
@@ -384,8 +376,8 @@ static void disk_unlock(void)
 #endif
 }
 
-// So the run's log (and dashboard.py, which reads it) can report whether
-// disk_lock()/disk_unlock() are actually locking or just timed no-ops.
+// Reports whether disk_lock()/disk_unlock() are locking or timed no-ops, for
+// the run log and dashboard.py.
 bool disk_lock_enabled(void)
 {
 #ifdef LOCK_DISK_IO
@@ -396,13 +388,10 @@ bool disk_lock_enabled(void)
 }
 
 // A join runs four cross multiplications between the two children (P1xP2,
-// Q1xQ2, P1xR2, R1xQ2 -- see node_estimate_memory in lib/tree/code.c). Each
-// term is announced with a header line first, then broken into its
-// individual phases -- loading each operand separately, multiplying, writing
-// -- each timed on its own, nested under the caller's overall
-// "joining"/"joined" line. INDEX/PID identify the task and process a log
-// line came from, so concurrent joins' interleaved output on stderr stays
-// attributable.
+// Q1xQ2, P1xR2, R1xQ2). Each term gets a header line, then one timed line per
+// phase -- loading each operand, multiplying, writing -- nested under the
+// caller's "joining"/"joined" line. INDEX/PID identify the task and process,
+// so interleaved output from concurrent joins stays attributable.
 #define JOIN_HEADER(TERM, INDEX, PID, I_0, SPAN_ARG, DEPTH) \
     tprintf("[" U64P(2) "][%7d][%17.6f] mul %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), TERM, I_0, SPAN_ARG, DEPTH)
 
@@ -427,9 +416,8 @@ bool disk_lock_enabled(void)
 #define JOIN_LOAD(OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) JOIN_LOAD_LABELED("loading", "loaded", OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 #define JOIN_MUL(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      JOIN_PHASE("multiplying", "multiplied", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 
-// Timed like any other phase, so a long "locking" -> "locked" gap in the log
-// (and in the dashboard's join_micro column) reads as lock contention rather
-// than silently vanishing into disk_lock()'s blocking flock() call.
+// Timed like any other phase, so lock contention shows as a "locking" ->
+// "locked" gap in the log rather than vanishing into the blocking flock().
 #define JOIN_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH) JOIN_PHASE("locking", "locked", INDEX, PID, I_0, SPAN_ARG, DEPTH, disk_lock();)
 
 #define JOIN_WRITE(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
@@ -439,12 +427,9 @@ bool disk_lock_enabled(void)
         disk_unlock(); \
     } while(0)
 
-// Like JOIN_WRITE, but leaves the lock held instead of releasing it: for a
-// write immediately followed (across just a JOIN_HEADER log line, no I/O in
-// between) by the next term's operand reads, so that write-then-read pair
-// stays under one continuous lock hold instead of unlocking and immediately
-// re-locking. The paired read must skip its own JOIN_LOCK and release the
-// lock itself (still via a plain disk_unlock()) once its loads are done.
+// Like JOIN_WRITE, but leaves the lock held: for a write immediately followed
+// by the next term's operand reads. The paired read must skip its own
+// JOIN_LOCK and release the lock itself via a plain disk_unlock().
 #define JOIN_WRITE_HOLD(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
     do { \
         JOIN_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \

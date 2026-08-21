@@ -85,9 +85,10 @@ RE_PIECE = re.compile(
 # SUM (the scheduler's running total at launch) is matched but not captured:
 # the total shown is rebuilt from the per-task THR counts, which also fall as
 # tasks end, where SUM only ever states the value at one launch.
+# THR/SUM and MEM are both optional: older builds log neither.
 RE_TASK_START = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|"
-    r"(?:\s*THR\s+(?P<thr>\d+)\s+SUM\s+\d+)?"
+    r"(?:\s*THR\s+(?P<thr>\d+)\s+SUM\s+\d+(?:\s+MEM\s+(?P<mem>\d+))?)?"
 )
 RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
@@ -149,7 +150,7 @@ class TreeNode:
         self.active_count = 0
         self.parent = parent
         self.children = []
-        self.mem_estimate = None  # bytes, set when a "joining" line is seen for this node
+        self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
         self.join_term = None  # e.g. "P1xP2", from a split_*_res_join "mul ..." header line
         self.join_micro = None  # e.g. "loading P1" / "multiplying", from a split_*_res_join phase line
 
@@ -492,16 +493,20 @@ def thread_tick(state, ts):
         state.thread_last_ts = ts
 
 
-def attach_threads(state, pid, tree_node):
-    """A task's thread count and its node identity arrive on two separate
-    lines ("task start" and "begin") whose order isn't guaranteed - the child
-    logs "begin" as soon as it's forked, the parent logs "task start" after.
-    Both sides call this, so whichever lands second attaches the count."""
+def attach_task_plan(state, pid, tree_node):
+    """A task's plan (threads, booked memory) and its node identity arrive on
+    two separate lines ("task start" and "begin") whose order isn't guaranteed -
+    the child logs "begin" as soon as it's forked, the parent logs "task start"
+    after. Both sides call this, so whichever lands second attaches the plan."""
     if tree_node is None:
         return
     entry = state.active.get(pid)
-    if entry is not None and entry.get("threads") is not None:
+    if entry is None:
+        return
+    if entry.get("threads") is not None:
         tree_node.threads = entry["threads"]
+    if entry.get("mem") is not None:
+        tree_node.mem_estimate = entry["mem"]
 
 
 def set_phase(state, phase):
@@ -534,7 +539,7 @@ def handle_node_process(state, content):
             tree_node.task_idx = idx
             tree_node.pid = pid
             tree_node.start_time = ts
-            attach_threads(state, pid, tree_node)
+            attach_task_plan(state, pid, tree_node)
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
@@ -634,15 +639,19 @@ def handle_task_start(state, content):
     pid = int(m.group("pid"))
     entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
 
+    mem = m.group("mem")
+    if mem is not None:
+        entry["mem"] = int(mem)
+
     thr = m.group("thr")
-    if thr is None:
-        return
-    if not state.threads_seen:
-        state.threads_seen = True
-        state.thread_last_ts = float(m.group("ts"))
-    entry["threads"] = int(thr)
-    if state.tree_by_key and entry.get("i0") is not None:
-        attach_threads(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
+    if thr is not None:
+        if not state.threads_seen:
+            state.threads_seen = True
+            state.thread_last_ts = float(m.group("ts"))
+        entry["threads"] = int(thr)
+
+    if (thr is not None or mem is not None) and state.tree_by_key and entry.get("i0") is not None:
+        attach_task_plan(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
 
 
 def handle_task_end(state, content):

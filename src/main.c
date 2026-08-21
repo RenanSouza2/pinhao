@@ -34,7 +34,7 @@ int main(void)
 
     // araucaria_disk_config_t config = {
     //     .disk_path = "/mnt/wsl/workspace/tmp",
-    //     .disk_threshold_bytes = 2'048'000'000 // ~2GiB per number; see derivation in conversation
+    //     .disk_threshold_bytes = 2'048'000'000 // bytes per number
     // };
     // araucaria_disk_config_set(&config);
 
