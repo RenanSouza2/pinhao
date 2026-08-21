@@ -25,11 +25,11 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
 
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
-    tprintf("              %-20s|", "display begin");
+    tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
     TIME_SETUP
     flt_num_display_dec_threads(flt_pi, n_process);
     TIME_END(t1)
-    tprintf("              %-20s| %7.1f", "display end", dtime(t1));
+    tprintf("[%17.6f] %-20s| %7.1f", get_wall_time(), "display end", dtime(t1));
     flt_num_free(flt_pi);
 }
 

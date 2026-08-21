@@ -680,7 +680,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
 
     if(pi_is_stored(size))
     {
-        tprintf("              %-20s|", "pi already stored");
+        tprintf("[%17.6f] %-20s|", get_wall_time(), "pi already stored");
         return pi_load(size);
     }
 
@@ -691,7 +691,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
     tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
     scheduler(size, n_process, mem_launch, mem_max);
-    tprintf("              %-20s|", "binary split solved");
+    tprintf("[%17.6f] %-20s|", get_wall_time(), "binary split solved");
 
     return pi_finish(size, TREE_PIECE_SIZE, n_process);
 }

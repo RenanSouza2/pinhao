@@ -886,11 +886,11 @@ flt_num_t pi_finish(uint64_t size, uint64_t piece_size, uint64_t threads)
     flt_num_t flt_pi = flt_r;
     flt_pi = flt_num_mul_sig(flt_pi, sig_num_wrap(3));
 
-    tprintf("              %-20s|", "dividing");
+    tprintf("[%17.6f] %-20s|", get_wall_time(), "dividing");
     TIME_SETUP
     flt_pi = flt_num_div_threads(flt_pi, flt_q, threads);
     TIME_END(t1)
-    tprintf("              %-20s| %7.1f", "divided", dtime(t1));
+    tprintf("[%17.6f] %-20s| %7.1f", get_wall_time(), "divided", dtime(t1));
 
     flt_pi = flt_num_add(flt_pi, flt_num_wrap(3, size));
     pi_save(size, flt_pi);
@@ -902,13 +902,13 @@ flt_num_t pi_big(uint64_t size)
 {
     if(pi_is_stored(size))
     {
-        tprintf("              %-20s|", "pi already stored");
+        tprintf("[%17.6f] %-20s|", get_wall_time(), "pi already stored");
         return pi_load(size);
     }
 
     uint64_t index_max = get_index_max(size, PIECE_SIZE);
     split_big(0, size, 1, index_max, 0);
-    tprintf("              %-20s|", "binary split solved");
+    tprintf("[%17.6f] %-20s|", get_wall_time(), "binary split solved");
 
     return pi_finish(size, PIECE_SIZE, 1);
 }

@@ -92,7 +92,9 @@ RE_TASK_START = re.compile(
 )
 RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
-RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
+# The leading [ts] is optional: the config lines it shares this shape with
+# don't carry one, nor do logs from a build predating it.
+RE_PHASE = re.compile(r"(?:\[\s*(?P<ts>[\d.]+)\]\s*)?(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
@@ -425,9 +427,7 @@ class State:
         self.mem_max = None  # a launched task may overshoot up to here, never past
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.pieces_done = 0
-        self.pieces_from_cache = 0
         self.joins_done = 0
-        self.joins_from_cache = 0
         self.piece_events = collections.deque(maxlen=2000)  # durations, seconds
         self.join_events = collections.deque(maxlen=2000)  # durations, seconds
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
@@ -510,10 +510,13 @@ def attach_task_plan(state, pid, tree_node):
         tree_node.mem_estimate = entry["mem"]
 
 
-def set_phase(state, phase):
+def set_phase(state, phase, ts=None):
+    """ts is the phase line's own CLOCK_REALTIME stamp, which is the same epoch
+    as time.time(). Without it the timer would restart whenever the dashboard
+    attaches, reading 00:00 on a phase that began an hour ago."""
     if phase != state.phase:
         state.phase = phase
-        state.phase_start_time = time.time()
+        state.phase_start_time = float(ts) if ts is not None else time.time()
 
 
 def handle_node_process(state, content):
@@ -546,10 +549,7 @@ def handle_node_process(state, content):
         state.active.pop(pid, None)
         covered = leaves_covered(int(m.group("n2")))
         state.pieces_done += covered
-        state.pieces_from_cache += covered
-        joins_covered = covered - 1
-        state.joins_done += joins_covered
-        state.joins_from_cache += joins_covered
+        state.joins_done += covered - 1
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
             mark_node_done(tree_node)
@@ -726,21 +726,20 @@ def handle_phase(state, content):
     if not m:
         return
     action = m.group("action").strip()
+    ts = m.group("ts")
     if action in ("dividing", "divided", "pi already stored", "binary split solved"):
-        set_phase(state, action)
+        set_phase(state, action, ts)
     if action == "pi already stored":
         if state.total_pieces:
-            state.pieces_from_cache += state.total_pieces - state.pieces_done
             state.pieces_done = state.total_pieces
-            state.joins_from_cache += state.total_joins - state.joins_done
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
             mark_node_done_from_cache(state.tree_root)
     elif action == "display begin":
-        set_phase(state, "displaying")
+        set_phase(state, "displaying", ts)
     elif action == "display end":
-        set_phase(state, "displayed")
+        set_phase(state, "displayed", ts)
         state.done = True
 
 
@@ -1021,7 +1020,11 @@ def render(state):
 
     if state.last_line_time is not None and not state.done:
         since_last_line = now - state.last_line_time
-        stall_threshold = max(60.0, 2 * max(piece_durs)) if piece_durs else 60.0
+        # Both kinds of work, not just pieces: a run whose pieces all came from
+        # cache has no piece durations at all, and a single long join logs
+        # nothing for far longer than the 60s floor.
+        work_durs = piece_durs + join_durs
+        stall_threshold = max(60.0, 2 * max(work_durs)) if work_durs else 60.0
         if since_last_line > stall_threshold:
             lines.append(
                 f"WARNING: no log activity for {fmt_duration(since_last_line)} "
@@ -1056,7 +1059,7 @@ def render(state):
 
     # --- box 1: overall completion ---
     completion_lines = []
-    phase_line = f"phase:   {state.phase}"
+    phase_line = "phase:".ljust(LABEL_W) + state.phase
     if not state.done and state.phase != "splitting" and state.phase_start_time:
         phase_line += f"   {fmt_duration(time.time() - state.phase_start_time)} elapsed"
     completion_lines.append(phase_line)
@@ -1072,11 +1075,15 @@ def render(state):
         # The split tree's own counts only mean anything while it is being
         # walked; past that the phase line carries the progress.
         if state.phase == "splitting":
-            completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}")
-        completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
+            completion_lines.append(
+                "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
+            )
+        completion_lines.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({pct:5.1f}%)")
         completion_lines.append(" " * LABEL_W + f"[{bar}]")
     else:
-        completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)")
+        completion_lines.append(
+            "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)"
+        )
 
     # --- box 2: thread occupancy ---
     thread_lines = []
@@ -1199,7 +1206,6 @@ def render(state):
     if state.phase == "splitting":
         lines.append("")
         if state.tree_root is not None:
-            lines.append("tree")
             render_tree(
                 state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
                 state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
