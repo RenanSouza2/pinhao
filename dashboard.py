@@ -90,18 +90,16 @@ RE_TASK_START = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|"
     r"(?:\s*THR\s+(?P<thr>\d+)\s+SUM\s+\d+(?:\s+MEM\s+(?P<mem>\d+))?)?"
 )
-RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur>[\d.]+)\s*$")
+RE_TASK_END = re.compile(_TASK_ID)
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 # The leading [ts] is optional: the config lines it shares this shape with
 # don't carry one, nor do logs from a build predating it.
 RE_PHASE = re.compile(r"(?:\[\s*(?P<ts>[\d.]+)\]\s*)?(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
-RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
-RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
-RE_N_PROCESS = re.compile(r"n process\s*\|\s*(?P<n_process>\d+)")
-RE_MEM_LAUNCH = re.compile(r"mem launch\s*\|\s*(?P<mem_launch>\d+)")
-RE_MEM_MAX = re.compile(r"mem max\s*\|\s*(?P<mem_max>\d+)")
-RE_DISK_LOCK = re.compile(r"disk lock\s*\|\s*(?P<disk_lock>\d+)")
+# pi_tree's run configuration, all logged as "<label> | <int>".
+RE_CONFIG = re.compile(
+    r"(?P<name>piece size|run size|n process|mem launch|mem max|disk lock)\s*\|\s*(?P<val>\d+)"
+)
 
 # Leading task id of any per-task line, used only to advance the thread-time
 # accumulator to the newest log timestamp (see thread_tick).
@@ -215,7 +213,10 @@ def mark_active(node, delta):
         n = n.parent
 
 
-def mark_node_done(node):
+def mark_node_done(node, was_active=True):
+    """was_active=False for a node that was never marked active (no "begin"
+    line seen) - e.g. a fully-cached run where pi_tree() finds the result
+    already stored and returns before the scheduler runs."""
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
@@ -224,21 +225,8 @@ def mark_node_done(node):
     node.start_time = None
     node.term = None
     node.micro = None
-    mark_active(node, -1)
-
-
-def mark_node_done_from_cache(node):
-    """Like mark_node_done(), but for a node that was never marked active
-    (no "begin" line seen) - e.g. a fully-cached run where pi_tree() finds
-    the result already stored and returns before the scheduler runs."""
-    node.own_done = True
-    node.in_progress = False
-    node.task_idx = None
-    node.pid = None
-    node.threads = None
-    node.start_time = None
-    node.term = None
-    node.micro = None
+    if was_active:
+        mark_active(node, -1)
 
 
 def pi_process_running():
@@ -683,43 +671,29 @@ def handle_scheduler(state, content):
 
 
 def handle_phase(state, content):
-    m = RE_PIECE_SIZE.match(content)
+    m = RE_CONFIG.match(content)
     if m:
-        apply_piece_size(int(m.group("piece_size")))
-        if state.total_pieces is None and state.explicit_size is not None:
-            apply_index_max(state, get_index_max(state.explicit_size))
-        return
-
-    m = RE_RUN_SIZE.match(content)
-    if m:
-        # The log wins over --size, which only exists to fill the totals in one
-        # line earlier: a --size left over from an earlier run would otherwise
-        # size the tree, the progress bar and every ETA for the whole run.
-        # Rebuilds only on a real disagreement, so a matching --size keeps the
-        # tree it already built.
-        index_max = int(m.group("index_max"))
-        if state.total_pieces != index_max // PIECES_PER_LEAF:
-            apply_index_max(state, index_max)
-        return
-
-    m = RE_N_PROCESS.match(content)
-    if m:
-        state.n_process_logged = int(m.group("n_process"))
-        return
-
-    m = RE_MEM_LAUNCH.match(content)
-    if m:
-        state.mem_launch = int(m.group("mem_launch"))
-        return
-
-    m = RE_MEM_MAX.match(content)
-    if m:
-        state.mem_max = int(m.group("mem_max"))
-        return
-
-    m = RE_DISK_LOCK.match(content)
-    if m:
-        state.disk_lock_enabled = bool(int(m.group("disk_lock")))
+        name, val = m.group("name"), int(m.group("val"))
+        if name == "piece size":
+            apply_piece_size(val)
+            if state.total_pieces is None and state.explicit_size is not None:
+                apply_index_max(state, get_index_max(state.explicit_size))
+        elif name == "run size":
+            # The log wins over --size, which only exists to fill the totals in
+            # one line earlier: a --size left over from an earlier run would
+            # otherwise size the tree, the progress bar and every ETA for the
+            # whole run. Rebuilds only on a real disagreement, so a matching
+            # --size keeps the tree it already built.
+            if state.total_pieces != val // PIECES_PER_LEAF:
+                apply_index_max(state, val)
+        elif name == "n process":
+            state.n_process_logged = val
+        elif name == "mem launch":
+            state.mem_launch = val
+        elif name == "mem max":
+            state.mem_max = val
+        elif name == "disk lock":
+            state.disk_lock_enabled = bool(val)
         return
 
     m = RE_PHASE.match(content)
@@ -735,7 +709,7 @@ def handle_phase(state, content):
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
-            mark_node_done_from_cache(state.tree_root)
+            mark_node_done(state.tree_root, was_active=False)
     elif action == "display begin":
         set_phase(state, "displaying", ts)
     elif action == "display end":
@@ -863,7 +837,17 @@ def active_mem_estimate(node):
     return total
 
 
-def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, disk_lock_enabled=True, prefix="", is_last=True, is_root=True):
+# Everything render_tree needs that is the same for every node in the walk.
+TreeView = collections.namedtuple(
+    "TreeView",
+    "lines now avg_piece_dur avg_join_dur piece_events_by_depth join_events_by_depth"
+    " pid_rss disk_lock_enabled",
+)
+
+
+def render_tree(node, view, prefix="", is_last=True, is_root=True):
+    (lines, now, avg_piece_dur, avg_join_dur,
+     piece_events_by_depth, join_events_by_depth, pid_rss, disk_lock_enabled) = view
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
@@ -928,11 +912,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
-        render_tree(
-            child, lines, now, avg_piece_dur, avg_join_dur,
-            piece_events_by_depth, join_events_by_depth, pid_rss,
-            disk_lock_enabled, child_prefix, i == len(node.children) - 1, is_root=False,
-        )
+        render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False)
 
 
 def render_status_screen(state):
@@ -965,6 +945,35 @@ def post_split_done(state):
 
 
 BOX_MIN_WIDTH = 24
+
+
+def render_bar(width, counts, glyphs):
+    """A bracketed bar of `width` cells split between `glyphs` in proportion to
+    `counts`. Apportioned by largest remainder, so the segments always sum to
+    the full width and a segment is empty only when its count really is zero --
+    flooring each independently leaves a stray cell of the last glyph.
+
+    Rounds against the sum of counts, so an oversubscribed total (the tree
+    scheduler's first-slot exception can book past n_process) scales rather
+    than overflowing."""
+    total = sum(counts)
+    if total <= 0:
+        return "[" + glyphs[-1] * width + "]"
+    raw = [width * c / total for c in counts]
+    fills = [int(r) for r in raw]
+    order = sorted(range(len(counts)), key=lambda i: raw[i] - fills[i], reverse=True)
+    for i in order[:width - sum(fills)]:
+        fills[i] += 1
+    # Every non-zero count keeps a cell, taken from the largest segment: a
+    # progress bar must not read full while work remains, and one busy thread
+    # among many must not round away to nothing.
+    for i, c in enumerate(counts):
+        if c > 0 and fills[i] == 0:
+            donor = max(range(len(fills)), key=lambda k: fills[k])
+            if fills[donor] > 1:
+                fills[donor] -= 1
+                fills[i] += 1
+    return "[" + "".join(g * n for g, n in zip(glyphs, fills)) + "]"
 
 
 def render_box(title, rows, width):
@@ -1069,9 +1078,7 @@ def render(state):
         total_units = split_units + POST_SPLIT_UNITS
         done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
         pct = 100.0 * done_units / total_units
-        bar_width = done_bar_w
-        filled = int(bar_width * done_units / total_units)
-        bar = "#" * filled + "-" * (bar_width - filled)
+        bar = render_bar(done_bar_w, (done_units, total_units - done_units), "#-")
         # The split tree's own counts only mean anything while it is being
         # walked; past that the phase line carries the progress.
         if state.phase == "splitting":
@@ -1079,7 +1086,7 @@ def render(state):
                 "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
             )
         completion_lines.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({pct:5.1f}%)")
-        completion_lines.append(" " * LABEL_W + f"[{bar}]")
+        completion_lines.append(" " * LABEL_W + bar)
     else:
         completion_lines.append(
             "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)"
@@ -1116,21 +1123,10 @@ def render(state):
         thread_lines.append(threads_row)
 
     if thread_budget and threads_now is not None:
-        # Three segments over the thread budget: computing, held but parked on
-        # the lock or on I/O, and unbooked. Apportioned by largest remainder so
-        # they always sum to the full width -- plain truncation leaves a stray
-        # cell of "unbooked" when every thread is in fact booked.
-        bar_width = thread_bar_w
+        # Computing, held but parked on the lock or on I/O, and unbooked.
         parked = min(blocked_total, threads_now)
         counts = (threads_now - parked, parked, max(0, thread_budget - threads_now))
-        # node_can_launch's first-slot exception can book past n_process, so the
-        # bar scales to whichever is larger rather than overflowing its width.
-        scale = max(thread_budget, threads_now)
-        raw = [bar_width * c / scale for c in counts]
-        fills = [int(r) for r in raw]
-        for i in sorted(range(3), key=lambda i: raw[i] - fills[i], reverse=True)[:bar_width - sum(fills)]:
-            fills[i] += 1
-        thread_lines.append(" " * LABEL_W + "[" + "#" * fills[0] + "\u25cb" * fills[1] + "-" * fills[2] + "]")
+        thread_lines.append(" " * LABEL_W + render_bar(thread_bar_w, counts, "#\u25cb-"))
 
     if state.thread_span > 0:
         util = thread_util(state, now)
@@ -1160,10 +1156,8 @@ def render(state):
         held = " held" if est is not None and state.mem_launch and est >= state.mem_launch else ""
         ram_lines.append("workers:".ljust(LABEL_W) + f"{est_str}{limit_str}{held} | {real_str}")
     if ram_total is not None and ram_used is not None:
-        bar_width = ram_bar_w
-        filled = int(bar_width * min(ram_used, ram_total) / ram_total)
-        bar = "#" * filled + "-" * (bar_width - filled)
-        ram_lines.append(" " * LABEL_W + f"[{bar}]")
+        used = min(ram_used, ram_total)
+        ram_lines.append(" " * LABEL_W + render_bar(ram_bar_w, (used, ram_total - used), "#-"))
 
     # --- box 4: disk ---
     disk_lines = []
@@ -1206,11 +1200,11 @@ def render(state):
     if state.phase == "splitting":
         lines.append("")
         if state.tree_root is not None:
-            render_tree(
-                state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
+            render_tree(state.tree_root, TreeView(
+                lines, now, avg_piece_dur, avg_join_dur,
                 state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
                 state.disk_lock_enabled is not False,
-            )
+            ))
         elif state.tree_skipped_reason:
             lines.append(f"tree: {state.tree_skipped_reason}")
 
