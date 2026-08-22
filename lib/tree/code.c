@@ -36,6 +36,13 @@ STRUCT(span)
     uint64_t depth;
 };
 
+// node_can_launch verdicts. HALT is the head-of-line barrier: a node that
+// cannot launch even with the first slot free stops the whole walk, so no
+// smaller task takes the memory it is waiting on.
+#define LAUNCH_SKIP 0
+#define LAUNCH_TAKE 1
+#define LAUNCH_HALT 2
+
 // What node_can_launch decided about a node.
 STRUCT(tree_plan)
 {
@@ -390,21 +397,21 @@ static bool node_is_open(node_p n)
     return !n->processing;
 }
 
-static bool node_set_plan(node_p n, uint64_t mem_cost, uint64_t threads)
+static uint64_t node_set_plan(node_p n, uint64_t mem_cost, uint64_t threads)
 {
     n->plan = (tree_plan_t){
         .mem_cost = mem_cost,
         .threads = threads,
         .is_noop = false
     };
-    return true;
+    return LAUNCH_TAKE;
 }
 
-static bool node_can_launch(tree_scheduler_p s, node_p n)
+static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
 {
     if(!node_is_open(n))
     {
-        return false;
+        return LAUNCH_SKIP;
     }
 
     if(node_is_stored(n))
@@ -412,17 +419,17 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
         n->plan = (tree_plan_t){
             .is_noop = true
         };
-        return true;
+        return LAUNCH_TAKE;
     }
 
     if(!scheduler_has_threads(s))
     {
-        return false;
+        return LAUNCH_SKIP;
     }
 
     if(!node_is_ready(n))
     {
-        return false;
+        return LAUNCH_SKIP;
     }
 
     uint64_t mem_cost = node_estimate_memory(n);
@@ -434,16 +441,23 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
 
     if(!scheduler_at_first_slot(s))
     {
-        return false;
+        return LAUNCH_SKIP;
     }
 
     // Past mem_solo the task runs alone: no other task may be holding memory
     // when it starts. A task costing more than mem_solo by itself still
     // launches once the scheduler is empty -- nothing else can free memory for
     // it, so refusing would stall the run for good.
+    //
+    // Refusing here halts the walk instead of skipping the node: this node
+    // already holds the first slot, so anything the walk found deeper would
+    // only book more memory and push the launch further away. Nothing launches
+    // until the running tasks release enough memory for this one. The
+    // scheduler always has a task to wait on when this fires -- an empty
+    // scheduler takes the branch above and launches.
     if(scheduler_over_mem_solo(s, mem_cost) && !scheduler_is_empty(s))
     {
-        return false;
+        return LAUNCH_HALT;
     }
 
     // Full width only for a node that overshoots mem_max: that one is what
@@ -455,17 +469,26 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
 }
 
 // Walks the tree for a node the policy will take, deepest-first and child 0
-// before child 1. Descends into a node only while it is open.
-static node_p get_next_node(tree_scheduler_p s, node_p n)
+// before child 1. Descends into a node only while it is open. Writes the node
+// to *out_n only on LAUNCH_TAKE; LAUNCH_HALT ends the walk outright, so no
+// other node is launched this round.
+static uint64_t get_next_node(node_p *out_n, tree_scheduler_p s, node_p n)
 {
-    if(node_can_launch(s, n))
+    uint64_t verdict = node_can_launch(s, n);
+    if(verdict == LAUNCH_TAKE)
     {
-        return n;
+        *out_n = n;
+        return LAUNCH_TAKE;
+    }
+
+    if(verdict == LAUNCH_HALT)
+    {
+        return LAUNCH_HALT;
     }
 
     if(!node_is_open(n))
     {
-        return NULL;
+        return LAUNCH_SKIP;
     }
 
     for(uint64_t i=0; i<2; i++)
@@ -480,14 +503,14 @@ static node_p get_next_node(tree_scheduler_p s, node_p n)
             n->children[i].n = node_expand(n, i);
         }
 
-        node_p n_next = get_next_node(s, n->children[i].n);
-        if(n_next)
+        verdict = get_next_node(out_n, s, n->children[i].n);
+        if(verdict != LAUNCH_SKIP)
         {
-            return n_next;
+            return verdict;
         }
     }
 
-    return NULL;
+    return LAUNCH_SKIP;
 }
 
 static void node_process(node_p n, uint64_t index)
@@ -657,8 +680,8 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
     {
         while(scheduler_has_slot(&s))
         {
-            node_p n = get_next_node(&s, n_root);
-            if(n == NULL)
+            node_p n = NULL;
+            if(get_next_node(&n, &s, n_root) != LAUNCH_TAKE)
             {
                 break;
             }
