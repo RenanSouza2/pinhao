@@ -105,6 +105,13 @@ BAR_ON = "\x1b[38;2;110;128;184m"
 # weight: a bar is already a loud shape, so the tone alone carries it.
 BAR_ALERT = "\x1b[38;2;224;122;95m"
 
+# The mid-limit mark, in the amber SEVERITY_STOPS reaches at 0.70. Sharing the
+# ramp's own tone puts the memory tiers on the escalation the bar colour walks:
+# default foreground, amber, coral - a ladder rather than three unrelated
+# rules. It is IO_ATTN_ON's hue, but that one only ever marks a micro-phase in
+# the tree, so the two never sit on the same reading.
+BAR_WARN = "\x1b[38;2;201;166;107m"
+
 # Marks laid on a bar: a dotted rule for a threshold, a half cell for a
 # measured value. Shape says which kind of reading it is, so colour is left
 # free to say how hard the threshold is.
@@ -182,7 +189,7 @@ RE_PHASE = re.compile(r"(?:\[\s*(?P<ts>[\d.]+)\]\s*)?(?P<action>.+?)\s*\|(?:\s*(
 
 # pi_tree's run configuration, all logged as "<label> | <int>".
 RE_CONFIG = re.compile(
-    r"(?P<name>piece size|run size|n process|mem launch|mem max|disk lock)\s*\|\s*(?P<val>\d+)"
+    r"(?P<name>piece size|run size|n process|mem launch|mem max|mem solo|disk lock)\s*\|\s*(?P<val>\d+)"
 )
 
 # Leading task id of any per-task line, used only to advance the thread-time
@@ -534,7 +541,8 @@ class State:
         self.n_process_logged = None  # from the log's "n process" line, after pi_tree's clamp to core count
         self.explicit_size = explicit_size
         self.mem_launch = None  # new tasks launch only while usage is below this
-        self.mem_max = None  # a launched task may overshoot up to here, never past
+        self.mem_max = None  # the first slot may overshoot up to here beside running tasks
+        self.mem_solo = None  # past here the first slot runs only with nothing else running
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.pieces_done = 0
         self.joins_done = 0
@@ -831,6 +839,8 @@ def handle_phase(state, content):
             state.mem_launch = val
         elif name == "mem max":
             state.mem_max = val
+        elif name == "mem solo":
+            state.mem_solo = val
         elif name == "disk lock":
             state.disk_lock_enabled = bool(val)
         return
@@ -1131,8 +1141,9 @@ def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks
 
     `ticks` are (value, glyph, tint) triples in the same units as `counts`,
     each laid on the bar at its own position and each widening it by one cell.
-    Unlike `mark` they may sit on either bracket, since a threshold the reading
-    has not reached and one it cannot exceed are both worth seeing."""
+    Unlike `mark` they may sit on either bracket; a caller whose scale ends on
+    one of its own thresholds is better off dropping that tick, since the
+    bracket there already says the same thing."""
     tints = colour if isinstance(colour, tuple) else (BAR_ON if colour is None else colour,) * len(counts)
     total = sum(counts)
     if total <= 0:
@@ -1214,9 +1225,14 @@ def render_box(title, rows, width):
     return out
 
 
+def visible_len(line):
+    """Width in columns, with ANSI SGR escapes counted as the zero they are."""
+    return len(ANSI_SGR_RE.sub("", line))
+
+
 def render_row(boxes, gap):
     """Lay rendered boxes side by side, padding the shorter to the taller."""
-    widths = [len(ANSI_SGR_RE.sub("", b[0])) for b in boxes]
+    widths = [visible_len(b[0]) for b in boxes]
     height = max(len(b) for b in boxes)
     return [
         (" " * gap).join(b[i] if i < len(b) else " " * w for b, w in zip(boxes, widths))
@@ -1336,41 +1352,83 @@ def _threads_rows(state, bar_w, now, budget, threads_now):
     return rows
 
 
-def _ram_rows(state, bar_w, ram_used, ram_total, pid_rss, est, real, over_launch):
+def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over_launch):
     rows = []
+    # The box's top right corner reads whether the scheduler can still admit
+    # work: "free" while usage is under mem_launch, "full" once it is not and
+    # nothing new starts until a running task ends - the state a stalling run
+    # sits in. A corner of its own rather than a place in any reading: nothing
+    # there can be displaced by it, and it is easier to catch out of the corner
+    # of an eye than a word set among numbers.
+    #
+    # Both words are four columns and the corner is right-aligned, so it only
+    # ever changes tone, never width or position. The tones are the memory
+    # ramp's own ends - the sage the bar is drawn in while it is calm, and the
+    # coral of ALERT_ON, bold as every other alert on the screen.
+    FLAG_W = 4
+    flag = (f"{ALERT_ON}full{ALERT_OFF}" if over_launch
+            else f"{MUL_ON}free{OFF}")
+
+    def corner(row):
+        """Right-align the flag on `row`, one column off the border."""
+        return row + " " * max(1, row_w - 1 - visible_len(row) - FLAG_W) + flag
+
     if ram_total is not None:
         row = "ram:".ljust(LABEL_W) + f"{fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
         if ram_used is not None:
             row += f" ({100.0 * ram_used / ram_total:4.1f}%)"
-        rows.append(row)
+        rows.append(corner(row))
     if pid_rss or state.tree_root is not None:
-        # "est / launch..max": below launch new tasks start, above it the
-        # scheduler holds back until a task ends; max is never crossed.
-        if state.mem_launch and state.mem_max:
-            limit_str = f" / {fmt_bytes(state.mem_launch)}..{fmt_bytes(state.mem_max)}"
-        elif state.mem_launch or state.mem_max:
-            limit_str = f" / {fmt_bytes(state.mem_launch or state.mem_max)}"
-        else:
-            limit_str = ""
-        # "held": usage has reached mem_launch, so nothing new launches until a
-        # task ends. Worth flagging - it is the state a stalling run sits in.
-        held = f" {ALERT_ON}held{ALERT_OFF}" if over_launch else ""
-        rows.append("workers:".ljust(LABEL_W)
-                    + f"{fmt_bytes(est)}{limit_str}{held} | {fmt_bytes(real)}")
-    mem_budget = state.mem_max or state.mem_launch
+        # Estimate then measured, in a task node's own scheme: the estimate is
+        # what the scheduler acts on, so it reads loud, and the measurement
+        # beside it stays grey. Same pair, same order, same colours as the
+        # label on a running node, so it reads the same wherever it appears.
+        reading = f"{fmt_bytes(est)} / {RSS_ON}{fmt_bytes(real)}{OFF}"
+        # Each tier is written with the bar's own limit glyph in the colour of
+        # its rule below, so a number here and a mark down there are one
+        # reading rather than two things to line up by eye.
+        tiers = "  ".join(
+            f"{colour}{BAR_LIMIT}{fmt_bytes(limit)}{OFF}"
+            for limit, colour in (
+                (state.mem_launch, ""), (state.mem_max, BAR_WARN), (state.mem_solo, BAR_ALERT),
+            ) if limit
+        )
+        row = "workers:".ljust(LABEL_W) + reading
+        # With no machine reading above it there is no corner to hang the flag
+        # in, so this row takes it and gives up the columns for it.
+        reserve = 0 if rows else FLAG_W + 1
+        # The tiers are what gives way in a box too narrow to hold everything:
+        # they are standing configuration, while the reading is the live part.
+        if tiers and visible_len(row) + 3 + visible_len(tiers) <= row_w - 1 - reserve:
+            row += f"   {tiers}"
+        rows.append(row if rows else corner(row))
+    mem_budget = state.mem_solo or state.mem_max or state.mem_launch
     if est is not None and mem_budget:
         # The bar ends at the budget and stretches only far enough to keep an
         # overshoot on screen, snapping back once it is gone: the limit marks
         # then sit still for as long as nothing is wrong, and moving marks are
         # themselves the signal that something is.
         scale = max(mem_budget, est, real or 0)
-        # A dotted rule at each limit: launch in the default foreground, max in
-        # coral, since one holds launches back and the other is the ceiling.
+        # A dotted rule at each limit, climbing the ramp's own tones: launch in
+        # the default foreground since crossing it only holds launches back,
+        # max in amber, and the solo ceiling in coral, a bar past which means
+        # the run has emptied out to a single task.
         ticks = []
-        if state.mem_launch and state.mem_launch != state.mem_max:
-            ticks.append((state.mem_launch, BAR_LIMIT, OFF))
-        if state.mem_max:
-            ticks.append((state.mem_max, BAR_LIMIT, BAR_ALERT))
+        drawn = set()
+        for limit, colour in ((state.mem_launch, OFF), (state.mem_max, BAR_WARN),
+                              (state.mem_solo, BAR_ALERT)):
+            # A limit at the end of the scale needs no rule: the bar stops
+            # there, so the bracket already draws it. It earns one back the
+            # moment a reading overshoots and the scale runs past it.
+            if limit and limit < scale and limit not in drawn:
+                drawn.add(limit)
+                ticks.append((limit, BAR_LIMIT, colour))
+        # Colour stays coolest through three quarters of mem_launch - the band
+        # where the scheduler is still launching freely - and ramps from there
+        # to mem_max, past which only a lone task may run. Both bounds are
+        # fractions of mem_budget, the denominator the reading is taken against.
+        calm = 0.75 * state.mem_launch / mem_budget if state.mem_launch else 0.0
+        alarm = state.mem_max / mem_budget if state.mem_max else 1.0
         # Measured RSS alongside the estimate the scheduler actually gates on:
         # the gap between them is the estimator being wrong, which is worth
         # seeing at the moment it happens rather than afterwards.
@@ -1378,7 +1436,7 @@ def _ram_rows(state, bar_w, ram_used, ram_total, pid_rss, est, real, over_launch
             ticks.append((real, BAR_MEASURED, OFF))
         rows.append(" " * LABEL_W + render_bar(
             bar_w - len(ticks), (est, scale - est), BAR_FULL + BAR_NONE,
-            colour=severity_colour(est / mem_budget), ticks=tuple(ticks),
+            colour=severity_colour(est / mem_budget, calm, alarm), ticks=tuple(ticks),
         ))
     elif ram_total is not None and ram_used is not None:
         # No budget in the log yet, so fall back to the machine's own usage.
@@ -1489,6 +1547,9 @@ def render(state):
     done_bar_w = max(10, left_w - 15)
     thread_bar_w = max(10, right_w - 15)
     ram_bar_w = max(10, left_w - 15)
+    # The full inner width of a row in the left box, matching render_box's own
+    # arithmetic: what a right-aligned flag has to align against.
+    ram_row_w = max(BOX_MIN_WIDTH, left_w - 2) - 1
     disk_bar_w = max(10, right_w - 15)
 
     est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
@@ -1503,7 +1564,7 @@ def render(state):
 
     completion_lines = _completion_rows(state, done_bar_w)
     thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now)
-    ram_lines = _ram_rows(state, ram_bar_w, ram_used, ram_total, pid_rss, est, real, over_launch)
+    ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, ram_used, ram_total, pid_rss, est, real, over_launch)
     disk_lines = _disk_rows(state, disk_bar_w)
 
     inset = " " * BOX_INSET

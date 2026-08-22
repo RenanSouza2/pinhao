@@ -15,7 +15,7 @@
 
 
 [[maybe_unused]]
-static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
+static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max, uint64_t mem_solo)
 {
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
@@ -23,7 +23,7 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
         n_process = (uint64_t)n_proc_avail;
     }
 
-    flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
+    flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max, mem_solo);
     printf("\n\n");
     tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
     TIME_SETUP
@@ -45,11 +45,10 @@ int main(void)
     // };
     // araucaria_disk_config_set(&config);
 
-    // Tasks are launched while estimated worker memory is below mem_launch;
-    // a launched task may overshoot up to mem_max, which is never crossed.
-    uint64_t mem_launch = U64(4) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(6) * 1024 * 1024 * 1024;
-    pi(64'000'000, 16, mem_launch, mem_max);
+    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+    uint64_t mem_solo = U64(25) * 1024 * 1024 * 1024;
+    pi(128'000'000, 16, mem_launch, mem_max, mem_solo);
 
     printf("\n");
     return 0;
