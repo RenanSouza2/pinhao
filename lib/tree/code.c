@@ -340,21 +340,9 @@ static bool scheduler_over_mem_max(tree_scheduler_p s, uint64_t mem_cost)
     return s->total_mem_cost + mem_cost >= s->mem_max;
 }
 
-// Whether a task would push usage past the co-residency ceiling: past this
-// point the task may only run with the scheduler empty.
-static bool scheduler_over_mem_solo(tree_scheduler_p s, uint64_t mem_cost)
-{
-    return s->total_mem_cost + mem_cost >= s->mem_solo;
-}
-
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 {
-    if(s->total_mem_cost >= s->mem_launch)
-    {
-        return false;
-    }
-
-    return !scheduler_over_mem_max(s, mem_cost);
+    return s->total_mem_cost + mem_cost < s->mem_max;
 }
 
 static uint64_t scheduler_free_threads(tree_scheduler_p s)
@@ -370,6 +358,11 @@ static uint64_t scheduler_free_threads(tree_scheduler_p s)
 static bool scheduler_has_threads(tree_scheduler_p s)
 {
     return scheduler_free_threads(s) > 0;
+}
+
+static bool scheduler_can_launch(tree_scheduler_p s)
+{
+    return s->total_mem_cost < s->mem_launch;
 }
 
 static uint64_t node_threads(node_p n, uint64_t max_threads)
@@ -407,7 +400,7 @@ static uint64_t node_set_plan(node_p n, uint64_t mem_cost, uint64_t threads)
     return LAUNCH_TAKE;
 }
 
-static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
+static uint64_t node_can_launch_rec(tree_scheduler_p s, node_p n)
 {
     if(!node_is_open(n))
     {
@@ -422,11 +415,6 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
         return LAUNCH_TAKE;
     }
 
-    if(!scheduler_has_threads(s))
-    {
-        return LAUNCH_SKIP;
-    }
-
     if(!node_is_ready(n))
     {
         return LAUNCH_SKIP;
@@ -439,39 +427,40 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
         return node_set_plan(n, mem_cost, threads);
     }
 
+    if(node_is_leaf(n))
+    {
+        return LAUNCH_HALT;
+    }
+
     if(!scheduler_at_first_slot(s))
     {
         return LAUNCH_SKIP;
     }
 
-    // Past mem_solo the task runs alone: no other task may be holding memory
-    // when it starts. A task costing more than mem_solo by itself still
-    // launches once the scheduler is empty -- nothing else can free memory for
-    // it, so refusing would stall the run for good.
-    //
-    // Refusing here halts the walk instead of skipping the node: this node
-    // already holds the first slot, so anything the walk found deeper would
-    // only book more memory and push the launch further away. Nothing launches
-    // until the running tasks release enough memory for this one. The
-    // scheduler always has a task to wait on when this fires -- an empty
-    // scheduler takes the branch above and launches.
-    if(scheduler_over_mem_solo(s, mem_cost) && !scheduler_is_empty(s))
+    if(!scheduler_is_empty(s))
     {
-        return LAUNCH_HALT;
+        return LAUNCH_SKIP;
     }
 
-    // Full width only for a node that overshoots mem_max: that one is what
-    // everything else is waiting on. A node merely held back by mem_launch
-    // takes the ordinary allotment.
-    uint64_t max_threads = scheduler_over_mem_max(s, mem_cost) ? s->n_process : scheduler_free_threads(s);
-    uint64_t threads = node_threads(n, max_threads);
+    uint64_t threads = node_threads(n, s->n_process);
     return node_set_plan(n, mem_cost, threads);
 }
 
-// Walks the tree for a node the policy will take, deepest-first and child 0
-// before child 1. Descends into a node only while it is open. Writes the node
-// to *out_n only on LAUNCH_TAKE; LAUNCH_HALT ends the walk outright, so no
-// other node is launched this round.
+static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
+{
+    if(!scheduler_has_threads(s))
+    {
+        return LAUNCH_SKIP;
+    }
+
+    if(!scheduler_can_launch(s))
+    {
+        return LAUNCH_SKIP;
+    }
+
+    return node_can_launch_rec(s, n);
+}
+
 static uint64_t get_next_node(node_p *out_n, tree_scheduler_p s, node_p n)
 {
     uint64_t verdict = node_can_launch(s, n);
