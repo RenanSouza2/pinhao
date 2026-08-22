@@ -340,36 +340,56 @@ def pi_process_running():
         return False
 
 
-def get_run_start_time():
-    """Wall-clock start time of the running pi process, taken from the oldest
-    pid matching the run: workers are fork()ed (not exec'd) from the same
-    binary, so they all share its command line and pgrep -f matches every
-    one of them - the oldest pid is the original parent."""
+def _oldest_run_pid_and_etime():
+    """(pid, etimes) of the run's original process, taken from the oldest pid
+    matching the run: workers are fork()ed (not exec'd) from the same binary,
+    so they all share its command line and pgrep -f matches every one of
+    them - the oldest pid is the original parent."""
     try:
         result = subprocess.run(
             ["pgrep", "-f", r"src/(main|debug)\.o"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
-        return None
+        return None, None
     if result.returncode != 0:
-        return None
+        return None, None
     pids = [p for p in result.stdout.split() if p]
     if not pids:
-        return None
+        return None, None
     try:
         out = subprocess.run(
-            ["ps", "-o", "etimes=", "-p", ",".join(pids)],
+            ["ps", "-o", "pid=,etimes=", "-p", ",".join(pids)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
-        return None
+        return None, None
     if out.returncode != 0:
-        return None
-    etimes = [int(x) for x in out.stdout.split() if x.strip()]
-    if not etimes:
-        return None
-    return time.time() - max(etimes)
+        return None, None
+    best_pid, best_etime = None, -1
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pid, etime = int(parts[0]), int(parts[1])
+            if etime > best_etime:
+                best_pid, best_etime = pid, etime
+    return best_pid, best_etime
+
+
+def get_run_start_time():
+    """Wall-clock start time of the running pi process - see
+    _oldest_run_pid_and_etime()."""
+    _, etime = _oldest_run_pid_and_etime()
+    return time.time() - etime if etime is not None else None
+
+
+def get_root_pid():
+    """pid of the run's original process. During 'dividing'/'displaying' the
+    split tree is done and every forked worker has exited (see pi_finish in
+    lib/big/code.c and pi() in src/main.c), so this is the one process left
+    doing the work those phases describe."""
+    pid, _ = _oldest_run_pid_and_etime()
+    return pid
 
 
 _SYSCTL_INT_CACHE = {}
@@ -542,6 +562,7 @@ class State:
         self.process_gone_since = None  # time.time() process_running first went False since done
         self.ever_saw_process = False
         self.run_start_time = None  # wall-clock start of the actual pi process, from get_run_start_time()
+        self.root_pid = None  # the run's own pid, from get_root_pid() - only looked up once needed
         self.done = False
 
     def touch(self):
@@ -559,7 +580,15 @@ def active_threads(state):
     """Threads currently booked by running tasks. Falls back to the
     scheduler's own "active threads" line while no "task start" line has
     carried THR yet - either the dashboard attached mid-run, or the run comes
-    from a build that doesn't log it."""
+    from a build that doesn't log it.
+
+    "dividing" and "displaying" run entirely inside the root process on its
+    own threads (flt_num_div_threads / flt_num_display_dec_threads), not
+    through the fork()ed task scheduler, so state.active is empty for the
+    whole phase - report the full thread budget instead of reading that as
+    zero threads working."""
+    if state.phase in ("dividing", "displaying"):
+        return thread_budget(state)
     if not state.threads_seen:
         return state.threads_reported
     return sum(entry.get("threads") or 0 for entry in state.active.values())
@@ -1434,6 +1463,13 @@ def render(state):
 
     ram_used, ram_total = get_system_ram()
     pid_rss = get_pid_rss(state.active.keys())
+    if not pid_rss and state.phase in ("dividing", "displaying"):
+        # No fork()ed workers left to read RSS from (see active_threads) - the
+        # root process is the one actually holding the memory these phases use.
+        if state.root_pid is None:
+            state.root_pid = get_root_pid()
+        if state.root_pid is not None:
+            pid_rss = get_pid_rss((state.root_pid,))
 
     # Geometry first: completion and threads share a row, ram spans beneath, so
     # each bar has to be sized to the column it lands in.
@@ -1456,6 +1492,10 @@ def render(state):
     disk_bar_w = max(10, right_w - 15)
 
     est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
+    if state.phase in ("dividing", "displaying"):
+        # No task scheduler booking exists once the split tree is done - "0"
+        # would read as a real reading of no memory in use, not as unknown.
+        est = None
     real = sum(pid_rss.values()) if pid_rss else None
     over_launch = bool(est is not None and state.mem_launch and est >= state.mem_launch)
     budget = thread_budget(state)
