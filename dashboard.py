@@ -25,38 +25,137 @@ TREE_PIECE_SIZE = None
 PIECES_PER_LEAF = None
 
 # Muted amber (#C9A66B) for the "loading"/"writing" micro-phases (actively
-# blocked in the I/O syscall). Not a full \x1b[0m reset: the screen
-# background is set once (SGR 48) when the alt-screen is entered and never
-# reapplied per frame, so a bare reset here would strip it for the rest of
-# the run. 39 (default foreground) clears just the color this pair set,
-# leaving the background alone.
+# blocked in the I/O syscall).
 IO_ATTN_ON = "\x1b[38;2;201;166;107m"
-IO_ATTN_OFF = "\x1b[39m"
 
-# Wine (#722F37), not vibrant red, to flag the "locking" micro-phase. 39
-# (default foreground) is enough to clear it - see IO_ATTN_OFF comment
-# above for why a bare reset is avoided.
+# What every colour below is cleared with. Never a bare \x1b[0m reset: the
+# screen background is set once (SGR 48) when the alt-screen is entered and
+# never reapplied per frame, so a full reset would strip it for the rest of
+# the run. 39 is "default foreground" - it clears the colour and leaves the
+# background alone.
+OFF = "\x1b[39m"
+
+# Wine (#722F37), not vibrant red, to flag the "locking" micro-phase.
 LOCK_ON = "\x1b[38;2;114;47;55m"
-LOCK_OFF = "\x1b[39m"
 
 # Sage (#6B8E6B), a muted green rather than a vibrant one, for the
-# "multiplying" micro-phase - same 39-only reset as LOCK_OFF.
+# "multiplying" micro-phase.
 MUL_ON = "\x1b[38;2;107;142;107m"
-MUL_OFF = "\x1b[39m"
 
-# Dusty lavender (#9B84B8) on a tree node's id once it's ready to be
-# scheduled (both children done, not yet forked) - same 39-only reset as
-# LOCK_OFF above.
-READY_ID_ON = "\x1b[38;2;155;132;184m"
-READY_ID_OFF = "\x1b[39m"
+# Tree node states on two axes. Hue says what kind of node it is - deep teal
+# for work behind you, violet for work still ahead, sky for work available now,
+# muted blue for the trail down to a running worker, and MUL_ON's green on the
+# node that is running - the same green its "multiplying" phase is written in,
+# so the node and the work it is doing read as one thing. Green belongs to the
+# running node alone: a done node in the same hue read as still working.
+#
+# Brightness says how much to care, and ready deliberately outranks the trail:
+# a node waiting only on a free slot is the next thing that will happen, while
+# an ancestor of a running one is just a breadcrumb. Ready and the trail share
+# a family, so they are held far apart within it - saturated sky against a
+# desaturated periwinkle. At the other end NODE_DONE and NODE_PENDING are
+# within 0.5 of each other in contrast against the #0A143C ground, too close
+# to tell apart by weight - hue alone separates them, so neither has to get
+# loud and the boundary between the two draws the frontier of the computation.
+# Teal against violet is the widest hue gap available down at that brightness
+# once green is spoken for, and that gap is the frontier's whole legibility.
+# A ready node dims to NODE_STARVED while the scheduler has no slot to give it,
+# so the whole launch queue dims when the machine is full and brightens the
+# moment something frees up.
+NODE_RUNNING = "\x1b[38;2;107;142;107m"  # #6B8E6B  green,    contrast  4.84
+NODE_READY = "\x1b[38;2;99;180;228m"     # #63B4E4  sky,                7.79
+NODE_ACTIVE = "\x1b[38;2;142;156;200m"   # #8E9CC8  blue,               6.57
+NODE_DONE = "\x1b[38;2;39;92;107m"       # #275C6B  teal,               2.40
+NODE_STARVED = "\x1b[38;2;154;127;192m"  # #9A7FC0  violet,             5.24
+NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,             1.88
 
-# Steel blue (#6E80B8) on a done node's id - deliberately closer to the
-# #0A143C screen background than READY_ID_ON, so finished work recedes
-# instead of drawing the eye.
-DONE_ID_ON = "\x1b[38;2;110;128;184m"
-DONE_ID_OFF = "\x1b[39m"
+# Coral (#E07A5F) for the few states that mean something is going wrong: the
+# run has gone quiet, the scheduler has stopped admitting work, or the disk
+# lock is contended more often than not. Spent sparingly on purpose - a colour
+# that is usually absent carries far more than one that is always on screen.
+# Bold, so it clears with 22;39 rather than the shared OFF.
+ALERT_ON = "\x1b[1;38;2;224;122;95m"
+ALERT_OFF = "\x1b[22;39m"
+
+# Neutral grey (#7C808C) for a task's measured RSS, set against the estimate
+# beside it in the default foreground: the estimate is what the scheduler acts
+# on, the measurement is the check on it, so only one of the pair reads loud.
+RSS_ON = "\x1b[38;2;124;128;140m"
+
+# Cyan (#4396A2) on a task holding more than one thread slot. Flat across every
+# width: the badge says a task is wide, the number beside it says how wide.
+# The only cyan on the dashboard, and cool on purpose - every warm hue here
+# already means something is wrong (coral alert, wine lock, amber I/O), so a
+# warm badge would read as a condition rather than as a count.
+MULTI_THR_ON = "\x1b[38;2;67;150;162m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Bar segments, heaviest to lightest: in use, held but not working, nothing.
+BAR_FULL = "\u2588"
+BAR_HELD = "\u2591"
+BAR_NONE = " "
+
+# Slate (#6E80B8) over the whole bar, the same tone a done node's id gets: a
+# full-width run of \u2588 in the default foreground is the highest-contrast shape
+# on the screen, which puts the loudest element on the least surprising state.
+BAR_ON = "\x1b[38;2;110;128;184m"
+
+# The hard-limit mark on a bar, in the coral of ALERT_ON without its bold
+# weight: a bar is already a loud shape, so the tone alone carries it.
+BAR_ALERT = "\x1b[38;2;224;122;95m"
+
+# The mid-limit mark, in the amber SEVERITY_STOPS reaches at 0.70. Sharing the
+# ramp's own tone puts the memory tiers on the escalation the bar colour walks:
+# default foreground, amber, coral - a ladder rather than three unrelated
+# rules. It is IO_ATTN_ON's hue, but that one only ever marks a micro-phase in
+# the tree, so the two never sit on the same reading.
+BAR_WARN = "\x1b[38;2;201;166;107m"
+
+# Marks laid on a bar: a dotted rule for a threshold, a half cell for a
+# measured value. Shape says which kind of reading it is, so colour is left
+# free to say how hard the threshold is.
+BAR_LIMIT = "\u2506"
+BAR_MEASURED = "\u258c"
+
+# The progress cursor pulses in length as log lines arrive and rests at full
+# height once they stop. Stepped by log arrivals, never by the redraw clock:
+# an animation tied to frames keeps moving right through a stall, which is
+# exactly when it must not. Oscillating rather than cycling - \u2577 back to \u2575
+# would read as the mark hopping, not as one mark breathing.
+CURSOR_PULSE = ("\u2575", "\u2502", "\u2577", "\u2502")
+CURSOR_REST = "\u2502"
+
+# Ramp for a bar whose value is itself the worry: calm, noticing, worried, bad.
+# Interpolated rather than stepped, so a ratio creeping up drifts in hue instead
+# of jumping a threshold - the movement is the signal, not the crossing.
+# Biased cool: the lower half of any reading is fine, so green holds to 0.50
+# and the whole warm escalation happens across the top half. A ramp that starts
+# warming immediately spends its loudest tones on ordinary conditions.
+SEVERITY_STOPS = (
+    (0.00, (107, 142, 107)),  # sage, as MUL_ON
+    (0.50, (122, 146, 102)),  # sage, barely warmed - still reads green
+    (0.70, (201, 166, 107)),  # amber, as IO_ATTN_ON
+    (0.85, (224, 122, 95)),   # coral, as ALERT_ON
+    (1.00, (196, 80, 79)),    # deep red
+)
+
+
+def severity_colour(frac, calm=0.0, alarm=1.0):
+    """`calm` and `alarm` remap the reading before it hits the ramp: at or below
+    calm it takes the coolest tone, at or above alarm the hottest. One ramp then
+    serves measures whose comfortable range differs - a 35% lock miss ratio is
+    already worth noticing, 35% memory use is not."""
+    span = alarm - calm
+    frac = 0.0 if span <= 0 else (frac - calm) / span
+    frac = min(max(frac, 0.0), 1.0)
+    for (lo, c_lo), (hi, c_hi) in zip(SEVERITY_STOPS, SEVERITY_STOPS[1:]):
+        if frac <= hi:
+            t = 0.0 if hi == lo else (frac - lo) / (hi - lo)
+            r, g, b = (round(a + (z - a) * t) for a, z in zip(c_lo, c_hi))
+            return f"\x1b[38;2;{r};{g};{b}m"
+    r, g, b = SEVERITY_STOPS[-1][1]
+    return f"\x1b[38;2;{r};{g};{b}m"
 
 
 def apply_piece_size(piece_size):
@@ -69,7 +168,7 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
-    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B))?"
+    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B)(?:\s+(?P<lock>HIT|MISS))?)?"
 )
 RE_PIECE = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
@@ -79,11 +178,14 @@ RE_TASK_END = re.compile(_TASK_ID + r"\s*(?P<action>.+?)\s*\|(?:.*\|)?\s*(?P<dur
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
-RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
-RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
-RE_MEM_LAUNCH = re.compile(r"mem launch\s*\|\s*(?P<mem_launch>\d+)")
-RE_MEM_MAX = re.compile(r"mem max\s*\|\s*(?P<mem_max>\d+)")
-RE_DISK_LOCK = re.compile(r"disk lock\s*\|\s*(?P<disk_lock>\d+)")
+# pi_tree's run configuration, all logged as "<label> | <int>".
+RE_CONFIG = re.compile(
+    r"(?P<name>piece size|run size|n process|mem launch|mem max|mem solo|disk lock)\s*\|\s*(?P<val>\d+)"
+)
+
+# Leading task id of any per-task line, used only to advance the thread-time
+# accumulator to the newest log timestamp (see thread_tick).
+RE_TS = re.compile(_TASK_ID)
 
 
 def get_index_max(size, piece_size=None):
@@ -110,8 +212,8 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "pid", "start_time", "active_count", "parent", "children",
-        "mem_estimate", "join_term", "join_micro",
+        "own_done", "in_progress", "task_idx", "pid", "threads", "start_time", "active_count", "parent", "children",
+        "mem_estimate", "term", "micro",
     )
 
     def __init__(self, i0, depth, kind, n2, parent):
@@ -125,13 +227,14 @@ class TreeNode:
         self.in_progress = False
         self.task_idx = None
         self.pid = None
+        self.threads = None  # threads this node's task was granted, from its "task start" line
         self.start_time = None
         self.active_count = 0
         self.parent = parent
         self.children = []
-        self.mem_estimate = None  # bytes, set when a "joining" line is seen for this node
-        self.join_term = None  # e.g. "P1xP2", from a split_*_res_join "mul ..." header line
-        self.join_micro = None  # e.g. "loading P1" / "multiplying", from a split_*_res_join phase line
+        self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
+        self.term = None  # e.g. "P1xP2", from a join's "mul ..." header line; leaves have none
+        self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
 
 
 def _build_span(i0, span, depth, parent, by_key):
@@ -197,23 +300,12 @@ def mark_node_done(node):
     node.in_progress = False
     node.task_idx = None
     node.pid = None
+    node.threads = None
     node.start_time = None
-    node.join_term = None
-    node.join_micro = None
-    mark_active(node, -1)
-
-
-def mark_node_done_from_cache(node):
-    """Like mark_node_done(), but for a node that was never marked active
-    (no "begin" line seen) - e.g. a fully-cached run where pi_tree() finds
-    the result already stored and returns before the scheduler runs."""
-    node.own_done = True
-    node.in_progress = False
-    node.task_idx = None
-    node.pid = None
-    node.start_time = None
-    node.join_term = None
-    node.join_micro = None
+    node.term = None
+    node.micro = None
+    if was_active:
+        mark_active(node, -1)
 
 
 def pi_process_running():
@@ -228,36 +320,56 @@ def pi_process_running():
         return False
 
 
-def get_run_start_time():
-    """Wall-clock start time of the running pi process, taken from the oldest
-    pid matching the run: workers are fork()ed (not exec'd) from the same
-    binary, so they all share its command line and pgrep -f matches every
-    one of them - the oldest pid is the original parent."""
+def _oldest_run_pid_and_etime():
+    """(pid, etimes) of the run's original process, taken from the oldest pid
+    matching the run: workers are fork()ed (not exec'd) from the same binary,
+    so they all share its command line and pgrep -f matches every one of
+    them - the oldest pid is the original parent."""
     try:
         result = subprocess.run(
             ["pgrep", "-f", r"src/(main|debug)\.o"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
-        return None
+        return None, None
     if result.returncode != 0:
-        return None
+        return None, None
     pids = [p for p in result.stdout.split() if p]
     if not pids:
-        return None
+        return None, None
     try:
         out = subprocess.run(
-            ["ps", "-o", "etimes=", "-p", ",".join(pids)],
+            ["ps", "-o", "pid=,etimes=", "-p", ",".join(pids)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
-        return None
+        return None, None
     if out.returncode != 0:
-        return None
-    etimes = [int(x) for x in out.stdout.split() if x.strip()]
-    if not etimes:
-        return None
-    return time.time() - max(etimes)
+        return None, None
+    best_pid, best_etime = None, -1
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pid, etime = int(parts[0]), int(parts[1])
+            if etime > best_etime:
+                best_pid, best_etime = pid, etime
+    return best_pid, best_etime
+
+
+def get_run_start_time():
+    """Wall-clock start time of the running pi process - see
+    _oldest_run_pid_and_etime()."""
+    _, etime = _oldest_run_pid_and_etime()
+    return time.time() - etime if etime is not None else None
+
+
+def get_root_pid():
+    """pid of the run's original process. During 'dividing'/'displaying' the
+    split tree is done and every forked worker has exited (see pi_finish in
+    lib/big/code.c and pi() in src/main.c), so this is the one process left
+    doing the work those phases describe."""
+    pid, _ = _oldest_run_pid_and_etime()
+    return pid
 
 
 _SYSCTL_INT_CACHE = {}
@@ -398,7 +510,8 @@ class State:
         self.n_process = n_process
         self.explicit_size = explicit_size
         self.mem_launch = None  # new tasks launch only while usage is below this
-        self.mem_max = None  # a launched task may overshoot up to here, never past
+        self.mem_max = None  # the first slot may overshoot up to here beside running tasks
+        self.mem_solo = None  # past here the first slot runs only with nothing else running
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.pieces_done = 0
         self.pieces_from_cache = 0
@@ -408,10 +521,11 @@ class State:
         self.join_events = collections.deque(maxlen=2000)  # (time, dur)
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
-        self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
-        self.lock_count = 0
+        self.lock_requests = 0  # "locked" lines seen, across all workers
+        self.lock_misses = 0  # of those, the ones that found the lock already held
+        self.lock_tokens_seen = False  # a "locked" line carried HIT/MISS (older builds log neither)
         self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
-        self.active = {}  # pid -> {"start", "depth", "i0"}
+        self.active = {}  # pid -> {"start", "depth", "i0", "threads"}
         self.active_max = 0
         self.phase = "splitting"
         self.phase_start_time = None  # set by set_phase() on every transition away from "splitting"
@@ -422,6 +536,7 @@ class State:
         self.process_gone_since = None  # time.time() process_running first went False since done
         self.ever_saw_process = False
         self.run_start_time = None  # wall-clock start of the actual pi process, from get_run_start_time()
+        self.root_pid = None  # the run's own pid, from get_root_pid() - only looked up once needed
         self.done = False
 
     def touch(self):
@@ -464,6 +579,7 @@ def handle_node_process(state, content):
             tree_node.task_idx = idx
             tree_node.pid = pid
             tree_node.start_time = ts
+            attach_task_plan(state, pid, tree_node)
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
@@ -512,15 +628,16 @@ def handle_piece(state, content):
             mark_node_done(tree_node)
 
 
-def handle_join_phase(state, content):
-    """split_span_res_join / split_big_res_join log their own header ("mul
-    P1xP2") and phase (loading/loaded/multiplying/.../written/locking/locked)
-    lines with the same [idx][pid] | i0 n2 depth shape as node_process, so
-    RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
+def handle_phase_line(state, content):
+    """split_piece, split_span_res_join and split_big_res_join log phase lines
+    (evaluating/loading/multiplying/.../written/locking/locked) and, for joins
+    only, a "mul P1xP2" header, all in the same [idx][pid] | i0 n2 depth shape
+    as node_process, so RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
     "locking"/"locked" additionally maintain the set of pids currently
-    blocked waiting on the exclusive disk lock, and "locked" rolls into a
-    global lock-wait total (both tracked here, ahead of the tree lookup, so
+    blocked waiting on the exclusive disk lock, and "locked" counts the
+    request and, on MISS, the contention (all tracked here, ahead of the tree
+    lookup, so
     they aren't dropped on runs whose tree is too large to display - see
     TREE_NODE_CAP). These lines still fire even when the run's disk lock is
     compiled out (LOCK_DISK_IO undefined, see lib/big/code.c) - disk_lock()
@@ -533,14 +650,20 @@ def handle_join_phase(state, content):
     action = re.sub(r"\s+", " ", m.group("action").strip())
     pid = int(m.group("pid"))
 
+    entry = state.active.get(pid)
+    if entry is not None:
+        entry["micro"] = action
+
     if action == "locking":
         state.locking_pids.add(pid)
     elif action == "locked":
         state.locking_pids.discard(pid)
-        dur = m.group("dur")
-        if dur is not None:
-            state.lock_wait_total += float(dur)
-            state.lock_count += 1
+        state.lock_requests += 1
+        token = m.group("lock")
+        if token is not None:
+            state.lock_tokens_seen = True
+            if token == "MISS":
+                state.lock_misses += 1
 
     if not state.tree_by_key:
         return
@@ -551,9 +674,9 @@ def handle_join_phase(state, content):
         return
     term = action.removeprefix("mul ")
     if term != action:
-        tree_node.join_term = term
+        tree_node.term = term
     else:
-        tree_node.join_micro = action
+        tree_node.micro = action
 
 
 def handle_task_start(state, content):
@@ -561,7 +684,21 @@ def handle_task_start(state, content):
     if not m:
         return
     pid = int(m.group("pid"))
-    state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
+    entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
+
+    mem = m.group("mem")
+    if mem is not None:
+        entry["mem"] = int(mem)
+
+    thr = m.group("thr")
+    if thr is not None:
+        if not state.threads_seen:
+            state.threads_seen = True
+            state.thread_last_ts = float(m.group("ts"))
+        entry["threads"] = int(thr)
+
+    if (thr is not None or mem is not None) and state.tree_by_key and entry.get("i0") is not None:
+        attach_task_plan(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
 
 
 def handle_task_end(state, content):
@@ -596,21 +733,6 @@ def handle_phase(state, content):
     if m:
         if state.total_pieces is None:
             apply_index_max(state, int(m.group("index_max")))
-        return
-
-    m = RE_MEM_LAUNCH.match(content)
-    if m:
-        state.mem_launch = int(m.group("mem_launch"))
-        return
-
-    m = RE_MEM_MAX.match(content)
-    if m:
-        state.mem_max = int(m.group("mem_max"))
-        return
-
-    m = RE_DISK_LOCK.match(content)
-    if m:
-        state.disk_lock_enabled = bool(int(m.group("disk_lock")))
         return
 
     m = RE_PHASE.match(content)
@@ -657,8 +779,8 @@ DISPATCH = {
     "pi": handle_phase,
     "split_span": handle_untracked,
     "split_big": handle_untracked,
-    "split_span_res_join": handle_join_phase,
-    "split_big_res_join": handle_join_phase,
+    "split_span_res_join": handle_phase_line,
+    "split_big_res_join": handle_phase_line,
 }
 
 
@@ -699,6 +821,59 @@ def depth_avg(events_by_depth, depth, fallback):
     return fallback
 
 
+def blocked_threads(state):
+    """Threads a worker holds but isn't computing on, split by why. A worker
+    waiting on the disk lock has all of them idle; one in a read or write has
+    all but the thread in the syscall. Anything else counts as working.
+
+    Read off each worker's latest phase line, kept per pid so it survives a run
+    whose tree is too large to display (see TREE_NODE_CAP)."""
+    waiting = 0
+    io = 0
+    for entry in state.active.values():
+        threads = entry.get("threads")
+        micro = entry.get("micro")
+        if not threads or micro is None:
+            continue
+        if micro == "locking":
+            waiting += threads
+        elif micro.startswith("loading") or micro == "writing":
+            io += threads - 1
+    return waiting, io
+
+
+def working_threads(state):
+    """Booked threads minus the ones parked on the lock or on I/O, capped at
+    n_process: the scheduler can book past its own ceiling (a node overshooting
+    mem_max is granted the full width in the first slot, on top of what the
+    running tasks already hold), and those extra threads contend for the same
+    cores rather than adding any. Uncapped, an oversubscribed stretch would
+    bias the utilization average up for the rest of the run."""
+    booked = active_threads(state)
+    if booked is None:
+        return None
+    waiting, io = blocked_threads(state)
+    runnable = max(0, booked - waiting - io)
+    budget = thread_budget(state)
+    return min(runnable, budget) if budget else runnable
+
+
+def thread_util(state, now):
+    """Time-weighted average of threads actually computing over the run so far
+    - booked threads less those parked on the lock or on I/O. The stretch
+    since the last logged line is extrapolated from wall clock at the current
+    thread total - without it a single long join, which logs nothing for
+    minutes, would leave the average frozen at whatever preceded it."""
+    acc, span = state.thread_time, state.thread_span
+    if state.last_line_time is not None and not state.done:
+        tail = max(0.0, now - state.last_line_time)
+        acc += (working_threads(state) or 0) * tail
+        span += tail
+    if span <= 0:
+        return 0.0
+    return acc / span
+
+
 def active_mem_estimate(node):
     if node is None or node.own_done:
         return 0
@@ -708,15 +883,30 @@ def active_mem_estimate(node):
     return total
 
 
-def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, disk_lock_enabled=True, prefix="", is_last=True, is_root=True):
+# Everything render_tree needs that is the same for every node in the walk.
+TreeView = collections.namedtuple(
+    "TreeView",
+    "lines now avg_piece_dur avg_join_dur piece_events_by_depth join_events_by_depth"
+    " pid_rss disk_lock_enabled starved",
+)
+
+
+def render_tree(node, view, prefix="", is_last=True, is_root=True):
+    # `state` drives the recursion cutoff below; `tint` is separate because a
+    # node can be partly chewed through with nothing running in it, which must
+    # stay expanded but reads as work still ahead.
+    #
+    # active_count is tested before leaves_done so that every ancestor of a
+    # running node shows a lit "\u25cb": that chain is the trail from the root down
+    # to the work, and any ancestor with a finished leaf would otherwise break it.
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
-        mark, state, status = "▸", "in_progress", str(node.task_idx)
+        mark, state, status, tint = "\u25b8", "in_progress", str(node.task_idx), NODE_RUNNING
     elif node.children and all(c.own_done for c in node.children):
-        mark, state, status = "·", "ready", None
-    elif node.leaves_done > 0:
-        mark, state, status = "·", "in_progress", None
+        # Ready either way; the tint says whether it could actually start.
+        mark, state, status = "\u00b7", "ready", None
+        tint = NODE_STARVED if view.starved else NODE_READY
     elif node.active_count > 0:
         mark, state, status = "○", "in_progress", None
     else:
@@ -727,10 +917,7 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
         label = f"[{node.depth}, B, {node.i0:,}]"
     else:
         label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
-    if state == "ready":
-        label = f"{READY_ID_ON}{label}{READY_ID_OFF}"
-    elif state == "done":
-        label = f"{DONE_ID_ON}{label}{DONE_ID_OFF}"
+    label = f"{tint}{label}{OFF}"
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
@@ -743,37 +930,48 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                 avg = depth_avg(events_by_depth, node.depth, fallback)
                 if avg is not None:
                     remaining = avg - node_elapsed
-                    eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
+                    # Signed against the depth's average: unsigned is time
+                    # left, "+" is time overrun, and the overrun keeps growing
+                    # on screen. A phrase like "any moment" reads calmest
+                    # exactly when a task is worst overdue.
+                    eta_str = (
+                        fmt_duration(remaining) if remaining > 0
+                        else "+" + fmt_duration(-remaining)
+                    )
                     label += f" ({eta_str})"
-                current = pid_rss.get(node.pid) if node.pid is not None else None
+                current = view.pid_rss.get(node.pid) if node.pid is not None else None
                 if node.mem_estimate is not None or current is not None:
                     est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
                     cur_str = fmt_bytes(current) if current is not None else "?"
-                    label += f" {est_str} - {cur_str}"
-                if node.join_term:
-                    op1, _, op2 = node.join_term.partition("x")
+                    # Estimate first, measured second - the order is what says
+                    # which is which, so it never varies.
+                    label += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
+                # Single-threaded tasks get no badge at all: its presence is
+                # what flags a task holding more than one thread slot. "x" is
+                # already the multiply in the term below, so the badge takes
+                # the multiplication sign to keep the two apart.
+                if node.threads is not None and node.threads > 1:
+                    label += f" | {MULTI_THR_ON}\u00d7{node.threads}{OFF}"
+                if node.term:
+                    op1, _, op2 = node.term.partition("x")
                     label += f" | {op1} x {op2}"
-                    if node.join_micro:
-                        micro = node.join_micro
-                        if micro == "locking" and disk_lock_enabled:
-                            micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
-                        elif micro == "multiplying":
-                            micro = f"{MUL_ON}{micro}{MUL_OFF}"
-                        elif micro.startswith("loading") or micro == "writing":
-                            micro = f"{IO_ATTN_ON}{micro}{IO_ATTN_OFF}"
-                        label += f" | {micro}"
-    lines.append(f"{prefix}{connector}{mark} {label}")
+                if node.micro:
+                    micro = node.micro
+                    if micro == "locking" and view.disk_lock_enabled:
+                        micro = f"{LOCK_ON}{micro}{OFF}"
+                    elif micro in ("multiplying", "evaluating"):
+                        micro = f"{MUL_ON}{micro}{OFF}"
+                    elif micro.startswith("loading") or micro == "writing":
+                        micro = f"{IO_ATTN_ON}{micro}{OFF}"
+                    label += f" | {micro}"
+    view.lines.append(f"{prefix}{connector}{tint}{mark}{OFF} {label}")
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
         return
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
-        render_tree(
-            child, lines, now, avg_piece_dur, avg_join_dur,
-            piece_events_by_depth, join_events_by_depth, pid_rss,
-            disk_lock_enabled, child_prefix, i == len(node.children) - 1, is_root=False,
-        )
+        render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False)
 
 
 def render_status_screen(state):
@@ -833,87 +1031,98 @@ def render(state):
 
     ram_used, ram_total = get_system_ram()
     pid_rss = get_pid_rss(state.active.keys())
+    if not pid_rss and state.phase in ("dividing", "displaying"):
+        # No fork()ed workers left to read RSS from (see active_threads) - the
+        # root process is the one actually holding the memory these phases use.
+        if state.root_pid is None:
+            state.root_pid = get_root_pid()
+        if state.root_pid is not None:
+            pid_rss = get_pid_rss((state.root_pid,))
 
-    # --- overall completion (left column) ---
-    completion_lines = []
-    cached_units = state.pieces_from_cache + state.joins_from_cache
-    cache_note = f"  ({cached_units} from cache)" if cached_units else ""
-    if state.total_pieces:
-        total_joins = state.total_joins
-        total_units = state.total_pieces + total_joins
-        done_units = min(state.pieces_done + state.joins_done, total_units)
-        pct = 100.0 * done_units / total_units
-        bar_width = 40
-        filled = int(bar_width * done_units / total_units)
-        bar = "#" * filled + "-" * (bar_width - filled)
-        completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
-        completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
-        completion_lines.append(f"         [{bar}]")
-        numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
-        pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
-        completion_lines.append(f"         numbers: {fmt_bytes(numbers_size)}   pieces: {fmt_bytes(pieces_size)}")
-        if not state.done and state.phase != "splitting":
-            phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
-            completion_lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
+    # Geometry first: completion, threads, ram and disk each need a column
+    # width to size their own bar to before anything is rendered.
+    BOX_INSET = 2
+    BOX_GAP = 2
+    avail = shutil.get_terminal_size(fallback=(80, 24)).columns - 2 * BOX_INSET
+    # A column holds its box only while it can still fit the widest row that
+    # box has; below that, boxes stack full width rather than clipping their
+    # own text. Four columns share the same per-box floor as two - a wider
+    # terminal just has room to fit more of them across one row.
+    COL_MIN = 50
+    four_w = (avail - 3 * BOX_GAP) // 4
+    four_col = four_w >= COL_MIN
+    if four_col:
+        two_col = False  # unused on this path; four-across already fits every box
+        widths = [four_w, four_w, four_w, avail - 3 * BOX_GAP - 3 * four_w]
     else:
-        completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
+        left_w = (avail - BOX_GAP) // 2
+        right_w = avail - BOX_GAP - left_w
+        two_col = left_w >= COL_MIN
+        if not two_col:
+            left_w = right_w = avail
+        widths = [left_w, right_w, left_w, right_w]
+    # inner width, less "\u2502 ", the indent, the brackets, and a trailing
+    # column so a full bar doesn't butt against the right border
+    done_bar_w = max(10, widths[0] - 15)
+    thread_bar_w = max(10, widths[1] - 15)
+    ram_bar_w = max(10, widths[2] - 15)
+    disk_bar_w = max(10, widths[3] - 15)
+    # The full inner width of a row in the ram box, matching render_box's own
+    # arithmetic: what a right-aligned flag has to align against.
+    ram_row_w = max(BOX_MIN_WIDTH, widths[2] - 2) - 1
 
-    # --- active workers / ram (right column) ---
-    status_lines = []
-    n_workers = state.n_process or state.active_max
-    blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids and state.disk_lock_enabled is not False else ""
-    status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}")
+    est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
+    if state.phase in ("dividing", "displaying"):
+        # No task scheduler booking exists once the split tree is done - "0"
+        # would read as a real reading of no memory in use, not as unknown.
+        est = None
+    real = sum(pid_rss.values()) if pid_rss else None
+    over_launch = bool(est is not None and state.mem_launch and est >= state.mem_launch)
+    budget = thread_budget(state)
+    threads_now = active_threads(state)
 
-    ram_parts = []
-    if ram_total is not None:
-        ram_part = f"ram: {fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
-        if ram_used is not None:
-            ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
-        ram_parts.append(ram_part)
-    if pid_rss or state.tree_root is not None:
-        est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
-        est_str = fmt_bytes(est) if est is not None else "?"
-        real_str = fmt_bytes(sum(pid_rss.values())) if pid_rss else "?"
-        # "est / launch..max": below launch new tasks start, above it the
-        # scheduler holds back until a task ends; max is never crossed.
-        if state.mem_launch and state.mem_max:
-            limit_str = f" / {fmt_bytes(state.mem_launch)}..{fmt_bytes(state.mem_max)}"
-        elif state.mem_launch or state.mem_max:
-            limit_str = f" / {fmt_bytes(state.mem_launch or state.mem_max)}"
+    completion_lines = _completion_rows(state, done_bar_w)
+    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now)
+    ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, ram_used, ram_total, pid_rss, est, real, over_launch)
+    disk_lines = _disk_rows(state, disk_bar_w)
+
+    inset = " " * BOX_INSET
+    boxes_info = (
+        ("completion", completion_lines, widths[0]), ("threads", thread_lines, widths[1]),
+        ("ram", ram_lines, widths[2]), ("disk", disk_lines, widths[3]),
+    )
+    rows_of_boxes = (boxes_info,) if four_col else (boxes_info[:2], boxes_info[2:])
+    for row_boxes in rows_of_boxes:
+        present = [(t, r, w) for t, r, w in row_boxes if r]
+        if not present:
+            continue
+        if (four_col and len(present) == len(row_boxes)) or (two_col and len(present) == 2):
+            # Pad the shorter box(es) so every frame in the row closes on the
+            # same line.
+            height = max(len(rows) for _, rows, _ in present)
+            present = [(t, rows + [""] * (height - len(rows)), w) for t, rows, w in present]
+            boxes = [render_box(t, r, w) for t, r, w in present]
+            lines.extend(inset + row for row in render_row(boxes, BOX_GAP))
         else:
-            limit_str = ""
-        held = " held" if est is not None and state.mem_launch and est >= state.mem_launch else ""
-        ram_parts.append(f"workers: {est_str}{limit_str}{held} | {real_str}")
-    if ram_parts:
-        status_lines.append("   ".join(ram_parts))
-    if ram_total is not None and ram_used is not None:
-        bar_width = 40
-        filled = int(bar_width * min(ram_used, ram_total) / ram_total)
-        bar = "#" * filled + "-" * (bar_width - filled)
-        status_lines.append(f"[{bar}]")
-    if state.lock_count and state.disk_lock_enabled is not False:
-        avg_ms = 1000.0 * state.lock_wait_total / state.lock_count
-        status_lines.append(
-            f"disk lock wait: {fmt_duration(state.lock_wait_total)} total "
-            f"({state.lock_count} acquires, avg {avg_ms:.0f}ms)"
-        )
+            for title, rows, _ in present:
+                lines.extend(inset + row for row in render_box(title, rows, avail))
 
-    col_width = max((len(l) for l in completion_lines), default=0) + 4
-    for i in range(max(len(completion_lines), len(status_lines))):
-        left = completion_lines[i] if i < len(completion_lines) else ""
-        right = status_lines[i] if i < len(status_lines) else ""
-        lines.append(left.ljust(col_width) + right)
-
-    lines.append("")
-    if state.tree_root is not None:
-        lines.append("tree (finished/pending subtrees collapsed):")
-        render_tree(
-            state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
-            state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
-            state.disk_lock_enabled is not False,
-        )
-    elif state.tree_skipped_reason:
-        lines.append(f"tree: {state.tree_skipped_reason}")
+    # Only while the tree is being walked: past that every node is done and the
+    # view says nothing the completion box doesn't.
+    if state.phase == "splitting":
+        lines.append("")
+        # A ready node needs both a free thread and room under mem_launch to
+        # start. With neither, the whole ready set is queued rather than about
+        # to run, and the tree says so by dimming it.
+        starved = bool(over_launch or (budget and threads_now is not None and threads_now >= budget))
+        if state.tree_root is not None:
+            render_tree(state.tree_root, TreeView(
+                lines, now, avg_piece_dur, avg_join_dur,
+                state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
+                state.disk_lock_enabled is not False, starved,
+            ))
+        elif state.tree_skipped_reason:
+            lines.append(f"tree: {state.tree_skipped_reason}")
 
     return "\n".join(lines)
 

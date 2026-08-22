@@ -9,8 +9,8 @@ bool split_big_res_is_stored(
     uint64_t remainder,
     uint64_t depth
 );
-void split_piece(uint64_t i_0, uint64_t span);
-void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth);
+void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t depth);
+void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t threads);
 uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t index);
 
 
@@ -20,7 +20,7 @@ bool split_span_res_is_stored(
     uint64_t span,
     uint64_t depth
 );
-void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth);
+void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t threads);
 uint64_t split_span_res_op_size(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t index);
 
 bool pi_is_stored(uint64_t size);

@@ -16,6 +16,12 @@
 [[maybe_unused]]
 static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+    long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
+    if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
+    {
+        n_process = (uint64_t)n_proc_avail;
+    }
+
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
     tprintf("              %-20s|", "display begin");
@@ -34,7 +40,7 @@ int main(void)
 
     // araucaria_disk_config_t config = {
     //     .disk_path = "/mnt/wsl/workspace/tmp",
-    //     .disk_threshold_bytes = 2'048'000'000
+    //     .disk_threshold_bytes = 2'048'000'000 // bytes per number
     // };
     // araucaria_disk_config_set(&config);
 
