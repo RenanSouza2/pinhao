@@ -19,10 +19,13 @@ re-ask about things already settled.
 ## Cross-platform: Linux and macOS
 
 This project must build and run on both Linux and macOS. Avoid
-platform-specific APIs unless guarded by the appropriate `#ifdef` (see the
-existing Apple-platform checks around process/core counts in `src/main.c`
-for the pattern), and don't assume a Linux-only toolchain or filesystem
-layout when making changes.
+platform-specific APIs unless guarded by the appropriate `#ifdef`, and prefer
+the POSIX call that works on both (`src/main.c` reads the core count with
+`sysconf(_SC_NPROCESSORS_ONLN)` rather than a Linux-only query).
+`makefiles/flags.mk` keeps per-platform compiler and linker flags in separate
+`uname -s` blocks — platform-specific flags belong there, not in a library
+Makefile. Don't assume a Linux-only toolchain or filesystem layout when
+making changes.
 
 ## Submodules (`mods/`)
 
@@ -44,16 +47,19 @@ After any non-trivial change, especially under `lib/` or `src/`:
 2. `make dbg` (debug build, ASan/UBSan/leak sanitizer) — must compile clean.
 3. If feasible, do a small end-to-end run to confirm things actually work,
    not just compile. `pi()` in `src/main.c` is currently called with a large
-   size (32,000,000); for a quick check, prefer temporarily calling it with a
-   much smaller size via `./run.sh` or `./run_debug.sh` rather than waiting
+   size (128,000,000); for a quick check, prefer temporarily calling it with
+   a much smaller size via `./run.sh` or `./run_debug.sh` rather than waiting
    on a full-scale run. A size of 1,000,000 finishes in under 2 minutes on
-   16 cores and is a good default for this. Revert any temporary size change
+   16 cores and is a good default for this. Revert any temporary change
    before considering the task done unless asked to keep it.
-4. `pi()`'s second argument is the number of processes to fork — this repo
-   may be running on machines with fewer cores than expected (main.c
-   currently hardcodes 16 outside of Apple platforms). When adjusting it for
-   a test run, prefer checking available cores (e.g. `nproc`) over assuming
-   16, and don't request more processes than are actually available.
+4. `pi()`'s remaining arguments are the process count and the three memory
+   budgets `mem_launch`, `mem_max`, `mem_solo` (documented in `README.md`'s
+   Usage section). Scale the budgets down along with `size`: the committed
+   values (15/20/25 GB) are sized for the full run, so a small test left at
+   those values never makes the memory policy bind. `main.c` already clamps the
+   process count to `sysconf(_SC_NPROCESSORS_ONLN)`, but still check
+   available cores (e.g. `nproc`) before picking a number rather than
+   assuming 16.
 
 ## Compiler flags are strict — keep code clean under them
 
@@ -101,7 +107,10 @@ vice versa) in these paths, flag it rather than deciding silently.
 
 `cache/` holds generated out-of-core `.bin` data files from real runs.
 Treat it as build/run output — don't hand-edit or rely on its contents
-being meaningful across runs. It's fine to clean generated files out of
-`cache/*/` between runs, but always keep the `.gitkeep` file in each
-subdirectory (e.g. `cache/numbers/.gitkeep`) — those keep the empty dirs
-tracked in git and must not be deleted.
+being meaningful across runs. `cache/disk.lock` is generated too: it's the
+lockfile backing the cross-process I/O serialization gated by `LOCK_DISK_IO`
+in `config.h`.
+
+It's fine to clean generated files out of `cache/*/` between runs, but always
+keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,
+`tmp/`) — those keep the empty dirs tracked in git and must not be deleted.

@@ -8,7 +8,8 @@ A high-performance, out-of-core, multi-processed C program to calculate Pi to bi
 - **Out-of-core Processing:** Intelligently saves intermediate states and large numbers to disk to overcome RAM limitations, using a configurable cache threshold.
 - **Multi-Process Parallelization:** Uses `fork` to parallelize chunks of the binary splitting tree, speeding up computation across multiple cores.
 - **Custom Big-Number Library:** Relies on the `araucaria` submodule to handle big integer and big float arithmetic, binary splitting types (P, Q, R), and disk serialization.
-- **Modern C23:** Written using modern C23 standards with rigorous compiler flags (warnings, `-fanalyzer`, and sanitizers).
+- **Memory-Budgeted Scheduling:** Worker processes are launched against explicit RAM budgets, so a large run stays inside available memory instead of thrashing.
+- **Modern C23:** Written using modern C23 standards with a rigorous compiler flag set (a large warning list under `-Werror`, plus address/undefined/leak sanitizers in debug builds).
 
 ## Prerequisites
 
@@ -59,7 +60,8 @@ The build system is managed via standard Makefiles.
 ## Usage
 
 By default, the scale of Pi calculation is hardcoded in `src/main.c`.
-`pi()` takes a `size` and the number of processes to fork across.
+`pi()` takes a `size`, the number of processes to fork across, and three
+memory budgets.
 
 `size` is the target mantissa size of the result, in 64-bit limbs (`araucaria`
 stores numbers as little-endian arrays of 64-bit limbs), **not** decimal
@@ -73,13 +75,41 @@ digits ≈ size × 19.27
 For example, `size = 32,000,000` limbs yields roughly 616,000,000 decimal
 digits of Pi.
 
-Modify `src/main.c` to adjust `size`, the process count, and the disk cache
-path:
+### Memory budgets
+
+Every pending task in the binary-splitting tree carries an estimated memory
+cost. The three memory arguments bound how much the forked workers may hold
+at once:
+
+- `mem_launch`: ordinary tasks launch while total estimated usage is below
+  this. It is the soft target a run normally sits at.
+- `mem_max`: a task that doesn't fit under `mem_launch` may still launch into
+  the first scheduler slot, overshooting up to this ceiling while other tasks
+  are running.
+- `mem_solo`: past this, a task launches only when nothing else is running. A
+  task whose own cost exceeds `mem_solo` still launches once the scheduler is
+  empty — nothing else could free memory for it.
+
+Scale these together with `size`. The values committed in `main.c` are sized
+for a full-scale run on a machine with plenty of RAM; leaving them there for a
+small test means the memory policy never binds.
+
+`n_process` is the number of processes to fork and also the thread budget
+shared across them. `main.c` clamps it down to the number of online cores
+(`sysconf(_SC_NPROCESSORS_ONLN)`), so requesting more than the machine has is
+harmless.
+
+Modify `src/main.c` to adjust `size`, the process count, and the memory
+budgets:
 
 ```c
-// Example: calculate Pi to a size of 32,000,000 limbs (~616M digits)
-// across 16 processes
-pi(32'000'000, 16);
+// Example: calculate Pi to a size of 32,000,000 limbs (~616M digits) across
+// 16 processes, holding ordinary launches to ~15 GB, letting one task
+// overshoot to 20 GB, and running a task alone past 25 GB
+uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+uint64_t mem_max    = U64(20) * 1024 * 1024 * 1024;
+uint64_t mem_solo   = U64(25) * 1024 * 1024 * 1024;
+pi(32'000'000, 16, mem_launch, mem_max, mem_solo);
 ```
 
 Then build and run with the helper scripts, which capture per-thread timing
@@ -127,9 +157,25 @@ There are two independent caching layers, and only one of them is optional:
   Once set, any `num` allocation whose backing size (in bytes) exceeds
   `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
   `disk_path` instead of the heap. Configure this in `src/main.c` (see the
-  commented-out example near the top of `main()`) only if a single
-  large-scale run is expected to exceed available RAM — it's not required
-  just to run the program.
+  commented-out example near the top of `main()`, whose `disk_path` is a
+  machine-specific placeholder — point it at a directory that exists, such
+  as the tracked `./cache/tmp`) only if a single large-scale run is expected
+  to exceed available RAM. It's not required just to run the program.
+
+### Cross-Process Disk Lock
+
+All processes read and write the `cache/*.bin` files over the same physical
+disk, so concurrent I/O can be slower than serialized I/O on a spinning
+drive. `config.h` gates this with `LOCK_DISK_IO`:
+
+```c
+#define LOCK_DISK_IO
+```
+
+When defined, cache reads and writes take an exclusive `flock` on
+`./cache/disk.lock`, serializing disk access across all forked workers.
+Comment the define out on an NVMe or SSD, where parallel I/O is the faster
+choice. The run log reports which mode is active on its `disk lock` line.
 
 ## Project Structure
 
@@ -147,6 +193,11 @@ There are two independent caching layers, and only one of them is optional:
   - `araucaria`: The custom arbitrary-precision arithmetic library (big
     integers, fixed/floating-point, disk-backed numbers).
 - `makefiles/`: Shared compiler flags, environments, and linker setup.
-- `cache/`: Default location for out-of-core file persistence.
+- `config.h`: Build-time switches for the program itself (currently
+  `LOCK_DISK_IO`).
+- `cache/`: Default location for out-of-core file persistence — `pieces/`,
+  `numbers/` and `res/` hold the binary-splitting checkpoints, `tmp/` is the
+  suggested `disk_path` for `araucaria`'s disk-backed numbers, and
+  `disk.lock` is the cross-process I/O lock.
 - `dashboard.py`: Live terminal dashboard that visualizes a run's progress
   from `thread_log/run.log`.

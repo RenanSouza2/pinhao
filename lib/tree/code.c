@@ -263,9 +263,10 @@ STRUCT(tree_scheduler)
     uint64_t n_process;
     uint64_t mem_launch;
     uint64_t mem_max;
+    uint64_t mem_solo;
 };
 
-static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
+static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_launch, uint64_t mem_max, uint64_t mem_solo)
 {
     tree_scheduler_t s = {
         .tasks = calloc(n_process, sizeof(tree_task_t)),
@@ -274,7 +275,8 @@ static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_l
         .total_threads = 0,
         .n_process = n_process,
         .mem_launch = mem_launch,
-        .mem_max = mem_max
+        .mem_max = mem_max,
+        .mem_solo = mem_solo
     };
     assert(s.tasks);
     return s;
@@ -319,11 +321,23 @@ static bool scheduler_at_first_slot(tree_scheduler_p s)
     return !s->tasks[0].active;
 }
 
-// Whether a task would push usage past the hard ceiling, as opposed to merely
-// being held back by mem_launch.
+static bool scheduler_is_empty(tree_scheduler_p s)
+{
+    return s->active == 0;
+}
+
+// Whether a task would push usage past mem_max, the ceiling on an ordinary
+// launch, as opposed to merely being held back by mem_launch.
 static bool scheduler_over_mem_max(tree_scheduler_p s, uint64_t mem_cost)
 {
     return s->total_mem_cost + mem_cost >= s->mem_max;
+}
+
+// Whether a task would push usage past the co-residency ceiling: past this
+// point the task may only run with the scheduler empty.
+static bool scheduler_over_mem_solo(tree_scheduler_p s, uint64_t mem_cost)
+{
+    return s->total_mem_cost + mem_cost >= s->mem_solo;
 }
 
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
@@ -419,6 +433,15 @@ static bool node_can_launch(tree_scheduler_p s, node_p n)
     }
 
     if(!scheduler_at_first_slot(s))
+    {
+        return false;
+    }
+
+    // Past mem_solo the task runs alone: no other task may be holding memory
+    // when it starts. A task costing more than mem_solo by itself still
+    // launches once the scheduler is empty -- nothing else can free memory for
+    // it, so refusing would stall the run for good.
+    if(scheduler_over_mem_solo(s, mem_cost) && !scheduler_is_empty(s))
     {
         return false;
     }
@@ -623,11 +646,11 @@ static bool task_end(tree_scheduler_p s, pid_t pid)
     revert()
 }
 
-static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
+static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max, uint64_t mem_solo)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    tree_scheduler_t s = tree_scheduler_create(n_process, mem_launch, mem_max);
+    tree_scheduler_t s = tree_scheduler_create(n_process, mem_launch, mem_max, mem_solo);
 
     bool done = false;
     while(!done)
@@ -671,7 +694,7 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 }
 
 [[maybe_unused]]
-flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
+flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max, uint64_t mem_solo)
 {
     // The whole header goes out before the stored-result check: that path
     // returns without reaching the scheduler, and readers of the log must not
@@ -682,6 +705,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
     tprintf("              %-20s| " U64P(10) "", "n process", n_process);
     tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
     tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
+    tprintf("              %-20s| " U64P(10) "", "mem solo", mem_solo);
     tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
 
     if(pi_is_stored(size))
@@ -690,7 +714,7 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
         return pi_load(size);
     }
 
-    scheduler(size, n_process, mem_launch, mem_max);
+    scheduler(size, n_process, mem_launch, mem_max, mem_solo);
     tprintf("[%17.6f] %-20s|", get_wall_time(), "binary split solved");
 
     return pi_finish(size, TREE_PIECE_SIZE, n_process);
