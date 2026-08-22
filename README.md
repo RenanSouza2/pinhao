@@ -112,23 +112,24 @@ There are two independent caching layers, and only one of them is optional:
 
 - **`araucaria`'s disk-backed numbers (opt-in).** By default `araucaria`
   keeps every big number's limb array on the heap, with no disk spilling
-  at all (`disk_threshold` defaults to unlimited). Its purpose is different
-  from pinhao's cache above: it's for the case where a *single* number
-  produced during the computation is too large to fit in RAM by itself,
-  not for checkpointing intermediate results. To enable it, set a disk
-  config before running:
+  at all (`disk_threshold_bytes` defaults to unlimited). Its purpose is
+  different from pinhao's cache above: it's for the case where a *single*
+  number produced during the computation is too large to fit in RAM by
+  itself, not for checkpointing intermediate results. To enable it, set a
+  disk config before running:
   ```c
   araucaria_disk_config_t config = {
-      .disk_path      = "./cache/tmp", // must already exist
-      .disk_threshold = 1024,          // limbs; larger allocations go to disk
+      .disk_path            = "./cache/tmp",  // must already exist
+      .disk_threshold_bytes = 8192,           // bytes; larger allocations go to disk
   };
   araucaria_disk_config_set(&config);
   ```
-  Once set, any `num` allocation above `disk_threshold` limbs is backed by
-  an `mmap`-ed temporary file in `disk_path` instead of the heap. Configure
-  this in `src/main.c` (see the commented-out example near the top of
-  `main()`) only if a single large-scale run is expected to exceed
-  available RAM — it's not required just to run the program.
+  Once set, any `num` allocation whose backing size (in bytes) exceeds
+  `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
+  `disk_path` instead of the heap. Configure this in `src/main.c` (see the
+  commented-out example near the top of `main()`) only if a single
+  large-scale run is expected to exceed available RAM — it's not required
+  just to run the program.
 
 ## Project Structure
 

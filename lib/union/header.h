@@ -18,5 +18,6 @@ union_num_t file_read_union_num(FILE *fp, uint64_t index);
 
 union_num_t union_num_add(union_num_t u_1, union_num_t u_2);
 union_num_t union_num_mul(union_num_t u_1, union_num_t u_2);
+union_num_t union_num_mul_threads(union_num_t u_1, union_num_t u_2, uint64_t threads);
 
 #endif

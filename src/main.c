@@ -4,7 +4,7 @@
 #include "../mods/macros/assert.h" // IWYU pragma: keep
 // #include "../mods/macros/fork.h"
 #include "../mods/macros/time.h"
-// #include "../mods/araucaria/lib/num/struct.h"
+#include "../mods/araucaria/lib/num/struct.h"
 
 // #define CACHE "/mnt/wsl/external_workspace/cache"
 // #include "../lib/linear/linear/header.h"
@@ -14,9 +14,9 @@
 
 
 [[maybe_unused]]
-static void pi(uint64_t size, uint64_t n_process)
+static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
-    flt_num_t flt_pi = pi_tree(size, n_process);
+    flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
     tprintf("              %-20s|", "display begin");
     TIME_SETUP
@@ -32,21 +32,15 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    // char disk_path[] = "./cache/tmp";
-    // char disk_path[] = "/mnt/wsl/external_workspace/cache/tmp";
-    // num_config_t config = {
-    //     .disk_path = disk_path,
-    //     .disk_threshold = (uint64_t)1024 * 1024 * 1024
+    // araucaria_disk_config_t config = {
+    //     .disk_path = "/mnt/wsl/workspace/tmp",
+    //     .disk_threshold_bytes = 2'048'000'000
     // };
-    // num_config_set(&config);
+    // araucaria_disk_config_set(&config);
 
-#if defined(__APPLE__)
-    uint64_t n_threads = 8;
-#else
-    uint64_t n_threads = 16;
-#endif
-
-    pi(128'000'000, n_threads);
+    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+    pi(256'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;

@@ -3,12 +3,12 @@ FLAGS = -std=c23 -Wall -Wextra -Wpedantic -Werror -Wfatal-errors -Wshadow -Wpoin
 FLAGS_PRD = -O3 -march=native -ffunction-sections -fdata-sections -flto=auto -g
 FLAGS_DBG = -D DEBUG -O0 -g3 -ggdb -fno-omit-frame-pointer -fsanitize=address,undefined -fno-optimize-sibling-calls
 
-FLAGS_CMP = -c
+FLAGS_CMP = -c -pthread
 FLAGS_LNK = -r -nostdlib
-FLAGS_EXE =
+FLAGS_EXE = -pthread
 
 ifeq ($(shell uname -s),Linux)
-	FLAGS += -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wcast-align=strict -Walloc-zero -Wtrailing-whitespace -Wleading-whitespace=spaces
+	FLAGS += -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wcast-align=strict -Walloc-zero -Wtrailing-whitespace -Wleading-whitespace=spaces -D_GNU_SOURCE
 
     FLAGS_PRD += -fstack-clash-protection -fcf-protection=full
 	FLAGS_DBG += -fsanitize=leak
@@ -18,7 +18,7 @@ ifeq ($(shell uname -s),Linux)
 endif
 
 ifeq ($(shell uname -s),Darwin)
-    FLAGS += -Wunreachable-code -Wunreachable-code-break -Wconditional-uninitialized -Wmissing-variable-declarations -Wcast-align -Wshadow-all -Wassign-enum -Wcomma -Wcovered-switch-default -Wthread-safety -Wconsumed
+    FLAGS += -Wunreachable-code -Wunreachable-code-break -Wconditional-uninitialized -Wmissing-variable-declarations -Wcast-align -Wshadow-all -Wassign-enum -Wcomma -Wcovered-switch-default -Wthread-safety -Wconsumed -D_DARWIN_C_SOURCE
 
     FLAGS_EXE += -Wl,-fatal_warnings -Wl,-dead_strip
 endif

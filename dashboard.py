@@ -8,17 +8,55 @@ import argparse
 import collections
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
 import sys
+import termios
 import time
+import tty
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(REPO_ROOT, "thread_log", "run.log")
+CACHE_DIR = os.path.join(REPO_ROOT, "cache")
 
 TREE_PIECE_SIZE = None
 PIECES_PER_LEAF = None
+
+# Muted amber (#C9A66B) for the "loading"/"writing" micro-phases (actively
+# blocked in the I/O syscall). Not a full \x1b[0m reset: the screen
+# background is set once (SGR 48) when the alt-screen is entered and never
+# reapplied per frame, so a bare reset here would strip it for the rest of
+# the run. 39 (default foreground) clears just the color this pair set,
+# leaving the background alone.
+IO_ATTN_ON = "\x1b[38;2;201;166;107m"
+IO_ATTN_OFF = "\x1b[39m"
+
+# Wine (#722F37), not vibrant red, to flag the "locking" micro-phase. 39
+# (default foreground) is enough to clear it - see IO_ATTN_OFF comment
+# above for why a bare reset is avoided.
+LOCK_ON = "\x1b[38;2;114;47;55m"
+LOCK_OFF = "\x1b[39m"
+
+# Sage (#6B8E6B), a muted green rather than a vibrant one, for the
+# "multiplying" micro-phase - same 39-only reset as LOCK_OFF.
+MUL_ON = "\x1b[38;2;107;142;107m"
+MUL_OFF = "\x1b[39m"
+
+# Dusty lavender (#9B84B8) on a tree node's id once it's ready to be
+# scheduled (both children done, not yet forked) - same 39-only reset as
+# LOCK_OFF above.
+READY_ID_ON = "\x1b[38;2;155;132;184m"
+READY_ID_OFF = "\x1b[39m"
+
+# Steel blue (#6E80B8) on a done node's id - deliberately closer to the
+# #0A143C screen background than READY_ID_ON, so finished work recedes
+# instead of drawing the eye.
+DONE_ID_ON = "\x1b[38;2;110;128;184m"
+DONE_ID_OFF = "\x1b[39m"
+
+ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def apply_piece_size(piece_size):
@@ -26,12 +64,12 @@ def apply_piece_size(piece_size):
     TREE_PIECE_SIZE = piece_size
     PIECES_PER_LEAF = 1 << piece_size
 
-_TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]"
+_TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
-    r"(?:\s*\|\s*(?P<dur>[\d.]+))?"
+    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B))?"
 )
 RE_PIECE = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
@@ -43,6 +81,9 @@ RE_PHASE = re.compile(r"(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 RE_PIECE_SIZE = re.compile(r"piece size\s*\|\s*(?P<piece_size>\d+)")
 RE_RUN_SIZE = re.compile(r"run size\s*\|\s*(?P<index_max>\d+)")
+RE_MEM_LAUNCH = re.compile(r"mem launch\s*\|\s*(?P<mem_launch>\d+)")
+RE_MEM_MAX = re.compile(r"mem max\s*\|\s*(?P<mem_max>\d+)")
+RE_DISK_LOCK = re.compile(r"disk lock\s*\|\s*(?P<disk_lock>\d+)")
 
 
 def get_index_max(size, piece_size=None):
@@ -69,7 +110,8 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "start_time", "active_count", "parent", "children",
+        "own_done", "in_progress", "task_idx", "pid", "start_time", "active_count", "parent", "children",
+        "mem_estimate", "join_term", "join_micro",
     )
 
     def __init__(self, i0, depth, kind, n2, parent):
@@ -82,10 +124,14 @@ class TreeNode:
         self.own_done = False
         self.in_progress = False
         self.task_idx = None
+        self.pid = None
         self.start_time = None
         self.active_count = 0
         self.parent = parent
         self.children = []
+        self.mem_estimate = None  # bytes, set when a "joining" line is seen for this node
+        self.join_term = None  # e.g. "P1xP2", from a split_*_res_join "mul ..." header line
+        self.join_micro = None  # e.g. "loading P1" / "multiplying", from a split_*_res_join phase line
 
 
 def _build_span(i0, span, depth, parent, by_key):
@@ -150,7 +196,10 @@ def mark_node_done(node):
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
+    node.pid = None
     node.start_time = None
+    node.join_term = None
+    node.join_micro = None
     mark_active(node, -1)
 
 
@@ -161,7 +210,10 @@ def mark_node_done_from_cache(node):
     node.own_done = True
     node.in_progress = False
     node.task_idx = None
+    node.pid = None
     node.start_time = None
+    node.join_term = None
+    node.join_micro = None
 
 
 def pi_process_running():
@@ -174,6 +226,38 @@ def pi_process_running():
         return result.returncode == 0
     except OSError:
         return False
+
+
+def get_run_start_time():
+    """Wall-clock start time of the running pi process, taken from the oldest
+    pid matching the run: workers are fork()ed (not exec'd) from the same
+    binary, so they all share its command line and pgrep -f matches every
+    one of them - the oldest pid is the original parent."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"src/(main|debug)\.o"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    pids = [p for p in result.stdout.split() if p]
+    if not pids:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "etimes=", "-p", ",".join(pids)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    etimes = [int(x) for x in out.stdout.split() if x.strip()]
+    if not etimes:
+        return None
+    return time.time() - max(etimes)
 
 
 _SYSCTL_INT_CACHE = {}
@@ -252,21 +336,48 @@ def get_system_ram():
     return _get_system_ram_macos()
 
 
-def get_worker_rss(pids):
+def get_pid_rss(pids):
+    """pid -> RSS bytes, for the given live pids (missing/dead pids are omitted)."""
     pids = list(pids)
     if not pids:
-        return 0
+        return {}
     try:
         out = subprocess.run(
-            ["ps", "-o", "rss=", "-p", ",".join(str(p) for p in pids)],
+            ["ps", "-o", "pid=,rss=", "-p", ",".join(str(p) for p in pids)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
-        return None
+        return {}
     if out.returncode != 0:
+        return {}
+    result = {}
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pid, rss = parts
+            result[int(pid)] = int(rss) * 1024
+    return result
+
+
+def get_dir_size(path):
+    """Sum of file sizes under path, recursing into subdirectories. Returns
+    None if path doesn't exist (e.g. cache/ layout changed)."""
+    total = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        sub = get_dir_size(entry.path)
+                        if sub is not None:
+                            total += sub
+                    else:
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
         return None
-    total_kb = sum(int(line) for line in out.stdout.split())
-    return total_kb * 1024
+    return total
 
 
 def fmt_bytes(n):
@@ -286,6 +397,9 @@ class State:
         self.total_pieces = total_pieces
         self.n_process = n_process
         self.explicit_size = explicit_size
+        self.mem_launch = None  # new tasks launch only while usage is below this
+        self.mem_max = None  # a launched task may overshoot up to here, never past
+        self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.pieces_done = 0
         self.pieces_from_cache = 0
         self.joins_done = 0
@@ -294,7 +408,9 @@ class State:
         self.join_events = collections.deque(maxlen=2000)  # (time, dur)
         self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
-        self.progress_samples = collections.deque(maxlen=1100)
+        self.lock_wait_total = 0.0  # sum of every "locking" -> "locked" gap, across all workers
+        self.lock_count = 0
+        self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
         self.active = {}  # pid -> {"start", "depth", "i0"}
         self.active_max = 0
         self.phase = "splitting"
@@ -305,6 +421,7 @@ class State:
         self.process_running = False
         self.process_gone_since = None  # time.time() process_running first went False since done
         self.ever_saw_process = False
+        self.run_start_time = None  # wall-clock start of the actual pi process, from get_run_start_time()
         self.done = False
 
     def touch(self):
@@ -337,13 +454,16 @@ def handle_node_process(state, content):
     tree_node = state.tree_by_key.get((i0, depth)) if state.tree_by_key else None
 
     if action == "begin":
-        entry = state.active.setdefault(pid, {"start": time.time()})
+        ts = float(m.group("ts"))
+        entry = state.active.setdefault(pid, {})
+        entry["start"] = ts
         entry["depth"] = depth
         entry["i0"] = i0
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
-            tree_node.start_time = entry["start"]
+            tree_node.pid = pid
+            tree_node.start_time = ts
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
@@ -356,6 +476,10 @@ def handle_node_process(state, content):
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
             mark_node_done(tree_node)
+    elif action == "joining":
+        mem = m.group("mem")
+        if tree_node is not None and mem is not None:
+            tree_node.mem_estimate = int(mem)
     elif action == "joined":
         state.joins_done += 1
         dur = m.group("dur")
@@ -388,12 +512,56 @@ def handle_piece(state, content):
             mark_node_done(tree_node)
 
 
+def handle_join_phase(state, content):
+    """split_span_res_join / split_big_res_join log their own header ("mul
+    P1xP2") and phase (loading/loaded/multiplying/.../written/locking/locked)
+    lines with the same [idx][pid] | i0 n2 depth shape as node_process, so
+    RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
+    matching tree node so they can be shown beside it while it's in progress.
+    "locking"/"locked" additionally maintain the set of pids currently
+    blocked waiting on the exclusive disk lock, and "locked" rolls into a
+    global lock-wait total (both tracked here, ahead of the tree lookup, so
+    they aren't dropped on runs whose tree is too large to display - see
+    TREE_NODE_CAP). These lines still fire even when the run's disk lock is
+    compiled out (LOCK_DISK_IO undefined, see lib/big/code.c) - disk_lock()
+    just becomes a near-instant no-op then, so the counters below keep
+    accumulating tiny numbers; the display layer is what hides them once
+    state.disk_lock_enabled reads False."""
+    m = RE_NODE_PROCESS.match(content)
+    if not m:
+        return
+    action = re.sub(r"\s+", " ", m.group("action").strip())
+    pid = int(m.group("pid"))
+
+    if action == "locking":
+        state.locking_pids.add(pid)
+    elif action == "locked":
+        state.locking_pids.discard(pid)
+        dur = m.group("dur")
+        if dur is not None:
+            state.lock_wait_total += float(dur)
+            state.lock_count += 1
+
+    if not state.tree_by_key:
+        return
+    i0 = int(m.group("i0"))
+    depth = int(m.group("depth"))
+    tree_node = state.tree_by_key.get((i0, depth))
+    if tree_node is None:
+        return
+    term = action.removeprefix("mul ")
+    if term != action:
+        tree_node.join_term = term
+    else:
+        tree_node.join_micro = action
+
+
 def handle_task_start(state, content):
     m = RE_TASK_START.match(content)
     if not m:
         return
     pid = int(m.group("pid"))
-    state.active.setdefault(pid, {"start": time.time(), "depth": None, "i0": None})
+    state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
 
 
 def handle_task_end(state, content):
@@ -402,6 +570,7 @@ def handle_task_end(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
+    state.locking_pids.discard(pid)
 
 
 def handle_scheduler(state, content):
@@ -427,6 +596,21 @@ def handle_phase(state, content):
     if m:
         if state.total_pieces is None:
             apply_index_max(state, int(m.group("index_max")))
+        return
+
+    m = RE_MEM_LAUNCH.match(content)
+    if m:
+        state.mem_launch = int(m.group("mem_launch"))
+        return
+
+    m = RE_MEM_MAX.match(content)
+    if m:
+        state.mem_max = int(m.group("mem_max"))
+        return
+
+    m = RE_DISK_LOCK.match(content)
+    if m:
+        state.disk_lock_enabled = bool(int(m.group("disk_lock")))
         return
 
     m = RE_PHASE.match(content)
@@ -473,6 +657,8 @@ DISPATCH = {
     "pi": handle_phase,
     "split_span": handle_untracked,
     "split_big": handle_untracked,
+    "split_span_res_join": handle_join_phase,
+    "split_big_res_join": handle_join_phase,
 }
 
 
@@ -513,51 +699,22 @@ def depth_avg(events_by_depth, depth, fallback):
     return fallback
 
 
-MEASURED_ETA_WINDOW_SECONDS = 300.0
-MEASURED_ETA_WIDE_WINDOW_SECONDS = MEASURED_ETA_WINDOW_SECONDS * 3
-MEASURED_ETA_MIN_SPAN_SECONDS = 5.0
+def active_mem_estimate(node):
+    if node is None or node.own_done:
+        return 0
+    total = node.mem_estimate if (node.in_progress and node.mem_estimate is not None) else 0
+    for child in node.children:
+        total += active_mem_estimate(child)
+    return total
 
 
-def measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WINDOW_SECONDS):
-    if remaining_units <= 0:
-        return 0.0
-    if len(state.progress_samples) < 2:
-        return None
-
-    now, done_now = state.progress_samples[-1]
-    cutoff = now - window_seconds
-    window_start_time, window_start_units = state.progress_samples[0]
-    for t, units in state.progress_samples:
-        if t >= cutoff:
-            window_start_time, window_start_units = t, units
-            break
-
-    elapsed = now - window_start_time
-    progressed = done_now - window_start_units
-    if elapsed < MEASURED_ETA_MIN_SPAN_SECONDS or progressed <= 0:
-        return None
-
-    rate = progressed / elapsed
-    return remaining_units / rate
-
-
-def format_eta_range(state, remaining_units):
-    short = measured_eta(state, remaining_units)
-    wide = measured_eta(state, remaining_units, window_seconds=MEASURED_ETA_WIDE_WINDOW_SECONDS)
-    etas = [e for e in (short, wide) if e is not None]
-    if not etas:
-        return "? remaining"
-    lo_str, hi_str = fmt_duration(min(etas)), fmt_duration(max(etas))
-    if lo_str == hi_str:
-        return f"{lo_str} remaining"
-    return f"{lo_str}–{hi_str} remaining"
-
-
-def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, prefix="", is_last=True, is_root=True):
+def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_depth, join_events_by_depth, pid_rss, disk_lock_enabled=True, prefix="", is_last=True, is_root=True):
     if node.own_done:
         mark, state, status = "✓", "done", None
     elif node.in_progress:
         mark, state, status = "▸", "in_progress", str(node.task_idx)
+    elif node.children and all(c.own_done for c in node.children):
+        mark, state, status = "·", "ready", None
     elif node.leaves_done > 0:
         mark, state, status = "·", "in_progress", None
     elif node.active_count > 0:
@@ -566,7 +723,14 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
         mark, state, status = "·", "pending", None
 
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
-    label = f"depth={node.depth} i0={node.i0:,}"
+    if node.kind == "BIG":
+        label = f"[{node.depth}, B, {node.i0:,}]"
+    else:
+        label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
+    if state == "ready":
+        label = f"{READY_ID_ON}{label}{READY_ID_OFF}"
+    elif state == "done":
+        label = f"{DONE_ID_ON}{label}{DONE_ID_OFF}"
     if status is not None:
         label += f" [{status}]"
         if node.start_time is not None:
@@ -580,18 +744,35 @@ def render_tree(node, lines, now, avg_piece_dur, avg_join_dur, piece_events_by_d
                 if avg is not None:
                     remaining = avg - node_elapsed
                     eta_str = fmt_duration(remaining) if remaining > 0 else "any moment"
-                    label += f" (eta {eta_str})"
+                    label += f" ({eta_str})"
+                current = pid_rss.get(node.pid) if node.pid is not None else None
+                if node.mem_estimate is not None or current is not None:
+                    est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
+                    cur_str = fmt_bytes(current) if current is not None else "?"
+                    label += f" {est_str} - {cur_str}"
+                if node.join_term:
+                    op1, _, op2 = node.join_term.partition("x")
+                    label += f" | {op1} x {op2}"
+                    if node.join_micro:
+                        micro = node.join_micro
+                        if micro == "locking" and disk_lock_enabled:
+                            micro = f"{LOCK_ON}{micro}{LOCK_OFF}"
+                        elif micro == "multiplying":
+                            micro = f"{MUL_ON}{micro}{MUL_OFF}"
+                        elif micro.startswith("loading") or micro == "writing":
+                            micro = f"{IO_ATTN_ON}{micro}{IO_ATTN_OFF}"
+                        label += f" | {micro}"
     lines.append(f"{prefix}{connector}{mark} {label}")
 
-    if state in ("done", "pending"):
+    if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
         return
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
         render_tree(
             child, lines, now, avg_piece_dur, avg_join_dur,
-            piece_events_by_depth, join_events_by_depth,
-            child_prefix, i == len(node.children) - 1, is_root=False,
+            piece_events_by_depth, join_events_by_depth, pid_rss,
+            disk_lock_enabled, child_prefix, i == len(node.children) - 1, is_root=False,
         )
 
 
@@ -626,6 +807,9 @@ def render(state):
     elapsed = now - state.start_time if state.start_time else 0
     lines.append(f"phase:   {state.phase}")
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
+    if state.run_start_time is not None:
+        run_elapsed = now - state.run_start_time
+        lines.append(f"run:     {fmt_duration(run_elapsed)} (since process start)")
 
     piece_durs = [d for _, d in state.piece_events]
     avg_piece_dur = sum(piece_durs) / len(piece_durs) if piece_durs else None
@@ -647,6 +831,11 @@ def render(state):
 
     lines.append("")
 
+    ram_used, ram_total = get_system_ram()
+    pid_rss = get_pid_rss(state.active.keys())
+
+    # --- overall completion (left column) ---
+    completion_lines = []
     cached_units = state.pieces_from_cache + state.joins_from_cache
     cache_note = f"  ({cached_units} from cache)" if cached_units else ""
     if state.total_pieces:
@@ -657,40 +846,71 @@ def render(state):
         bar_width = 40
         filled = int(bar_width * done_units / total_units)
         bar = "#" * filled + "-" * (bar_width - filled)
-        lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
-        lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
-        lines.append(f"         [{bar}]")
-        if not state.done and state.phase == "splitting":
-            lines.append(f"         eta: {format_eta_range(state, total_units - done_units)}")
-        elif not state.done:
+        completion_lines.append(f"pieces:  {state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}{cache_note}")
+        completion_lines.append(f"overall: {done_units} / {total_units}  ({pct:5.1f}%)")
+        completion_lines.append(f"         [{bar}]")
+        numbers_size = get_dir_size(os.path.join(CACHE_DIR, "numbers"))
+        pieces_size = get_dir_size(os.path.join(CACHE_DIR, "pieces"))
+        completion_lines.append(f"         numbers: {fmt_bytes(numbers_size)}   pieces: {fmt_bytes(pieces_size)}")
+        if not state.done and state.phase != "splitting":
             phase_elapsed = time.time() - state.phase_start_time if state.phase_start_time else 0
-            lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
+            completion_lines.append(f"         {state.phase}: {fmt_duration(phase_elapsed)} elapsed")
     else:
-        lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
-    lines.append("")
+        completion_lines.append(f"pieces:  {state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines){cache_note}")
 
+    # --- active workers / ram (right column) ---
+    status_lines = []
     n_workers = state.n_process or state.active_max
-    lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}")
+    blocked_note = f" ({len(state.locking_pids)} blocked)" if state.locking_pids and state.disk_lock_enabled is not False else ""
+    status_lines.append(f"active workers: {len(state.active)}/{n_workers or '?'}{blocked_note}")
 
-    ram_used, ram_total = get_system_ram()
     ram_parts = []
     if ram_total is not None:
-        ram_part = f"ram: {fmt_bytes(ram_used)} used / {fmt_bytes(ram_total)} total"
+        ram_part = f"ram: {fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
         if ram_used is not None:
             ram_part += f" ({100.0 * ram_used / ram_total:4.1f}%)"
         ram_parts.append(ram_part)
-    worker_rss = get_worker_rss(state.active.keys())
-    if worker_rss:
-        ram_parts.append(f"workers: {fmt_bytes(worker_rss)}")
+    if pid_rss or state.tree_root is not None:
+        est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
+        est_str = fmt_bytes(est) if est is not None else "?"
+        real_str = fmt_bytes(sum(pid_rss.values())) if pid_rss else "?"
+        # "est / launch..max": below launch new tasks start, above it the
+        # scheduler holds back until a task ends; max is never crossed.
+        if state.mem_launch and state.mem_max:
+            limit_str = f" / {fmt_bytes(state.mem_launch)}..{fmt_bytes(state.mem_max)}"
+        elif state.mem_launch or state.mem_max:
+            limit_str = f" / {fmt_bytes(state.mem_launch or state.mem_max)}"
+        else:
+            limit_str = ""
+        held = " held" if est is not None and state.mem_launch and est >= state.mem_launch else ""
+        ram_parts.append(f"workers: {est_str}{limit_str}{held} | {real_str}")
     if ram_parts:
-        lines.append("   ".join(ram_parts))
+        status_lines.append("   ".join(ram_parts))
+    if ram_total is not None and ram_used is not None:
+        bar_width = 40
+        filled = int(bar_width * min(ram_used, ram_total) / ram_total)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        status_lines.append(f"[{bar}]")
+    if state.lock_count and state.disk_lock_enabled is not False:
+        avg_ms = 1000.0 * state.lock_wait_total / state.lock_count
+        status_lines.append(
+            f"disk lock wait: {fmt_duration(state.lock_wait_total)} total "
+            f"({state.lock_count} acquires, avg {avg_ms:.0f}ms)"
+        )
+
+    col_width = max((len(l) for l in completion_lines), default=0) + 4
+    for i in range(max(len(completion_lines), len(status_lines))):
+        left = completion_lines[i] if i < len(completion_lines) else ""
+        right = status_lines[i] if i < len(status_lines) else ""
+        lines.append(left.ljust(col_width) + right)
 
     lines.append("")
     if state.tree_root is not None:
         lines.append("tree (finished/pending subtrees collapsed):")
         render_tree(
             state.tree_root, lines, now, avg_piece_dur, avg_join_dur,
-            state.piece_events_by_depth, state.join_events_by_depth,
+            state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
+            state.disk_lock_enabled is not False,
         )
     elif state.tree_skipped_reason:
         lines.append(f"tree: {state.tree_skipped_reason}")
@@ -736,13 +956,145 @@ def tail(path):
             f.close()
 
 
-def draw(state):
+def _fit_visible(line, width):
+    """Truncate/pad line to width visible columns, treating ANSI SGR escapes
+    (zero-width) as free so they're never split mid-sequence - a naive
+    line[:width] slice could otherwise cut an escape in half and leak color
+    into the rest of the screen."""
+    out = []
+    visible = 0
+    i, n = 0, len(line)
+    while i < n:
+        m = ANSI_SGR_RE.match(line, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+            continue
+        if visible < width:
+            out.append(line[i])
+            visible += 1
+        i += 1
+    if visible < width:
+        out.append(" " * (width - visible))
+    return "".join(out)
+
+
+def read_pending_input(fd):
+    """Drain whatever's currently buffered on fd without blocking."""
+    chunks = []
+    while select.select([fd], [], [], 0)[0]:
+        chunk = os.read(fd, 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def parse_scroll_actions(raw):
+    """Turn raw stdin bytes into a list of scroll actions: ("delta", +-1),
+    ("page", +-1), ("top",), ("bottom",) or ("quit",). Arrow/PgUp/PgDn/Home/End
+    keys arrive as multi-byte "\\x1b[..." escape sequences; j/k/g/G/q are
+    plain single bytes."""
+    actions = []
+    i, n = 0, len(raw)
+    while i < n:
+        b = raw[i]
+        if b == 0x1B:
+            if i + 2 < n and raw[i + 1] == 0x5B:
+                c = raw[i + 2]
+                if c == 0x41:  # up
+                    actions.append(("delta", -1))
+                    i += 3
+                    continue
+                if c == 0x42:  # down
+                    actions.append(("delta", 1))
+                    i += 3
+                    continue
+                if c == 0x35 and i + 3 < n and raw[i + 3] == 0x7E:  # PgUp
+                    actions.append(("page", -1))
+                    i += 4
+                    continue
+                if c == 0x36 and i + 3 < n and raw[i + 3] == 0x7E:  # PgDn
+                    actions.append(("page", 1))
+                    i += 4
+                    continue
+                if c == 0x48:  # Home
+                    actions.append(("top",))
+                    i += 3
+                    continue
+                if c == 0x46:  # End
+                    actions.append(("bottom",))
+                    i += 3
+                    continue
+            i += 1
+            continue
+        ch = chr(b)
+        if ch == "j":
+            actions.append(("delta", 1))
+        elif ch == "k":
+            actions.append(("delta", -1))
+        elif ch == "g":
+            actions.append(("top",))
+        elif ch == "G":
+            actions.append(("bottom",))
+        elif ch == "q" or b == 0x03:  # q or Ctrl-C (ISIG is off in cbreak+no-echo mode)
+            actions.append(("quit",))
+        i += 1
+    return actions
+
+
+def draw(state, scroll_offset=0, actions=()):
+    """Render state, scrolled by scroll_offset lines and adjusted by actions
+    (see parse_scroll_actions), reserving the last row as a position/help
+    footer whenever the content taller than the terminal. Returns the
+    clamped scroll_offset so the caller can carry it into the next frame."""
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    content = [line[:cols].ljust(cols) for line in render(state).split("\n")][:rows]
-    content += [" " * cols] * (rows - len(content))
-    sys.stdout.write("\x1b[H\x1b[2J")
+    all_lines = render(state).split("\n")
+    body_rows = max(1, rows - 1)
+    max_offset = max(0, len(all_lines) - body_rows)
+
+    for action in actions:
+        kind = action[0]
+        if kind == "delta":
+            scroll_offset += action[1]
+        elif kind == "page":
+            scroll_offset += action[1] * max(1, body_rows - 2)
+        elif kind == "top":
+            scroll_offset = 0
+        elif kind == "bottom":
+            scroll_offset = max_offset
+    scroll_offset = max(0, min(scroll_offset, max_offset))
+
+    visible = all_lines[scroll_offset:scroll_offset + body_rows]
+    content = [_fit_visible(line, cols) for line in visible]
+    content += [" " * cols] * (body_rows - len(content))
+
+    if max_offset > 0:
+        footer = (
+            f" lines {scroll_offset + 1}-{min(scroll_offset + body_rows, len(all_lines))}/{len(all_lines)}"
+            "   ↑/↓ j/k scroll   PgUp/PgDn page   g/G top/bottom   q quit "
+        )
+    else:
+        footer = " q quit "
+    content.append(_fit_visible(footer, cols))
+
+    # Every line is already padded to exactly `cols` and there are always
+    # `rows` lines, so a full repaint doesn't need a clear - clearing then
+    # redrawing every frame is what caused the flicker (a blank frame flashes
+    # between the erase and the repaint). Only clear when the terminal was
+    # actually resized, since old content could otherwise show through around
+    # a shrunk frame.
+    if (cols, rows) != draw.last_dims:
+        sys.stdout.write("\x1b[H\x1b[2J")
+        draw.last_dims = (cols, rows)
+    else:
+        sys.stdout.write("\x1b[H")
     sys.stdout.write("\n".join(content))
     sys.stdout.flush()
+    return scroll_offset
+
+
+draw.last_dims = None
 
 
 def main():
@@ -759,6 +1111,17 @@ def main():
 
     state = make_state()
     done_announced = False
+    scroll_offset = 0
+
+    stdin_fd = sys.stdin.fileno()
+    is_tty = sys.stdin.isatty()
+    old_termios = None
+    if is_tty:
+        old_termios = termios.tcgetattr(stdin_fd)
+        tty.setcbreak(stdin_fd)
+        no_echo = termios.tcgetattr(stdin_fd)
+        no_echo[3] &= ~termios.ECHO  # cbreak for immediate reads, but don't echo scroll keys
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, no_echo)
 
     sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[48;2;10;20;60m")
     sys.stdout.flush()
@@ -772,25 +1135,32 @@ def main():
             if line is not None:
                 feed_line(state, line)
 
+            actions = parse_scroll_actions(read_pending_input(stdin_fd)) if is_tty else []
+            if any(action[0] == "quit" for action in actions):
+                raise KeyboardInterrupt
+
             now = time.time()
-            if now - last_render >= 1.0:
+            if actions or now - last_render >= 1.0:
                 if not state.done:
                     state.process_running = pi_process_running()
                     if state.process_running:
                         state.ever_saw_process = True
                         state.process_gone_since = None
+                        if state.run_start_time is None:
+                            state.run_start_time = get_run_start_time()
                     elif state.process_gone_since is None:
                         state.process_gone_since = now
-                state.progress_samples.append((now, state.pieces_done + state.joins_done))
-                draw(state)
+                scroll_offset = draw(state, scroll_offset, actions)
                 last_render = now
 
             if state.done and state.ever_saw_process and not done_announced:
-                draw(state)
+                scroll_offset = draw(state, scroll_offset)
                 done_announced = True
     finally:
         sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
+        if old_termios is not None:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_termios)
 
 
 def _raise_keyboard_interrupt(signum, frame):
