@@ -4,7 +4,6 @@ Guidance for Claude Code when working in this repo. See `README.md` for
 project overview, build commands, and directory layout — this file only
 covers what isn't obvious from the code.
 
-<<<<<<< HEAD
 ## Ask before acting
 
 Before starting work on a request, ask clarifying questions first. Don't
@@ -19,17 +18,6 @@ re-ask about things already settled.
 
 ## Cross-platform: Linux and macOS
 
-This project must build and run on both Linux and macOS. Avoid
-platform-specific APIs unless guarded by the appropriate `#ifdef`, and prefer
-the POSIX call that works on both (`src/main.c` reads the core count with
-`sysconf(_SC_NPROCESSORS_ONLN)` rather than a Linux-only query).
-`makefiles/flags.mk` keeps per-platform compiler and linker flags in separate
-`uname -s` blocks — platform-specific flags belong there, not in a library
-Makefile. Don't assume a Linux-only toolchain or filesystem layout when
-making changes.
-=======
-## Cross-platform: Linux and macOS
-
 This project must build and run on both Linux and macOS. There are no
 `#ifdef __APPLE__` branches in `src/` or `lib/` — the entire platform split
 lives in `makefiles/flags.mk`, in the two `ifeq ($(shell uname -s),...)`
@@ -38,9 +26,10 @@ blocks. Linux adds warnings macOS doesn't (`-Wduplicated-cond`,
 `-Walloc-zero`, ...) plus `-fsanitize=leak`; macOS adds its own clang-only
 set (`-Wshadow-all`, `-Wcomma`, `-Wcovered-switch-default`, ...). Code can
 therefore compile clean on one platform and fail on the other. Avoid
-platform-specific APIs unless guarded, and keep whitespace clean — those
-whitespace warnings are Linux-only and fatal.
->>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0
+platform-specific APIs unless guarded, and prefer the POSIX call that works
+on both (`src/main.c` reads the core count with
+`sysconf(_SC_NPROCESSORS_ONLN)` rather than a Linux-only query). Keep
+whitespace clean too — those whitespace warnings are Linux-only and fatal.
 
 ## Submodules (`mods/`)
 
@@ -74,24 +63,6 @@ After any non-trivial change, especially under `lib/` or `src/`:
 
 1. `make build` (production build) — must compile clean.
 2. `make dbg` (debug build, ASan/UBSan/leak sanitizer) — must compile clean.
-<<<<<<< HEAD
-3. If feasible, do a small end-to-end run to confirm things actually work,
-   not just compile. `pi()` in `src/main.c` is currently called with a large
-   size (128,000,000); for a quick check, prefer temporarily calling it with
-   a much smaller size via `./run.sh` or `./run_debug.sh` rather than waiting
-   on a full-scale run. A size of 1,000,000 finishes in under 2 minutes on
-   16 cores and is a good default for this. Revert any temporary change
-   before considering the task done unless asked to keep it.
-4. `pi()`'s remaining arguments are the process count and the two memory
-   budgets `mem_launch` and `mem_max` (documented in `README.md`'s Usage
-   section). Scale the budgets down along with `size`: the committed values are
-   sized for the full run, so a small test left at those values never makes the
-   memory policy bind. Don't scale `mem_max` to within reach of the fixed
-   512 MB leaf cost, or every leaf runs solo and the test serializes. `main.c` already clamps the
-   process count to `sysconf(_SC_NPROCESSORS_ONLN)`, but still check
-   available cores (e.g. `nproc`) before picking a number rather than
-   assuming 16.
-=======
 3. If feasible, a small end-to-end run via `./run.sh` or `./run_debug.sh`, to
    confirm things actually work and not just compile.
 
@@ -110,19 +81,22 @@ one.
 - `size` — target mantissa size in 64-bit limbs, **not** decimal digits.
   1,000,000 finishes in under 2 minutes on 16 cores and is a good default
   for a smoke test.
-- `n_process` — processes to fork. Check `nproc` rather than trusting the
-  committed value (currently a hardcoded 16, on every platform); don't
-  request more than are actually available.
+- `n_process` — processes to fork. `main.c` already clamps this to
+  `sysconf(_SC_NPROCESSORS_ONLN)`, but still check `nproc` rather than
+  trusting the committed value (currently a hardcoded 16, on every
+  platform); don't request more than are actually available.
 - `mem_launch` / `mem_max` — the scheduler's launch band, in bytes (see
-  `get_next_node` in `lib/tree/code.c`). New tasks are admitted only while
-  estimated usage is below `mem_launch`; an admitted task may overshoot into
-  `mem_launch..mem_max`, which is never crossed. The committed values are
-  sized for a full run, so scale them down along with `size` — otherwise
-  every task launches immediately and the run says nothing about scheduling.
+  `node_can_launch` / `scheduler_has_memory` in `lib/tree/code.c`). New
+  tasks are admitted only while estimated usage is below `mem_launch`; an
+  admitted task may overshoot into `mem_launch..mem_max`, which is never
+  crossed. The committed values are sized for a full run, so scale them
+  down along with `size` — otherwise every task launches immediately and
+  the run says nothing about scheduling. Don't scale `mem_max` to within
+  reach of the fixed `TREE_LEAF_COST_BYTES` (512 MB) leaf cost, or every
+  leaf runs solo and the test serializes.
 
 Revert any temporary change to these before considering the task done,
 unless asked to keep it.
->>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0
 
 ## Compiler flags are strict — keep code clean under them
 
@@ -172,7 +146,7 @@ vice versa) in these paths, flag it rather than deciding silently.
 `./dashboard.py` renders a live terminal view by parsing that log.
 
 The log format is a contract. The `tprintf` format strings and phase labels
-in `lib/big/code.c` (the `JOIN_*` macros) and `lib/tree/code.c` are exactly
+in `lib/big/code.c` (the `LOG_*` macros) and `lib/tree/code.c` are exactly
 what the dashboard's parser matches on. Renaming a label, reordering a
 column, or adding a field breaks the dashboard silently — nothing fails to
 build — so update `dashboard.py` in the same change.
@@ -181,7 +155,6 @@ build — so update `dashboard.py` in the same change.
 
 `cache/` holds generated out-of-core `.bin` data files from real runs.
 Treat it as build/run output — don't hand-edit or rely on its contents
-<<<<<<< HEAD
 being meaningful across runs. `cache/disk.lock` is generated too: it's the
 lockfile backing the cross-process I/O serialization gated by `LOCK_DISK_IO`
 in `config.h`.
@@ -189,11 +162,6 @@ in `config.h`.
 It's fine to clean generated files out of `cache/*/` between runs, but always
 keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,
 `tmp/`) — those keep the empty dirs tracked in git and must not be deleted.
-=======
-being meaningful across runs. It's fine to clean generated files out of
-`cache/*/` between runs, but always keep the `.gitkeep` file in each
-subdirectory (e.g. `cache/numbers/.gitkeep`) — those keep the empty dirs
-tracked in git and must not be deleted.
 
 The commented-out `araucaria_disk_config_t` example near the top of `main()`
 names `/mnt/wsl/workspace/tmp`, which does not exist. The real scratch
@@ -206,4 +174,3 @@ The tree has mixed line endings and no `.gitattributes` — `src/main.c` and
 `lib/big/code.c` are CRLF, `lib/union/code.c` is LF, and so on. Preserve
 whatever a file already uses; don't let an editor or a `sed`/format pass
 normalize a whole file, or the diff stops being reviewable.
->>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0

@@ -259,15 +259,6 @@ union_num_t union_num_mul(union_num_t u_1, union_num_t u_2)
     return union_num_mul_threads(u_1, u_2, 1);
 }
 
-<<<<<<< HEAD
-// Same as union_num_mul, but the caller picks how many threads the underlying
-// multiply may fan out across. Every join term in lib/big goes through here.
-//
-// The count never alters the result. araucaria clamps it internally when the
-// operands are too small (num_mul_threads_ceiling), so it is an upper bound,
-// not a promise of cores used.
-=======
->>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0
 union_num_t union_num_mul_threads(union_num_t u_1, union_num_t u_2, uint64_t threads)
 {
     switch (u_1.type)
