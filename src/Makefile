@@ -1,36 +1,48 @@
-PRJ_DIR = $(shell git rev-parse --show-toplevel)
+PRJ_DIR := $(shell git rev-parse --show-toplevel)
 include $(PRJ_DIR)/makefiles/flags.mk
 include $(PRJ_DIR)/makefiles/vars.mk
 
 
 
-build b: main.o
-dbg d: debug.o
+build b: main.out
+dbg d: debug.out
 
 
 
-main.o: main.c $(LIB_FULL_FILE)
-	echo "building pi exec $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE)
-	echo "finished $(PRJ_NAME) exec $(DIR)"
+main.out: main.o $(LIB_FULL_FILE)
+	echo " linking $(PRJ_NAME) exec $(DIR)"
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE) $(FLAGS_EXTRA)
 
-debug.o: main.c $(DBG_FULL_FILE)
-	echo "building pi debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_EXE)
-
+debug.out: debug.o $(DBG_FULL_FILE)
+	echo " linking $(PRJ_NAME) debug $(DIR)"
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_EXE) $(FLAGS_EXTRA)
 
 
-.PHONY: $(LIB_FULL_FILE)
-$(LIB_FULL_FILE):
+
+main.o: main.c
+	echo "building $(PRJ_NAME) object $(DIR) main"
+	gcc -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP) $(FLAGS_EXTRA)
+
+debug.o: main.c
+	echo "building $(PRJ_NAME) object $(DIR) debug"
+	gcc -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
+
+-include main.d debug.d
+
+
+
+# FORCE, not .PHONY; see the note in makefiles/bundle.mk.
+FORCE:
+
+$(LIB_FULL_FILE): FORCE
 	$(MAKE) --directory=$(dir $@)
 
-.PHONY: $(DBG_FULL_FILE)
-$(DBG_FULL_FILE):
+$(DBG_FULL_FILE): FORCE
 	$(MAKE) dbg --directory=$(dir $@)
 
 
 
-clean:
-	echo "cleaning pi $(DIR)"
-	rm -rf *.o
+clean c:
+	echo "cleaning $(PRJ_NAME) $(DIR)"
+	rm -rf *.out *.o *.d *.dSYM
 	$(MAKE) clean --directory=$(LIB_DIR)

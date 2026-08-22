@@ -1,15 +1,16 @@
 PRJ_DIR ?= $(shell git rev-parse --show-toplevel)
+UNAME_S := $(shell uname -s)
 
-FLAGS = -I$(PRJ_DIR) -std=c23 -Wall -Wextra -Wpedantic -Werror -Wfatal-errors -Wshadow -Wpointer-arith -Wcast-qual -Wwrite-strings -Wundef -Wformat=2 -Wformat-signedness -Wnull-dereference -Wconversion -Wsign-conversion -D_POSIX_C_SOURCE=200809L -Wimplicit-fallthrough -Wfloat-equal -Wredundant-decls -Wdouble-promotion -Wmissing-include-dirs -Wswitch-enum -Wnested-externs -Wmissing-prototypes -Wdate-time -Wmissing-declarations -Walloca -Wvla
+FLAGS = -I$(PRJ_DIR) -std=c23 -Wall -Wextra -Wpedantic -Werror -Wfatal-errors -Wshadow -Wpointer-arith -Wcast-qual -Wwrite-strings -Wundef -Wformat=2 -Wformat-signedness -Wnull-dereference -Wconversion -Wsign-conversion -D_POSIX_C_SOURCE=200809L -Wimplicit-fallthrough -Wfloat-equal -Wredundant-decls -Wdouble-promotion -Wmissing-include-dirs -Wswitch-enum -Wnested-externs -Wmissing-prototypes -Wdate-time -Wmissing-declarations -Walloca -Wvla -march=native
 
-FLAGS_PRD = -O3 -march=native -ffunction-sections -fdata-sections -flto=auto -g
+FLAGS_PRD = -O3 -ffunction-sections -fdata-sections -flto=auto -g
 FLAGS_DBG = -D DEBUG -O0 -g3 -ggdb -fno-omit-frame-pointer -fsanitize=address,undefined -fno-optimize-sibling-calls
 
-FLAGS_CMP = -c -pthread
+FLAGS_CMP = -c -MMD -MP -pthread
 FLAGS_LNK = -r -nostdlib
 FLAGS_EXE = -pthread
 
-ifeq ($(shell uname -s),Linux)
+ifeq ($(UNAME_S),Linux)
 	FLAGS += -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wcast-align=strict -Walloc-zero -Wtrailing-whitespace -Wleading-whitespace=spaces -D_GNU_SOURCE
 
     FLAGS_PRD += -fstack-clash-protection -fcf-protection=full
@@ -19,7 +20,7 @@ ifeq ($(shell uname -s),Linux)
 	FLAGS_EXE += -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,defs -Wl,--gc-sections -Wl,--fatal-warnings
 endif
 
-ifeq ($(shell uname -s),Darwin)
+ifeq ($(UNAME_S),Darwin)
     FLAGS += -Wunreachable-code -Wunreachable-code-break -Wconditional-uninitialized -Wmissing-variable-declarations -Wcast-align -Wshadow-all -Wassign-enum -Wcomma -Wcovered-switch-default -Wthread-safety -Wconsumed -D_DARWIN_C_SOURCE
 
     FLAGS_EXE += -Wl,-fatal_warnings -Wl,-dead_strip

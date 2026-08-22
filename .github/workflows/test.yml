@@ -1,37 +1,41 @@
 on: [push]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  ci:
+    name: ${{ matrix.cmd }} (${{ matrix.os }}, ${{ matrix.assembly }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-latest]
+        cmd: [build, test]
+        assembly: [default, no_assembly]
     steps:
     - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - name: Install GCC 15
-      run: |
-        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-        sudo apt-get update
-        sudo apt-get install -y gcc-15 g++-15
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
-    - run: make test -s
 
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - name: Install GCC 15
-      run: |
-        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-        sudo apt-get update
-        sudo apt-get install -y gcc-15 g++-15
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
-    - run: make build -s 
+    - name: Checkout submodules
+      run: git submodule update --init --recursive
 
-  build_mac:
-    runs-on: macos-latest
+    - name: Run Makefile
+      run: |
+        FLAGS=""
+
+        # Apply static analysis exclusively on Linux builds
+        if [ "${{ matrix.os }}" = "ubuntu-26.04" ] && [ "${{ matrix.cmd }}" = "build" ]; then
+          FLAGS="-fanalyzer"
+        fi
+
+        # Append assembly override if matrix dictates
+        if [ "${{ matrix.assembly }}" = "no_assembly" ]; then
+          FLAGS="$FLAGS -DNO_ASSEMBLY"
+        fi
+
+        make ${{ matrix.cmd }} FLAGS_EXTRA="$FLAGS"
+
+  all_checks_passed:
+    name: All Checks Passed
+    runs-on: ubuntu-latest
+    needs: [ci]
     steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make build -s 
+      - run: echo "All matrix jobs completed successfully."
