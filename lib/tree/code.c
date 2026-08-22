@@ -309,6 +309,11 @@ static bool scheduler_can_launch(tree_scheduler_p s)
     return s->total_mem_cost < s->mem_launch;
 }
 
+static bool scheduler_at_first_slot(tree_scheduler_p s)
+{
+    return !s->tasks[0].active;
+}
+
 static uint64_t node_threads(node_p n, uint64_t max_threads)
 {
     if(node_is_leaf(n))
@@ -375,6 +380,11 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
     }
 
     if(node_is_leaf(n))
+    {
+        return LAUNCH_HALT;
+    }
+
+    if(scheduler_at_first_slot(s))
     {
         return LAUNCH_HALT;
     }
