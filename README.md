@@ -39,7 +39,7 @@ The build system is managed via standard Makefiles.
   # or
   make b
   ```
-  The executable will be located at `src/main.o`.
+  The executable will be located at `src/main.out`.
 
 - **Build Debug Executable (with Address/Undefined/Leak Sanitizers):**
   ```bash
@@ -47,7 +47,7 @@ The build system is managed via standard Makefiles.
   # or
   make d
   ```
-  The executable will be located at `src/debug.o`.
+  The executable will be located at `src/debug.out`.
 
 - **Clean Project:**
   ```bash

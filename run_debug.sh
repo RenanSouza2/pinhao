@@ -3,4 +3,4 @@ set -e
 mkdir -p thread_log
 rm -rf thread_log/*
 make dbg
-time ./src/debug.o $@ PI 2> >(tee thread_log/run.log >&2)
+time ./src/debug.out $@ PI 2> >(tee thread_log/run.log >&2)
