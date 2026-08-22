@@ -15,7 +15,7 @@
 
 
 [[maybe_unused]]
-static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max, uint64_t mem_solo)
+static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
@@ -23,7 +23,7 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
         n_process = (uint64_t)n_proc_avail;
     }
 
-    flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max, mem_solo);
+    flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
     tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
     TIME_SETUP
@@ -47,8 +47,7 @@ int main(void)
 
     uint64_t mem_launch = U64(4) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(6) * 1024 * 1024 * 1024;
-    uint64_t mem_solo = U64(8) * 1024 * 1024 * 1024;
-    pi(64'000'000, 16, mem_launch, mem_max, mem_solo);
+    pi(64'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;

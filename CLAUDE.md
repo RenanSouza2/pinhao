@@ -52,11 +52,12 @@ After any non-trivial change, especially under `lib/` or `src/`:
    on a full-scale run. A size of 1,000,000 finishes in under 2 minutes on
    16 cores and is a good default for this. Revert any temporary change
    before considering the task done unless asked to keep it.
-4. `pi()`'s remaining arguments are the process count and the three memory
-   budgets `mem_launch`, `mem_max`, `mem_solo` (documented in `README.md`'s
-   Usage section). Scale the budgets down along with `size`: the committed
-   values (15/20/25 GB) are sized for the full run, so a small test left at
-   those values never makes the memory policy bind. `main.c` already clamps the
+4. `pi()`'s remaining arguments are the process count and the two memory
+   budgets `mem_launch` and `mem_max` (documented in `README.md`'s Usage
+   section). Scale the budgets down along with `size`: the committed values are
+   sized for the full run, so a small test left at those values never makes the
+   memory policy bind. Don't scale `mem_max` to within reach of the fixed
+   512 MB leaf cost, or every leaf runs solo and the test serializes. `main.c` already clamps the
    process count to `sysconf(_SC_NPROCESSORS_ONLN)`, but still check
    available cores (e.g. `nproc`) before picking a number rather than
    assuming 16.

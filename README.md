@@ -78,21 +78,27 @@ digits of Pi.
 ### Memory budgets
 
 Every pending task in the binary-splitting tree carries an estimated memory
-cost. The three memory arguments bound how much the forked workers may hold
-at once:
+cost, priced for the number of threads that task will run with. The two memory
+arguments bound how much the forked workers may hold at once:
 
-- `mem_launch`: ordinary tasks launch while total estimated usage is below
-  this. It is the soft target a run normally sits at.
-- `mem_max`: a task that doesn't fit under `mem_launch` may still launch into
-  the first scheduler slot, overshooting up to this ceiling while other tasks
-  are running.
-- `mem_solo`: past this, a task launches only when nothing else is running. A
-  task whose own cost exceeds `mem_solo` still launches once the scheduler is
-  empty — nothing else could free memory for it.
+- `mem_launch`: the throttle. Tasks keep launching while total estimated usage
+  is below it; at or above it nothing new starts until a running task ends. It
+  is the soft target a run normally sits at.
+- `mem_max`: the fit ceiling. A task launches alongside others only if it fits
+  under this. One that doesn't runs solo — it waits for the scheduler to empty
+  and then takes the whole machine, whatever it costs, since with nothing else
+  running nothing could free memory for it.
+
+A task that doesn't fit also stops the scheduler from looking for smaller work
+to launch in its place. That is deliberate: memory then drains monotonically
+until the blocked task fits, instead of smaller tasks holding the pool full
+against it.
 
 Scale these together with `size`. The values committed in `main.c` are sized
 for a full-scale run on a machine with plenty of RAM; leaving them there for a
-small test means the memory policy never binds.
+small test means the memory policy never binds. Scaling down has a floor,
+though: every leaf is priced at a fixed 512 MB (`TREE_LEAF_COST_BYTES`), so a
+`mem_max` near or below that makes every leaf run solo and serializes the run.
 
 `n_process` is the number of processes to fork and also the thread budget
 shared across them. `main.c` clamps it down to the number of online cores
@@ -104,12 +110,11 @@ budgets:
 
 ```c
 // Example: calculate Pi to a size of 32,000,000 limbs (~616M digits) across
-// 16 processes, holding ordinary launches to ~15 GB, letting one task
-// overshoot to 20 GB, and running a task alone past 25 GB
+// 16 processes, throttling new launches at ~15 GB and running any task that
+// doesn't fit under 20 GB on its own
 uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
 uint64_t mem_max    = U64(20) * 1024 * 1024 * 1024;
-uint64_t mem_solo   = U64(25) * 1024 * 1024 * 1024;
-pi(32'000'000, 16, mem_launch, mem_max, mem_solo);
+pi(32'000'000, 16, mem_launch, mem_max);
 ```
 
 Then build and run with the helper scripts, which capture per-thread timing
