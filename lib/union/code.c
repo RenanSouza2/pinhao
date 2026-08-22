@@ -256,6 +256,11 @@ union_num_t union_num_add(union_num_t u_1, union_num_t u_2)
 
 union_num_t union_num_mul(union_num_t u_1, union_num_t u_2)
 {
+    return union_num_mul_threads(u_1, u_2, 1);
+}
+
+union_num_t union_num_mul_threads(union_num_t u_1, union_num_t u_2, uint64_t threads)
+{
     switch (u_1.type)
     {
         case SIG:
@@ -264,13 +269,13 @@ union_num_t union_num_mul(union_num_t u_1, union_num_t u_2)
             {
                 case SIG:
                 {
-                    sig_num_t sig = sig_num_mul(u_1.num.sig, u_2.num.sig);
+                    sig_num_t sig = sig_num_mul_threads(u_1.num.sig, u_2.num.sig, threads);
                     return union_num_wrap_sig(sig, u_1.size);
                 }
 
                 case FLT:
                 {
-                    flt_num_t flt = flt_num_mul_sig(u_2.num.flt, u_1.num.sig);
+                    flt_num_t flt = flt_num_mul_sig_threads(u_2.num.flt, u_1.num.sig, threads);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
             }
@@ -283,13 +288,13 @@ union_num_t union_num_mul(union_num_t u_1, union_num_t u_2)
             {
                 case SIG:
                 {
-                    flt_num_t flt = flt_num_mul_sig(u_1.num.flt, u_2.num.sig);
+                    flt_num_t flt = flt_num_mul_sig_threads(u_1.num.flt, u_2.num.sig, threads);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
 
                 case FLT:
                 {
-                    flt_num_t flt = flt_num_mul(u_1.num.flt, u_2.num.flt);
+                    flt_num_t flt = flt_num_mul_threads(u_1.num.flt, u_2.num.flt, threads);
                     return union_num_wrap_flt(flt, u_1.size);
                 }
             }
