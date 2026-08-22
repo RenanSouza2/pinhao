@@ -162,6 +162,7 @@ There are two independent caching layers, and only one of them is optional:
   Once set, any `num` allocation whose backing size (in bytes) exceeds
   `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
   `disk_path` instead of the heap. Configure this in `src/main.c` (see the
+<<<<<<< HEAD
   commented-out example near the top of `main()`, whose `disk_path` is a
   machine-specific placeholder — point it at a directory that exists, such
   as the tracked `./cache/tmp`) only if a single large-scale run is expected
@@ -181,6 +182,11 @@ When defined, cache reads and writes take an exclusive `flock` on
 `./cache/disk.lock`, serializing disk access across all forked workers.
 Comment the define out on an NVMe or SSD, where parallel I/O is the faster
 choice. The run log reports which mode is active on its `disk lock` line.
+=======
+  commented-out example near the top of `main()`) only if a single
+  large-scale run is expected to exceed available RAM — it's not required
+  just to run the program.
+>>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0
 
 ## Project Structure
 

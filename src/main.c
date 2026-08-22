@@ -17,12 +17,15 @@
 [[maybe_unused]]
 static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+<<<<<<< HEAD
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
     {
         n_process = (uint64_t)n_proc_avail;
     }
 
+=======
+>>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
     tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
@@ -41,6 +44,7 @@ int main(void)
 
     // araucaria_disk_config_t config = {
     //     .disk_path = "/mnt/wsl/workspace/tmp",
+<<<<<<< HEAD
     //     .disk_threshold_bytes = 2'048'000'000 // bytes per number
     // };
     // araucaria_disk_config_set(&config);
@@ -48,6 +52,15 @@ int main(void)
     uint64_t mem_launch = U64(4) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(6) * 1024 * 1024 * 1024;
     pi(64'000'000, 16, mem_launch, mem_max);
+=======
+    //     .disk_threshold_bytes = 2'048'000'000
+    // };
+    // araucaria_disk_config_set(&config);
+
+    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+    pi(256'000'000, 16, mem_launch, mem_max);
+>>>>>>> af5a3933339db3767acbb04ef0747a6cae45b2d0
 
     printf("\n");
     return 0;
