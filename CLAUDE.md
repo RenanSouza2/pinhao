@@ -170,7 +170,11 @@ that if enabling araucaria's disk-backed numbers.
 
 ## Line endings
 
-The tree has mixed line endings and no `.gitattributes` — `src/main.c` and
-`lib/big/code.c` are CRLF, `lib/union/code.c` is LF, and so on. Preserve
-whatever a file already uses; don't let an editor or a `sed`/format pass
-normalize a whole file, or the diff stops being reviewable.
+Everything in this repo is LF. Write LF, and never emit CR — not to match a
+file that already has some, not to "preserve" what's on disk.
+
+`core.autocrlf=input` is set globally, so CR is stripped on commit and nothing
+CRLF has ever been committed. A file showing CRLF in the worktree is a local
+artifact from some program rewriting it after checkout; it is not the file's
+real state, and copying it forward only spreads it. Strip it instead:
+`sed -i 's/\r$//' <file>`.
