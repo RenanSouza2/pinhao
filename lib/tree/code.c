@@ -48,7 +48,6 @@ STRUCT(tree_plan)
 {
     uint64_t mem_cost;
     uint64_t threads;
-    bool is_noop;
 };
 
 STRUCT(node)
@@ -56,6 +55,7 @@ STRUCT(node)
     node_p parent;
     uint64_t type;
     bool processing;
+    bool is_stored;
     tree_plan_t plan;
     union {
         big_t big;
@@ -83,6 +83,7 @@ static node_p node_span_create(
         .parent = parent,
         .type = NODE_SPAN,
         .processing = false,
+        .is_stored = split_span_res_is_stored(size, i_0, span, depth),
         .as.span = (span_t){
             .size = size,
             .i_0 = i_0,
@@ -120,6 +121,7 @@ static node_p node_big_create(
         .parent = parent,
         .type = NODE_BIG,
         .processing = false,
+        .is_stored = split_big_res_is_stored(size, i_0, remainder, depth),
         .as.big = (big_t){
             .size = size,
             .i_0 = i_0,
@@ -171,33 +173,6 @@ static node_p node_expand(node_p n, uint64_t index)
 
         default: revert()
     }
-}
-
-static bool node_is_stored(node_p n)
-{
-    switch(n->type)
-    {
-        case NODE_BIG:
-        {
-            if(split_big_res_is_stored(n->as.big.size, n->as.big.i_0, n->as.big.remainder, n->as.big.depth))
-            {
-                return true;
-            }
-        }
-        break;
-
-        case NODE_SPAN:
-        {
-            if(split_span_res_is_stored(n->as.span.size, n->as.span.i_0, n->as.span.span, n->as.span.depth))
-            {
-                return true;
-            }
-        }
-        break;
-
-        default: revert()
-    }
-    return false;
 }
 
 static bool node_is_ready(node_p n)
@@ -333,13 +308,6 @@ static bool scheduler_is_empty(tree_scheduler_p s)
     return s->active == 0;
 }
 
-// Whether a task would push usage past mem_max, the ceiling on an ordinary
-// launch, as opposed to merely being held back by mem_launch.
-static bool scheduler_over_mem_max(tree_scheduler_p s, uint64_t mem_cost)
-{
-    return s->total_mem_cost + mem_cost >= s->mem_max;
-}
-
 static bool scheduler_has_memory(tree_scheduler_p s, uint64_t mem_cost)
 {
     return s->total_mem_cost + mem_cost < s->mem_max;
@@ -394,8 +362,7 @@ static uint64_t node_set_plan(node_p n, uint64_t mem_cost, uint64_t threads)
 {
     n->plan = (tree_plan_t){
         .mem_cost = mem_cost,
-        .threads = threads,
-        .is_noop = false
+        .threads = threads
     };
     return LAUNCH_TAKE;
 }
@@ -405,14 +372,6 @@ static uint64_t node_can_launch_rec(tree_scheduler_p s, node_p n)
     if(!node_is_open(n))
     {
         return LAUNCH_SKIP;
-    }
-
-    if(node_is_stored(n))
-    {
-        n->plan = (tree_plan_t){
-            .is_noop = true
-        };
-        return LAUNCH_TAKE;
     }
 
     if(!node_is_ready(n))
@@ -461,8 +420,24 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
     return node_can_launch_rec(s, n);
 }
 
-static uint64_t get_next_node(node_p *out_n, tree_scheduler_p s, node_p n)
+static uint64_t node_get_next(node_p *out_n, tree_scheduler_p s, node_p n)
 {
+    for(uint64_t i=0; i<2; i++)
+    {
+        if(n->children[i].done)
+        {
+            continue;
+        }
+
+        if(n->children[i].n != NULL)
+        {
+            continue;
+        }
+
+        n->children[i].n = node_expand(n, i);
+        n->children[i].done = n->children[i].n->is_stored;
+    }
+
     uint64_t verdict = node_can_launch(s, n);
     if(verdict == LAUNCH_TAKE)
     {
@@ -487,12 +462,7 @@ static uint64_t get_next_node(node_p *out_n, tree_scheduler_p s, node_p n)
             continue;
         }
 
-        if(n->children[i].n == NULL)
-        {
-            n->children[i].n = node_expand(n, i);
-        }
-
-        verdict = get_next_node(out_n, s, n->children[i].n);
+        verdict = node_get_next(out_n, s, n->children[i].n);
         if(verdict != LAUNCH_SKIP)
         {
             return verdict;
@@ -516,14 +486,6 @@ static void node_process(node_p n, uint64_t index)
             uint64_t depth = n->as.big.depth;
 
             tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
-
-            if(split_big_res_is_stored(size, i_0, remainder, depth))
-            {
-                tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "already stored", i_0, remainder, depth);
-                return;
-            }
-
-            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, remainder, depth, n->plan.mem_cost);
             TIME_SETUP
             split_big_res_join(index, size, i_0, remainder, depth, n->plan.threads);
             TIME_END(t1)
@@ -539,13 +501,6 @@ static void node_process(node_p n, uint64_t index)
             uint64_t depth = n->as.span.depth;
 
             tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
-
-            if(split_span_res_is_stored(size, i_0, span, depth))
-            {
-                tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "already stored", i_0, span, depth);
-                return;
-            }
-
             if(span == TREE_PIECE_SIZE)
             {
                 TIME_SETUP
@@ -594,10 +549,7 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
 
     s->total_mem_cost += n->plan.mem_cost;
     s->total_threads += n->plan.threads;
-    if(!n->plan.is_noop)
-    {
-        s->active++;
-    }
+    s->active++;
 
     // THR is this task's thread count, SUM the scheduler total including it,
     // MEM the memory it was booked at -- the only line that states a leaf's cost.
@@ -631,13 +583,9 @@ static bool task_end(tree_scheduler_p s, pid_t pid)
     s->tasks[index].active = false;
     s->total_mem_cost -= n->plan.mem_cost;
     s->total_threads -= n->plan.threads;
-    if(!n->plan.is_noop)
-    {
-        s->active--;
-    }
+    s->active--;
 
     node_p parent = n->parent;
-
     if(parent == NULL)
     {
         free(n);
@@ -670,25 +618,12 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
         while(scheduler_has_slot(&s))
         {
             node_p n = NULL;
-            if(get_next_node(&n, &s, n_root) != LAUNCH_TAKE)
+            if(node_get_next(&n, &s, n_root) != LAUNCH_TAKE)
             {
                 break;
             }
 
-            bool is_noop = n->plan.is_noop;
-            pid_t pid = task_start(&s, n);
-
-            if(!is_noop)
-            {
-                continue;
-            }
-
-            waitpid_safe(pid, NULL);
-            done = task_end(&s, pid);
-            if(done)
-            {
-                break;
-            }
+            task_start(&s, n);
         }
 
         if(done)
