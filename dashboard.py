@@ -1529,28 +1529,37 @@ def render(state):
         if state.root_pid is not None:
             pid_rss = get_pid_rss((state.root_pid,))
 
-    # Geometry first: completion and threads share a row, ram spans beneath, so
-    # each bar has to be sized to the column it lands in.
+    # Geometry first: completion, threads, ram and disk each need a column
+    # width to size their own bar to before anything is rendered.
     BOX_INSET = 2
     BOX_GAP = 2
     avail = shutil.get_terminal_size(fallback=(80, 24)).columns - 2 * BOX_INSET
-    left_w = (avail - BOX_GAP) // 2
-    right_w = avail - BOX_GAP - left_w
-    # Side by side only while a half can still hold the widest row either box
-    # has; below that they stack full width rather than clipping their own text.
-    TWO_COL_MIN = 50
-    two_col = left_w >= TWO_COL_MIN
-    if not two_col:
-        left_w = right_w = avail
+    # A column holds its box only while it can still fit the widest row that
+    # box has; below that, boxes stack full width rather than clipping their
+    # own text. Four columns share the same per-box floor as two - a wider
+    # terminal just has room to fit more of them across one row.
+    COL_MIN = 50
+    four_w = (avail - 3 * BOX_GAP) // 4
+    four_col = four_w >= COL_MIN
+    if four_col:
+        two_col = False  # unused on this path; four-across already fits every box
+        widths = [four_w, four_w, four_w, avail - 3 * BOX_GAP - 3 * four_w]
+    else:
+        left_w = (avail - BOX_GAP) // 2
+        right_w = avail - BOX_GAP - left_w
+        two_col = left_w >= COL_MIN
+        if not two_col:
+            left_w = right_w = avail
+        widths = [left_w, right_w, left_w, right_w]
     # inner width, less "\u2502 ", the indent, the brackets, and a trailing
     # column so a full bar doesn't butt against the right border
-    done_bar_w = max(10, left_w - 15)
-    thread_bar_w = max(10, right_w - 15)
-    ram_bar_w = max(10, left_w - 15)
-    # The full inner width of a row in the left box, matching render_box's own
+    done_bar_w = max(10, widths[0] - 15)
+    thread_bar_w = max(10, widths[1] - 15)
+    ram_bar_w = max(10, widths[2] - 15)
+    disk_bar_w = max(10, widths[3] - 15)
+    # The full inner width of a row in the ram box, matching render_box's own
     # arithmetic: what a right-aligned flag has to align against.
-    ram_row_w = max(BOX_MIN_WIDTH, left_w - 2) - 1
-    disk_bar_w = max(10, right_w - 15)
+    ram_row_w = max(BOX_MIN_WIDTH, widths[2] - 2) - 1
 
     est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
     if state.phase in ("dividing", "displaying"):
@@ -1568,22 +1577,24 @@ def render(state):
     disk_lines = _disk_rows(state, disk_bar_w)
 
     inset = " " * BOX_INSET
-    grid = (
-        (("completion", completion_lines), ("threads", thread_lines)),
-        (("ram", ram_lines), ("disk", disk_lines)),
+    boxes_info = (
+        ("completion", completion_lines, widths[0]), ("threads", thread_lines, widths[1]),
+        ("ram", ram_lines, widths[2]), ("disk", disk_lines, widths[3]),
     )
-    for pair in grid:
-        present = [(t, r) for t, r in pair if r]
+    rows_of_boxes = (boxes_info,) if four_col else (boxes_info[:2], boxes_info[2:])
+    for row_boxes in rows_of_boxes:
+        present = [(t, r, w) for t, r, w in row_boxes if r]
         if not present:
             continue
-        if two_col and len(present) == 2:
-            # Pad the shorter of a pair so both frames close on the same row.
-            height = max(len(rows) for _, rows in present)
-            present = [(t, rows + [""] * (height - len(rows))) for t, rows in present]
-            boxes = [render_box(t, r, w) for (t, r), w in zip(present, (left_w, right_w))]
+        if (four_col and len(present) == len(row_boxes)) or (two_col and len(present) == 2):
+            # Pad the shorter box(es) so every frame in the row closes on the
+            # same line.
+            height = max(len(rows) for _, rows, _ in present)
+            present = [(t, rows + [""] * (height - len(rows)), w) for t, rows, w in present]
+            boxes = [render_box(t, r, w) for t, r, w in present]
             lines.extend(inset + row for row in render_row(boxes, BOX_GAP))
         else:
-            for title, rows in present:
+            for title, rows, _ in present:
                 lines.extend(inset + row for row in render_box(title, rows, avail))
 
     # Only while the tree is being walked: past that every node is done and the
