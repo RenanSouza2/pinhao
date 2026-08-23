@@ -769,5 +769,5 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
     scheduler(size, n_process, mem_launch, mem_max);
     tprintf("[%17.6f] %-20s|", get_wall_time(), "binary split solved");
 
-    return pi_finish(size, TREE_PIECE_SIZE);
+    return pi_finish(size, TREE_PIECE_SIZE, n_process);
 }

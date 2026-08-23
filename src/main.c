@@ -44,9 +44,9 @@ int main(void)
     // };
     // araucaria_disk_config_set(&config);
 
-    uint64_t mem_launch = U64(3) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(5) * 1024 * 1024 * 1024;
-    pi(4'000'000, 16, mem_launch, mem_max);
+    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+    pi(64'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;

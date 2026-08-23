@@ -222,7 +222,7 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "pid", "threads", "start_time", "active_count", "parent", "children",
+        "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro",
     )
 
@@ -237,7 +237,8 @@ class TreeNode:
         self.in_progress = False
         self.task_idx = None
         self.pid = None
-        self.threads = None  # threads this node's task holds, from "task start"/"task donate"
+        self.threads = None  # threads booked for this node's task, from "task start"/"task donate"
+        self.threads_live = None  # of those, the count the worker has picked up (see handle_phase_line)
         self.start_time = None
         self.active_count = 0
         self.parent = parent
@@ -311,6 +312,7 @@ def mark_node_done(node):
     node.task_idx = None
     node.pid = None
     node.threads = None
+    node.threads_live = None
     node.start_time = None
     node.term = None
     node.micro = None
@@ -564,7 +566,72 @@ class State:
         return self.total_pieces - 1 if self.total_pieces else None
 
 
-def set_phase(state, phase):
+def active_threads(state):
+    """Threads currently booked by running tasks. Falls back to the
+    scheduler's own "active threads" line while no "task start" line has
+    carried THR yet - either the dashboard attached mid-run, or the run comes
+    from a build that doesn't log it.
+
+    "dividing" and "displaying" run entirely inside the root process on its
+    own threads (flt_num_div_threads / flt_num_display_dec_threads), not
+    through the fork()ed task scheduler, so state.active is empty for the
+    whole phase - report the full thread budget instead of reading that as
+    zero threads working."""
+    if state.phase in ("dividing", "displaying"):
+        return thread_budget(state)
+    if not state.threads_seen:
+        return state.threads_reported
+    return sum(entry.get("threads") or 0 for entry in state.active.values())
+
+
+def thread_budget(state):
+    """The run's thread ceiling: n_process, from the log's own header line or
+    from --n-process. pi_tree logs it on every run, so this is None only for a
+    log from an older build."""
+    return state.n_process_logged or state.n_process
+
+
+def thread_tick(state, ts):
+    """Fold the thread total up to log timestamp ts into the utilization
+    accumulator. Called before every state change, so the total folded in is
+    the one that held over the interval just closed. Log timestamps, not wall
+    clock, so replaying a finished log gives the same average as watching it
+    live.
+
+    The cursor only ever moves forward: every worker writes to the one log and
+    stamps its line before the write, so lines interleave out of order. Letting
+    ts move the cursor back would fold the stretch between it and the newer
+    timestamp in twice, at two different thread totals."""
+    if not state.threads_seen:
+        return
+    if ts > state.thread_last_ts:
+        dt = ts - state.thread_last_ts
+        state.thread_time += (working_threads(state) or 0) * dt
+        state.thread_span += dt
+        state.thread_last_ts = ts
+
+
+def attach_task_plan(state, pid, tree_node):
+    """A task's plan (threads, booked memory) and its node identity arrive on
+    two separate lines ("task start" and "begin") whose order isn't guaranteed -
+    the child logs "begin" as soon as it's forked, the parent logs "task start"
+    after. Both sides call this, so whichever lands second attaches the plan."""
+    if tree_node is None:
+        return
+    entry = state.active.get(pid)
+    if entry is None:
+        return
+    if entry.get("threads") is not None:
+        tree_node.threads = entry["threads"]
+        tree_node.threads_live = entry.get("threads_live")
+    if entry.get("mem") is not None:
+        tree_node.mem_estimate = entry["mem"]
+
+
+def set_phase(state, phase, ts=None):
+    """ts is the phase line's own CLOCK_REALTIME stamp, which is the same epoch
+    as time.time(). Without it the timer would restart whenever the dashboard
+    attaches, reading 00:00 on a phase that began an hour ago."""
     if phase != state.phase:
         state.phase = phase
         state.phase_start_time = time.time()
@@ -668,6 +735,11 @@ def handle_phase_line(state, content):
     entry = state.active.get(pid)
     if entry is not None:
         entry["micro"] = action
+        # split_task_threads() re-reads the shared slot for each multiplication,
+        # and the "multiplying" line is logged just before that read: this is
+        # where a donation booked earlier actually takes effect.
+        if action == "multiplying" and entry.get("threads") is not None:
+            entry["threads_live"] = entry["threads"]
 
     if action == "locking":
         state.locking_pids.add(pid)
@@ -692,6 +764,8 @@ def handle_phase_line(state, content):
         tree_node.term = term
     else:
         tree_node.micro = action
+    if action == "multiplying":
+        attach_task_plan(state, pid, tree_node)
 
 
 def handle_task_start(state, content):
@@ -715,6 +789,11 @@ def handle_task_start(state, content):
             state.threads_seen = True
             state.thread_last_ts = float(m.group("ts"))
         entry["threads"] = int(thr)
+        # A launch grant is in force the moment the worker starts; a donation
+        # only reaches it when the worker next reads the shared slot, so leave
+        # threads_live alone and let handle_phase_line move it.
+        if m.group("action").strip() != "task donate":
+            entry["threads_live"] = int(thr)
 
     if (thr is not None or mem is not None) and state.tree_by_key and entry.get("i0") is not None:
         attach_task_plan(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
@@ -974,8 +1053,19 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
                 # what flags a task holding more than one thread slot. "x" is
                 # already the multiply in the term below, so the badge takes
                 # the multiplication sign to keep the two apart.
-                if node.threads is not None and node.threads > 1:
-                    label += f" | {MULTI_THR_ON}\u00d7{node.threads}{OFF}"
+                if node.threads is not None:
+                    live = node.threads_live
+                    if live is None:
+                        live = node.threads
+                    # Threads donated to a running task but not yet picked up,
+                    # in the RSS grey: like a measured RSS beside its estimate,
+                    # this is the softer half of the pair - the scheduler has
+                    # booked them, the worker is not on them yet.
+                    pending = max(0, node.threads - live)
+                    if node.threads > 1 or pending:
+                        label += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
+                        if pending:
+                            label += f" {RSS_ON}(\u00d7{pending}){OFF}"
                 if node.term:
                     op1, _, op2 = node.term.partition("x")
                     label += f" | {op1} x {op2}"
