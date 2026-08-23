@@ -177,6 +177,9 @@ RE_PIECE = re.compile(
 # the total shown is rebuilt from the per-task THR counts, which also fall as
 # tasks end, where SUM only ever states the value at one launch.
 # THR/SUM and MEM are both optional: older builds log neither.
+# "task donate" (the scheduler lending idle threads to a running task) repeats
+# this shape with that task's raised THR and re-booked MEM, and is read through
+# the same handler.
 RE_TASK_START = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|"
     r"(?:\s*THR\s+(?P<thr>\d+)\s+SUM\s+\d+(?:\s+MEM\s+(?P<mem>\d+))?)?"
@@ -245,7 +248,7 @@ class TreeNode:
         self.in_progress = False
         self.task_idx = None
         self.pid = None
-        self.threads = None  # threads this node's task was granted, from its "task start" line
+        self.threads = None  # threads this node's task holds, from "task start"/"task donate"
         self.start_time = None
         self.active_count = 0
         self.parent = parent
@@ -556,7 +559,7 @@ class State:
         self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
         self.active = {}  # pid -> {"start", "depth", "i0", "threads"}
         self.active_max = 0
-        self.threads_seen = False  # a "task start" line carried THR/SUM (older builds don't log it)
+        self.threads_seen = False  # a "task start"/"task donate" line carried THR/SUM (older builds don't log it)
         self.threads_reported = None  # scheduler's own "active threads" total, used until THR arrives
         self.thread_time = 0.0  # thread-seconds, in log time, for the utilization average
         self.thread_span = 0.0  # seconds those thread-seconds cover
@@ -776,6 +779,10 @@ def handle_phase_line(state, content):
 
 
 def handle_task_start(state, content):
+    """Also handles "task donate", which restates a running task's plan in the
+    same THR/SUM/MEM shape after the scheduler lends it idle threads. The pid is
+    already in state.active, so the raised counts just overwrite the launch
+    ones."""
     m = RE_TASK_START.match(content)
     if not m:
         return
@@ -884,6 +891,7 @@ DISPATCH = {
     "node_big_create": handle_node_process,
     "split_piece": handle_phase_line,
     "task_start": handle_task_start,
+    "task_donate": handle_task_start,
     "task_end": handle_task_end,
     "scheduler": handle_scheduler,
     "pi_tree": handle_phase,
