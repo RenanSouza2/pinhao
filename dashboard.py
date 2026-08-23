@@ -233,7 +233,7 @@ RAM_ALARM = 0.95
 class TreeNode:
     __slots__ = (
         "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
-        "own_done", "in_progress", "task_idx", "pid", "threads", "start_time", "active_count", "parent", "children",
+        "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro",
     )
 
@@ -248,7 +248,8 @@ class TreeNode:
         self.in_progress = False
         self.task_idx = None
         self.pid = None
-        self.threads = None  # threads this node's task holds, from "task start"/"task donate"
+        self.threads = None  # threads booked for this node's task, from "task start"/"task donate"
+        self.threads_live = None  # of those, the count the worker has picked up (see handle_phase_line)
         self.start_time = None
         self.active_count = 0
         self.parent = parent
@@ -331,6 +332,7 @@ def mark_node_done(node):
     node.task_idx = None
     node.pid = None
     node.threads = None
+    node.threads_live = None
     node.start_time = None
     node.term = None
     node.micro = None
@@ -644,6 +646,7 @@ def attach_task_plan(state, pid, tree_node):
         return
     if entry.get("threads") is not None:
         tree_node.threads = entry["threads"]
+        tree_node.threads_live = entry.get("threads_live")
     if entry.get("mem") is not None:
         tree_node.mem_estimate = entry["mem"]
 
@@ -752,6 +755,11 @@ def handle_phase_line(state, content):
     entry = state.active.get(pid)
     if entry is not None:
         entry["micro"] = action
+        # split_task_threads() re-reads the shared slot for each multiplication,
+        # and the "multiplying" line is logged just before that read: this is
+        # where a donation booked earlier actually takes effect.
+        if action == "multiplying" and entry.get("threads") is not None:
+            entry["threads_live"] = entry["threads"]
 
     if action == "locking":
         state.locking_pids.add(pid)
@@ -776,6 +784,8 @@ def handle_phase_line(state, content):
         tree_node.term = term
     else:
         tree_node.micro = action
+    if action == "multiplying":
+        attach_task_plan(state, pid, tree_node)
 
 
 def handle_task_start(state, content):
@@ -799,6 +809,11 @@ def handle_task_start(state, content):
             state.threads_seen = True
             state.thread_last_ts = float(m.group("ts"))
         entry["threads"] = int(thr)
+        # A launch grant is in force the moment the worker starts; a donation
+        # only reaches it when the worker next reads the shared slot, so leave
+        # threads_live alone and let handle_phase_line move it.
+        if m.group("action").strip() != "task donate":
+            entry["threads_live"] = int(thr)
 
     if (thr is not None or mem is not None) and state.tree_by_key and entry.get("i0") is not None:
         attach_task_plan(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
@@ -1074,8 +1089,19 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
                 # what flags a task holding more than one thread slot. "x" is
                 # already the multiply in the term below, so the badge takes
                 # the multiplication sign to keep the two apart.
-                if node.threads is not None and node.threads > 1:
-                    label += f" | {MULTI_THR_ON}\u00d7{node.threads}{OFF}"
+                if node.threads is not None:
+                    live = node.threads_live
+                    if live is None:
+                        live = node.threads
+                    # Threads donated to a running task but not yet picked up,
+                    # in the RSS grey: like a measured RSS beside its estimate,
+                    # this is the softer half of the pair - the scheduler has
+                    # booked them, the worker is not on them yet.
+                    pending = max(0, node.threads - live)
+                    if node.threads > 1 or pending:
+                        label += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
+                        if pending:
+                            label += f" {RSS_ON}(\u00d7{pending}){OFF}"
                 if node.term:
                     op1, _, op2 = node.term.partition("x")
                     label += f" | {op1} x {op2}"
