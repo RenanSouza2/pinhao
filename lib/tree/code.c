@@ -325,20 +325,21 @@ static bool scheduler_at_first_slot(tree_scheduler_p s)
     return !s->tasks[0].active;
 }
 
-static uint64_t node_threads(node_p n, uint64_t max_threads)
+static uint64_t node_threads_ceilling(node_p n)
 {
     if(node_is_leaf(n))
     {
         return 1;
     }
-
+    
     node_op_sizes(n);
-    uint64_t threads = num_mul_threads_ceiling(n->op_1, n->op_2);
-    if(threads > max_threads)
-    {
-        threads = max_threads;
-    }
+    return num_mul_threads_ceiling(n->op_1, n->op_2);
+}
 
+static uint64_t node_threads(node_p n, uint64_t free_threads)
+{
+    uint64_t threads = node_threads_ceilling(n);
+    threads = threads < free_threads ? threads : free_threads;
     return B(stdc_bit_width(threads) - 1);
 }
 
@@ -646,8 +647,32 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
             task_start(&s, n);
         }
 
-        tprintf("              %-20s| " U64P(2) "", "active processes", active);
-        pid_t pid = waitpid_safe(0, NULL);
+        for(uint64_t i=0; i<s.n_process && scheduler_has_slot(&s); i++)
+        {
+            tree_task_p t = &s.tasks[i];
+
+            if(!t->active)
+            {
+                continue;
+            }
+
+            uint64_t free_threads = scheduler_free_threads(&s) + t->n->plan.threads;
+            uint64_t threads = node_threads(t->n, free_threads);
+
+            if(threads == t->n->plan.threads)
+            {
+                continue;
+            }
+
+            s.total_threads += threads - t->n->plan.threads;
+            t->n->plan.threads = threads;
+        }
+
+        tprintf("              %-20s| " U64P(2) "", "active processes", s.active);
+        tprintf("              %-20s| " U64P(2) "", "active threads", s.total_threads);
+        int status;
+        pid_t pid = waitpid_safe(0, &status);
+        task_check_exit(pid, status);
 
         done = task_end(&s, pid);
     }
