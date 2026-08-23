@@ -1,5 +1,7 @@
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "debug.h"
@@ -232,9 +234,15 @@ STRUCT(tree_task)
     bool active;
 };
 
+// One thread grant per process index, in memory shared with the forked
+// workers: the scheduler writes, the worker owning that index reads. Must be
+// lock-free, or the atomic would take a lock private to each process.
+static_assert(ATOMIC_LLONG_LOCK_FREE == 2, "shared thread slots need lock-free 64-bit atomics");
+
 STRUCT(tree_scheduler)
 {
     tree_task_p tasks;
+    _Atomic uint64_t *threads_slot;
     uint64_t active;
     uint64_t total_mem_cost;
     uint64_t total_threads;
@@ -247,6 +255,14 @@ static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_l
 {
     tree_scheduler_t s = {
         .tasks = calloc(n_process, sizeof(tree_task_t)),
+        .threads_slot = mmap(
+            nullptr,
+            n_process * sizeof(_Atomic uint64_t),
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_ANONYMOUS,
+            -1,
+            0
+        ),
         .active = 0,
         .total_mem_cost = 0,
         .total_threads = 0,
@@ -255,7 +271,15 @@ static tree_scheduler_t tree_scheduler_create(uint64_t n_process, uint64_t mem_l
         .mem_max = mem_max
     };
     assert(s.tasks);
+    assert(s.threads_slot != MAP_FAILED);
     return s;
+}
+
+static void tree_scheduler_free(tree_scheduler_p s)
+{
+    int res = munmap(s->threads_slot, s->n_process * sizeof(_Atomic uint64_t));
+    assert(res == 0);
+    free(s->tasks);
 }
 
 static uint64_t get_free_index(tree_scheduler_p s)
@@ -325,20 +349,20 @@ static bool scheduler_at_first_slot(tree_scheduler_p s)
     return !s->tasks[0].active;
 }
 
-static uint64_t node_threads_ceilling(node_p n)
+static uint64_t node_threads_ceiling(node_p n)
 {
     if(node_is_leaf(n))
     {
         return 1;
     }
-    
+
     node_op_sizes(n);
     return num_mul_threads_ceiling(n->op_1, n->op_2);
 }
 
 static uint64_t node_threads(node_p n, uint64_t free_threads)
 {
-    uint64_t threads = node_threads_ceilling(n);
+    uint64_t threads = node_threads_ceiling(n);
     threads = threads < free_threads ? threads : free_threads;
     return B(stdc_bit_width(threads) - 1);
 }
@@ -459,7 +483,7 @@ static uint64_t node_get_next(node_p *out_n, tree_scheduler_p s, node_p n)
     return LAUNCH_SKIP;
 }
 
-static void node_big_process(node_p n, uint64_t index)
+static void node_big_process(node_p n, uint64_t index, const _Atomic uint64_t *threads)
 {
     int pid = (int)getpid();
     uint64_t size = n->as.big.size;
@@ -468,13 +492,20 @@ static void node_big_process(node_p n, uint64_t index)
     uint64_t depth = n->as.big.depth;
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
+    split_task_t t = {
+        .index = index,
+        .size = size,
+        .i_0 = i_0,
+        .depth = depth,
+        .threads = threads
+    };
     TIME_SETUP
-    split_big_res_join(index, size, i_0, remainder, depth, n->plan.threads);
+    split_big_res_join(&t, remainder);
     TIME_END(t1)
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, remainder, depth, dtime(t1));
 }
 
-static void node_span_process(node_p n, uint64_t index)
+static void node_span_process(node_p n, uint64_t index, const _Atomic uint64_t *threads)
 {
     int pid = (int)getpid();
     uint64_t size = n->as.span.size;
@@ -493,25 +524,32 @@ static void node_span_process(node_p n, uint64_t index)
     }
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, span, depth, n->plan.mem_cost);
+    split_task_t t = {
+        .index = index,
+        .size = size,
+        .i_0 = i_0,
+        .depth = depth,
+        .threads = threads
+    };
     TIME_SETUP
-    split_span_res_join(index, size, i_0, span, depth, n->plan.threads);
+    split_span_res_join(&t, span);
     TIME_END(t1)
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
 
-static void node_process(node_p n, uint64_t index)
+static void node_process(node_p n, uint64_t index, const _Atomic uint64_t *threads)
 {
     switch(n->type)
     {
         case NODE_BIG:
         {
-            node_big_process(n, index);
+            node_big_process(n, index, threads);
         }
         break;
 
         case NODE_SPAN:
         {
-            node_span_process(n, index);
+            node_span_process(n, index, threads);
         }
         break;
 
@@ -524,6 +562,7 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
     uint64_t index = get_free_index(s);
 
     n->processing = true;
+    atomic_store_explicit(&s->threads_slot[index], n->plan.threads, memory_order_relaxed);
 
     pid_t pid = fork_safe();
     if(pid == 0)
@@ -532,7 +571,7 @@ static pid_t task_start(tree_scheduler_p s, node_p n)
         fork_lock_processor(index);
 #endif
 
-        node_process(n, index);
+        node_process(n, index, &s->threads_slot[index]);
         exit(EXIT_SUCCESS);
     }
 
@@ -622,6 +661,58 @@ static void task_check_exit(pid_t pid, int status)
     TRAP("worker did not exit cleanly")
 }
 
+// Threads still idle after the launch pass are lent to tasks already running.
+// The grant goes into the task's shared slot; the worker picks it up at its
+// next multiplication. Lending only ever raises a grant -- it is never taken
+// back -- so a task keeps what it was lent until it exits.
+static void task_donate(tree_scheduler_p s)
+{
+    // No free slot means every process is active, and every active task holds
+    // at least one thread: there is nothing idle to lend.
+    if(!scheduler_has_slot(s))
+    {
+        return;
+    }
+
+    for(uint64_t i=0; i<s->n_process; i++)
+    {
+        tree_task_p t = &s->tasks[i];
+
+        if(!t->active)
+        {
+            continue;
+        }
+
+        node_p n = t->n;
+        uint64_t free_threads = scheduler_free_threads(s) + n->plan.threads;
+        uint64_t threads = node_threads(n, free_threads);
+
+        if(threads <= n->plan.threads)
+        {
+            continue;
+        }
+
+        // A wider fan-out holds more FFT buffers at once, so the booking has to
+        // be redone at the new count and still fit under mem_max.
+        uint64_t mem_cost = node_estimate_memory(n, threads);
+        uint64_t total_mem_cost = s->total_mem_cost - n->plan.mem_cost + mem_cost;
+        if(total_mem_cost >= s->mem_max)
+        {
+            continue;
+        }
+
+        s->total_threads += threads - n->plan.threads;
+        s->total_mem_cost = total_mem_cost;
+        n->plan.threads = threads;
+        n->plan.mem_cost = mem_cost;
+        atomic_store_explicit(&s->threads_slot[i], threads, memory_order_relaxed);
+
+        // Same THR/SUM/MEM shape as "task start", restating this task's plan.
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| THR " U64P(3) " SUM " U64P(3) " MEM " U64P(12) "",
+            i, (int)t->pid, get_wall_time(), "task donate", threads, s->total_threads, mem_cost);
+    }
+}
+
 static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
@@ -647,26 +738,7 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
             task_start(&s, n);
         }
 
-        for(uint64_t i=0; i<s.n_process && scheduler_has_slot(&s); i++)
-        {
-            tree_task_p t = &s.tasks[i];
-
-            if(!t->active)
-            {
-                continue;
-            }
-
-            uint64_t free_threads = scheduler_free_threads(&s) + t->n->plan.threads;
-            uint64_t threads = node_threads(t->n, free_threads);
-
-            if(threads == t->n->plan.threads)
-            {
-                continue;
-            }
-
-            s.total_threads += threads - t->n->plan.threads;
-            t->n->plan.threads = threads;
-        }
+        task_donate(&s);
 
         tprintf("              %-20s| " U64P(2) "", "active processes", s.active);
         tprintf("              %-20s| " U64P(2) "", "active threads", s.total_threads);
@@ -676,10 +748,9 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 
         done = task_end(&s, pid);
     }
-    free(s.tasks);
+    tree_scheduler_free(&s);
 }
 
-[[maybe_unused]]
 flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);

@@ -239,7 +239,13 @@ static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder,
 // Exact limb count of a stored union_num at the given index (0=P, 1=Q, 2=R),
 // read from its file header: a SIG-typed entry's count sits right after the
 // signal field; a FLT-typed entry is fixed-precision at `size`.
-static uint64_t union_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t index)
+static uint64_t union_res_op_size(
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t depth,
+    uint64_t index
+)
 {
     FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
     assert(fp);
@@ -314,7 +320,13 @@ bool split_span_res_is_stored(
 
 // Real op size for a span node's already-stored result -- mirrors
 // split_span_res_is_stored's SIG-vs-union check but returns the exact size instead.
-uint64_t split_span_res_op_size(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t index)
+uint64_t split_span_res_op_size(
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t span,
+    uint64_t depth,
+    uint64_t index
+)
 {
     if(sig_res_is_stored(i_0, span))
     {
@@ -473,9 +485,20 @@ void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t depth)
     );
 }
 
-void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t threads)
+// The scheduler can raise a running task's grant, so the count is read again
+// for every multiplication instead of once at the top of the join.
+static uint64_t split_task_threads(split_task_p t)
+{
+    return atomic_load_explicit(t->threads, memory_order_relaxed);
+}
+
+void split_span_res_join(split_task_p t, uint64_t span)
 {
     int pid = (int)getpid();
+    uint64_t index = t->index;
+    uint64_t size = t->size;
+    uint64_t i_0 = t->i_0;
+    uint64_t depth = t->depth;
 
     if(split_span_res_is_sig(size, i_0, span))
     {
@@ -503,7 +526,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
             sig_num_t sig;
             LOG_MUL(index, pid, i_0, span, depth,
-                sig = sig_num_mul_threads(sig_1, sig_2, threads);
+                sig = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
             );
 
             LOG_WRITE_HOLD(index, pid, i_0, span, depth,
@@ -526,7 +549,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         sig_num_t sig_r_1;
         LOG_MUL(index, pid, i_0, span, depth,
-            sig_r_1 = sig_num_mul_threads(sig_1, sig_2, threads);
+            sig_r_1 = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
         );
 
         LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
@@ -542,7 +565,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         sig_num_t sig_r_2;
         LOG_MUL(index, pid, i_0, span, depth,
-            sig_r_2 = sig_num_mul_threads(sig_1, sig_2, threads);
+            sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
         );
         LOG_WRITE(index, pid, i_0, span, depth,
             sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
@@ -581,7 +604,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
         union_num_t u;
         LOG_MUL(index, pid, i_0, span, depth,
-            u = union_num_mul_threads(u_1, u_2, threads);
+            u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
         LOG_WRITE_HOLD(index, pid, i_0, span, depth,
@@ -604,7 +627,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
     union_num_t u_r_1;
     LOG_MUL(index, pid, i_0, span, depth,
-        u_r_1 = union_num_mul_threads(u_1, u_2, threads);
+        u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         if(araucaria_disk_config_is_set())
         {
             u_r_1 = union_num_realloc_disk(u_r_1);
@@ -624,7 +647,7 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
 
     union_num_t u_r_2;
     LOG_MUL(index, pid, i_0, span, depth,
-        u_r_2 = union_num_mul_threads(u_1, u_2, threads);
+        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
     );
     LOG_WRITE(index, pid, i_0, span, depth,
         u_r_1 = union_num_add(u_r_1, u_r_2);
@@ -637,6 +660,10 @@ void split_span_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t s
     split_span_res_delete(size, i_0, span - 1, depth + 1);
     split_span_res_delete(size, i_0 + B(span - 1), span - 1, depth + 1);
 }
+
+// The single-process recursive path has no scheduler behind it: one thread,
+// never donated to.
+static const _Atomic uint64_t g_threads_solo = 1;
 
 // out vector length 3, returns P, Q, R in that order
 static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
@@ -662,7 +689,14 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
-    split_span_res_join(index, size, i_0, span, depth, 1);
+    split_task_t t = {
+        .index = index,
+        .size = size,
+        .i_0 = i_0,
+        .depth = depth,
+        .threads = &g_threads_solo
+    };
+    split_span_res_join(&t, span);
     TIME_END(t1)
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
@@ -704,7 +738,13 @@ bool split_big_res_is_stored(
 
 // Real op size for a big node's already-stored result -- mirrors
 // split_big_res_is_stored's span-collapse check but returns the exact size instead.
-uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t index)
+uint64_t split_big_res_op_size(
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t depth,
+    uint64_t index
+)
 {
     if(stdc_count_ones(remainder) == 1)
     {
@@ -715,9 +755,13 @@ uint64_t split_big_res_op_size(uint64_t size, uint64_t i_0, uint64_t remainder, 
     return union_res_op_size(size, i_0, remainder, depth, index);
 }
 
-void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth, uint64_t threads)
+void split_big_res_join(split_task_p t, uint64_t remainder)
 {
     int pid = (int)getpid();
+    uint64_t index = t->index;
+    uint64_t size = t->size;
+    uint64_t i_0 = t->i_0;
+    uint64_t depth = t->depth;
 
     file_t fp = union_res_open_write(size, i_0, remainder, depth);
 
@@ -745,7 +789,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
         union_num_t u;
         LOG_MUL(index, pid, i_0, remainder, depth,
-            u = union_num_mul_threads(u_1, u_2, threads);
+            u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
         LOG_WRITE_HOLD(index, pid, i_0, remainder, depth,
@@ -768,7 +812,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
     union_num_t u_r_1;
     LOG_MUL(index, pid, i_0, remainder, depth,
-        u_r_1 = union_num_mul_threads(u_1, u_2, threads);
+        u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         if(araucaria_disk_config_is_set())
         {
             u_r_1 = union_num_realloc_disk(u_r_1);
@@ -788,7 +832,7 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 
     union_num_t u_r_2;
     LOG_MUL(index, pid, i_0, remainder, depth,
-        u_r_2 = union_num_mul_threads(u_1, u_2, threads);
+        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
     );
 
     union_num_t u;
@@ -805,7 +849,14 @@ void split_big_res_join(uint64_t index, uint64_t size, uint64_t i_0, uint64_t re
 }
 
 // out vector length 3, returns P, Q, R in that order
-static void split_big(uint64_t index, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+[[maybe_unused]]
+static void split_big(
+    uint64_t index,
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t depth
+)
 {
     int pid = (int)getpid();
 
@@ -828,7 +879,14 @@ static void split_big(uint64_t index, uint64_t size, uint64_t i_0, uint64_t rema
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
-    split_big_res_join(index, size, i_0, remainder, depth, 1);
+    split_task_t t = {
+        .index = index,
+        .size = size,
+        .i_0 = i_0,
+        .depth = depth,
+        .threads = &g_threads_solo
+    };
+    split_big_res_join(&t, remainder);
     TIME_END(t1)
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
