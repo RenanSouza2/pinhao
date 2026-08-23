@@ -47,7 +47,7 @@ int main(void)
 
     uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
-    pi(256'000'000, 16, mem_launch, mem_max);
+    pi(32'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;
