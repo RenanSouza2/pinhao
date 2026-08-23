@@ -589,17 +589,38 @@ class State:
         return self.total_pieces - 1 if self.total_pieces else None
 
 
+def entry_threads(entry):
+    """Threads a worker is actually running on: its booked grant less any
+    donation it has not picked up yet. Falls back to the booked grant for a log
+    with no "task donate" lines, where the two are always the same."""
+    live = entry.get("threads_live")
+    return (live if live is not None else entry.get("threads")) or 0
+
+
 def active_threads(state):
-    """Threads currently booked by running tasks. Falls back to the
-    scheduler's own "active threads" line while no "task start" line has
-    carried THR yet - either the dashboard attached mid-run, or the run comes
-    from a build that doesn't log it.
+    """Threads running tasks are actually on. A donation is booked the instant
+    the scheduler makes it but only reaches the worker at its next
+    multiplication, so the part still pending is left to booked_threads().
+    Falls back to the scheduler's own "active threads" line while no "task
+    start" line has carried THR yet - either the dashboard attached mid-run, or
+    the run comes from a build that doesn't log it.
 
     "dividing" and "displaying" run entirely inside the root process on its
     own threads (flt_num_div_threads / flt_num_display_dec_threads), not
     through the fork()ed task scheduler, so state.active is empty for the
     whole phase - report the full thread budget instead of reading that as
     zero threads working."""
+    if state.phase in ("dividing", "displaying"):
+        return thread_budget(state)
+    if not state.threads_seen:
+        return state.threads_reported
+    return sum(entry_threads(entry) for entry in state.active.values())
+
+
+def booked_threads(state):
+    """Threads the scheduler has committed, pending donations included. This is
+    what decides whether another task can launch, so it - not active_threads -
+    is what "starved" and the over-booking readout are measured against."""
     if state.phase in ("dividing", "displaying"):
         return thread_budget(state)
     if not state.threads_seen:
@@ -968,7 +989,7 @@ def blocked_threads(state):
     waiting = 0
     io = 0
     for entry in state.active.values():
-        threads = entry.get("threads")
+        threads = entry_threads(entry)
         micro = entry.get("micro")
         if not threads or micro is None:
             continue
@@ -980,17 +1001,17 @@ def blocked_threads(state):
 
 
 def working_threads(state):
-    """Booked threads minus the ones parked on the lock or on I/O, capped at
+    """Active threads minus the ones parked on the lock or on I/O, capped at
     n_process: the scheduler can book past its own ceiling (a node overshooting
     mem_max is granted the full width in the first slot, on top of what the
     running tasks already hold), and those extra threads contend for the same
     cores rather than adding any. Uncapped, an oversubscribed stretch would
     bias the utilization average up for the rest of the run."""
-    booked = active_threads(state)
-    if booked is None:
+    active = active_threads(state)
+    if active is None:
         return None
     waiting, io = blocked_threads(state)
-    runnable = max(0, booked - waiting - io)
+    runnable = max(0, active - waiting - io)
     budget = thread_budget(state)
     return min(runnable, budget) if budget else runnable
 
@@ -1317,11 +1338,10 @@ def _completion_rows(state, bar_w):
     return rows
 
 
-def _threads_rows(state, bar_w, now, budget, threads_now):
+def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
     rows = []
     n_workers = state.n_process_logged or state.n_process or state.active_max
-    waiting, io_blocked = blocked_threads(state)
-    blocked_total = waiting + io_blocked
+    blocked_total = sum(blocked_threads(state))
 
     # Same shape as the completion box: a label column, values aligned under it,
     # and the bar indented to the value column instead of flush to the border.
@@ -1343,29 +1363,27 @@ def _threads_rows(state, bar_w, now, budget, threads_now):
         f"blocked: {workers_blocked}" if workers_blocked else "",
     ))
 
+    pending = max(0, (threads_booked or 0) - (threads_now or 0))
     if threads_now is not None:
         threads_row = f"threads: {threads_now} / {budget or '?'}"
-        if budget and threads_now > budget:
-            threads_row += f" (+{threads_now - budget} over)"
-        why = ", ".join(
-            part for part in (
-                f"{waiting} lock" if waiting else "",
-                f"{io_blocked} I/O" if io_blocked else "",
-            ) if part
-        )
-        blocked_half = ""
-        if blocked_total:
-            blocked_half = f"blocked: {blocked_total}" + (f"  ({why})" if why else "")
+        if budget and threads_booked is not None and threads_booked > budget:
+            threads_row += f" (+{threads_booked - budget} over)"
+        blocked_half = f"blocked: {blocked_total}" if blocked_total else ""
         rows.append(pair(threads_row, blocked_half))
 
     if budget and threads_now is not None:
-        # Booked and running, booked but parked on the lock or on I/O, and
-        # unbooked. The counts sum to max(threads_now, budget), so every booked
-        # thread keeps a cell when the scheduler has overbooked, and the marker
-        # says where n_process falls among them.
+        # Running, held but not running - parked on the lock or on I/O, or
+        # donated and not yet picked up - and unbooked. The counts sum to
+        # max(booked, budget), so every booked thread keeps a cell when the
+        # scheduler has overbooked, and the marker says where n_process falls
+        # among them.
         parked = min(blocked_total, threads_now)
-        counts = (threads_now - parked, parked, max(0, budget - threads_now))
-        mark = budget if threads_now > budget else None
+        counts = (
+            threads_now - parked,
+            parked + pending,
+            max(0, budget - threads_now - pending),
+        )
+        mark = budget if (threads_booked or 0) > budget else None
         # The marker adds a cell, so give the segments one less and the bar
         # keeps the width it has when nothing is overbooked.
         # Inverted severity: a full bar is the good end, so the ramp reads
@@ -1608,9 +1626,10 @@ def render(state):
     over_launch = bool(est is not None and state.mem_launch and est >= state.mem_launch)
     budget = thread_budget(state)
     threads_now = active_threads(state)
+    threads_booked = booked_threads(state)
 
     completion_lines = _completion_rows(state, done_bar_w)
-    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now)
+    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked)
     ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, ram_used, ram_total, pid_rss, est, real, over_launch)
     disk_lines = _disk_rows(state, disk_bar_w)
 
@@ -1642,7 +1661,9 @@ def render(state):
         # A ready node needs both a free thread and room under mem_launch to
         # start. With neither, the whole ready set is queued rather than about
         # to run, and the tree says so by dimming it.
-        starved = bool(over_launch or (budget and threads_now is not None and threads_now >= budget))
+        # Booked, not running: a donation nobody has picked up yet still keeps
+        # the next task from launching.
+        starved = bool(over_launch or (budget and threads_booked is not None and threads_booked >= budget))
         if state.tree_root is not None:
             render_tree(state.tree_root, TreeView(
                 lines, now, avg_piece_dur, avg_join_dur,
