@@ -483,7 +483,7 @@ static uint64_t node_get_next(node_p *out_n, tree_scheduler_p s, node_p n)
     return LAUNCH_SKIP;
 }
 
-static void node_big_process(node_p n, uint64_t index, const _Atomic uint64_t *threads)
+static void node_big_process(node_p n, uint64_t index, _Atomic uint64_t *threads)
 {
     int pid = (int)getpid();
     uint64_t size = n->as.big.size;
@@ -505,7 +505,7 @@ static void node_big_process(node_p n, uint64_t index, const _Atomic uint64_t *t
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, remainder, depth, dtime(t1));
 }
 
-static void node_span_process(node_p n, uint64_t index, const _Atomic uint64_t *threads)
+static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *threads)
 {
     int pid = (int)getpid();
     uint64_t size = n->as.span.size;
@@ -537,7 +537,7 @@ static void node_span_process(node_p n, uint64_t index, const _Atomic uint64_t *
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
 }
 
-static void node_process(node_p n, uint64_t index, const _Atomic uint64_t *threads)
+static void node_process(node_p n, uint64_t index, _Atomic uint64_t *threads)
 {
     switch(n->type)
     {
@@ -664,7 +664,9 @@ static void task_check_exit(pid_t pid, int status)
 // Threads still idle after the launch pass are lent to tasks already running.
 // The grant goes into the task's shared slot; the worker picks it up at its
 // next multiplication. Lending only ever raises a grant -- it is never taken
-// back -- so a task keeps what it was lent until it exits.
+// back -- so a task keeps what it was lent until it exits. A task that has
+// begun its final multiplication has closed its slot and is skipped: it would
+// never read the grant, and the threads would sit booked until it exits.
 static void task_donate(tree_scheduler_p s)
 {
     // No free slot means every process is active, and every active task holds
@@ -679,6 +681,12 @@ static void task_donate(tree_scheduler_p s)
         tree_task_p t = &s->tasks[i];
 
         if(!t->active)
+        {
+            continue;
+        }
+
+        uint64_t slot = atomic_load_explicit(&s->threads_slot[i], memory_order_relaxed);
+        if(slot & SPLIT_TASK_CLOSED)
         {
             continue;
         }
@@ -701,11 +709,25 @@ static void task_donate(tree_scheduler_p s)
             continue;
         }
 
+        // Loses to a task closing its slot in the same window, so a donation
+        // is never booked against a worker that will not read it.
+        if(
+            !atomic_compare_exchange_strong_explicit(
+                &s->threads_slot[i],
+                &slot,
+                threads,
+                memory_order_relaxed,
+                memory_order_relaxed
+            )
+        )
+        {
+            continue;
+        }
+
         s->total_threads += threads - n->plan.threads;
         s->total_mem_cost = total_mem_cost;
         n->plan.threads = threads;
         n->plan.mem_cost = mem_cost;
-        atomic_store_explicit(&s->threads_slot[i], threads, memory_order_relaxed);
 
         // Same THR/SUM/MEM shape as "task start", restating this task's plan.
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| THR " U64P(3) " SUM " U64P(3) " MEM " U64P(12) "",

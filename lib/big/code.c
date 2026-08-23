@@ -489,7 +489,16 @@ void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t depth)
 // for every multiplication instead of once at the top of the join.
 static uint64_t split_task_threads(split_task_p t)
 {
-    return atomic_load_explicit(t->threads, memory_order_relaxed);
+    return atomic_load_explicit(t->threads, memory_order_relaxed) & ~SPLIT_TASK_CLOSED;
+}
+
+// The grant for a join's last multiplication. Closing and reading in one step:
+// a donation that lands before this is still used, and the scheduler's
+// compare-exchange shuts out one that would land after.
+static uint64_t split_task_threads_final(split_task_p t)
+{
+    uint64_t slot = atomic_fetch_or_explicit(t->threads, SPLIT_TASK_CLOSED, memory_order_relaxed);
+    return slot & ~SPLIT_TASK_CLOSED;
 }
 
 void split_span_res_join(split_task_p t, uint64_t span)
@@ -565,7 +574,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
         sig_num_t sig_r_2;
         LOG_MUL(index, pid, i_0, span, depth,
-            sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
+            sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
         );
         LOG_WRITE(index, pid, i_0, span, depth,
             sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
@@ -647,7 +656,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
     union_num_t u_r_2;
     LOG_MUL(index, pid, i_0, span, depth,
-        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
     );
     LOG_WRITE(index, pid, i_0, span, depth,
         u_r_1 = union_num_add(u_r_1, u_r_2);
@@ -660,10 +669,6 @@ void split_span_res_join(split_task_p t, uint64_t span)
     split_span_res_delete(size, i_0, span - 1, depth + 1);
     split_span_res_delete(size, i_0 + B(span - 1), span - 1, depth + 1);
 }
-
-// The single-process recursive path has no scheduler behind it: one thread,
-// never donated to.
-static const _Atomic uint64_t g_threads_solo = 1;
 
 // out vector length 3, returns P, Q, R in that order
 static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
@@ -689,12 +694,14 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
+    // No scheduler behind this path: one thread, never donated to.
+    _Atomic uint64_t threads_solo = 1;
     split_task_t t = {
         .index = index,
         .size = size,
         .i_0 = i_0,
         .depth = depth,
-        .threads = &g_threads_solo
+        .threads = &threads_solo
     };
     split_span_res_join(&t, span);
     TIME_END(t1)
@@ -832,7 +839,7 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
 
     union_num_t u_r_2;
     LOG_MUL(index, pid, i_0, remainder, depth,
-        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
     );
 
     union_num_t u;
@@ -879,12 +886,14 @@ static void split_big(
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
+    // No scheduler behind this path: one thread, never donated to.
+    _Atomic uint64_t threads_solo = 1;
     split_task_t t = {
         .index = index,
         .size = size,
         .i_0 = i_0,
         .depth = depth,
-        .threads = &g_threads_solo
+        .threads = &threads_solo
     };
     split_big_res_join(&t, remainder);
     TIME_END(t1)

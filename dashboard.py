@@ -332,11 +332,58 @@ def pi_process_running():
         return False
 
 
+def _parse_etime(text):
+    """Seconds from a ps elapsed-time field: plain seconds (procps etimes) or
+    [[dd-]hh:]mm:ss (BSD etime)."""
+    days, sep, clock = text.partition("-")
+    if not sep:
+        days, clock = "0", text
+    parts = clock.split(":")
+    if len(parts) > 3:
+        raise ValueError(text)
+    secs = 0
+    for part in parts:
+        secs = secs * 60 + int(part)
+    return int(days) * 86400 + secs
+
+
+# "etimes" is procps-only; macOS ps rejects the keyword outright (whole call
+# fails, not just that column), leaving only "etime". Settled on first use.
+_PS_ETIME_KEYWORD = None
+
+
+def _ps_etimes(pids):
+    """[(pid, elapsed seconds)] for pids still alive, [] if ps gave nothing."""
+    global _PS_ETIME_KEYWORD
+    for keyword in ([_PS_ETIME_KEYWORD] if _PS_ETIME_KEYWORD else ["etimes", "etime"]):
+        try:
+            out = subprocess.run(
+                ["ps", "-o", f"pid=,{keyword}=", "-p", ",".join(pids)],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+        except OSError:
+            return []
+        if out.returncode != 0:
+            continue
+        rows = []
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                rows.append((int(parts[0]), _parse_etime(parts[1])))
+            except ValueError:
+                continue
+        _PS_ETIME_KEYWORD = keyword
+        return rows
+    return []
+
+
 def _oldest_run_pid_and_etime():
-    """(pid, etimes) of the run's original process, taken from the oldest pid
-    matching the run: workers are fork()ed (not exec'd) from the same binary,
-    so they all share its command line and pgrep -f matches every one of
-    them - the oldest pid is the original parent."""
+    """(pid, elapsed seconds) of the run's original process, taken from the
+    oldest pid matching the run: workers are fork()ed (not exec'd) from the
+    same binary, so they all share its command line and pgrep -f matches every
+    one of them - the oldest pid is the original parent."""
     try:
         result = subprocess.run(
             ["pgrep", "-f", r"src/(main|debug)\.o"],
@@ -349,22 +396,10 @@ def _oldest_run_pid_and_etime():
     pids = [p for p in result.stdout.split() if p]
     if not pids:
         return None, None
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "pid=,etimes=", "-p", ",".join(pids)],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-    except OSError:
-        return None, None
-    if out.returncode != 0:
-        return None, None
     best_pid, best_etime = None, -1
-    for line in out.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            pid, etime = int(parts[0]), int(parts[1])
-            if etime > best_etime:
-                best_pid, best_etime = pid, etime
+    for pid, etime in _ps_etimes(pids):
+        if etime > best_etime:
+            best_pid, best_etime = pid, etime
     return best_pid, best_etime
 
 
@@ -553,6 +588,7 @@ class State:
         self.process_gone_since = None  # time.time() process_running first went False since done
         self.ever_saw_process = False
         self.run_start_time = None  # wall-clock start of the actual pi process, from get_run_start_time()
+        self.run_end_time = None  # wall-clock end, from the "display end" line's own stamp
         self.root_pid = None  # the run's own pid, from get_root_pid() - only looked up once needed
         self.done = False
 
@@ -872,7 +908,8 @@ def handle_phase(state, content):
     elif action == "display begin":
         set_phase(state, "displaying")
     elif action == "display end":
-        set_phase(state, "displayed")
+        set_phase(state, "displayed", ts)
+        state.run_end_time = float(ts) if ts is not None else time.time()
         state.done = True
 
 
@@ -1509,11 +1546,13 @@ def render(state):
     lines.append("")
 
     now = time.time()
-    elapsed = now - state.start_time if state.start_time else 0
-    lines.append(f"phase:   {state.phase}")
+    # Both timers stop at the run's own "display end" stamp, like the phase
+    # timer: past that the wall clock is measuring the dashboard, not the run.
+    end = state.run_end_time if state.run_end_time is not None else now
+    elapsed = max(0.0, end - state.start_time) if state.start_time else 0
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
     if state.run_start_time is not None:
-        run_elapsed = now - state.run_start_time
+        run_elapsed = max(0.0, end - state.run_start_time)
         lines.append(f"run:     {fmt_duration(run_elapsed)} (since process start)")
 
     piece_durs = [d for _, d in state.piece_events]
