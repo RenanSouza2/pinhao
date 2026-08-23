@@ -1546,10 +1546,11 @@ def render(state):
     lines.append("")
 
     now = time.time()
-    # Both timers stop at the run's own "display end" stamp, like the phase
-    # timer: past that the wall clock is measuring the dashboard, not the run.
+    # Only the run timer stops at the run's own "display end" stamp, like the
+    # phase timer. The one above it is measuring the dashboard by definition,
+    # so it keeps counting for as long as the dashboard is up.
     end = state.run_end_time if state.run_end_time is not None else now
-    elapsed = max(0.0, end - state.start_time) if state.start_time else 0
+    elapsed = max(0.0, now - state.start_time) if state.start_time else 0
     lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
     if state.run_start_time is not None:
         run_elapsed = max(0.0, end - state.run_start_time)
