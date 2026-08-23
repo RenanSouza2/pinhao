@@ -769,7 +769,11 @@ def handle_untracked(state, content):
 
 DISPATCH = {
     "node_process": handle_node_process,
-    "split_piece": handle_piece,
+    "node_big_process": handle_node_process,
+    "node_span_process": handle_node_process,
+    "node_span_create": handle_node_process,
+    "node_big_create": handle_node_process,
+    "split_piece": handle_phase_line,
     "task_start": handle_task_start,
     "task_end": handle_task_end,
     "scheduler": handle_scheduler,

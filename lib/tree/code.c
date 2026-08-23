@@ -38,7 +38,6 @@ STRUCT(node)
     node_p parent;
     uint64_t type;
     bool processing;
-    bool is_stored;
     bool ops_set;
     uint64_t op_1;
     uint64_t op_2;
@@ -62,6 +61,12 @@ static node_p node_span_create(
 ) {
     assert(span >= TREE_PIECE_SIZE);
 
+    if(split_span_res_is_stored(size, i_0, span, depth))
+    {
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), (int)getpid(), get_wall_time(), "already stored", i_0, span, depth);
+        return NULL;
+    }
+
     node_p n = malloc(sizeof(node_t));
     assert(n);
 
@@ -69,7 +74,7 @@ static node_p node_span_create(
         .parent = parent,
         .type = NODE_SPAN,
         .processing = false,
-        .a.s = (span_t){
+        .as.span = (span_t){
             .size = size,
             .i_0 = i_0,
             .span = span,
@@ -99,6 +104,12 @@ static node_p node_big_create(
         return node_span_create(parent, size, i_0, span, depth);
     }
 
+    if(split_big_res_is_stored(size, i_0, remainder, depth))
+    {
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), (int)getpid(), get_wall_time(), "already stored", i_0, remainder, depth);
+        return NULL;
+    }
+
     node_p n = malloc(sizeof(node_t));
     assert(n);
 
@@ -106,7 +117,7 @@ static node_p node_big_create(
         .parent = parent,
         .type = NODE_BIG,
         .processing = false,
-        .a.b = (big_t){
+        .as.big = (big_t){
             .size = size,
             .i_0 = i_0,
             .remainder = remainder,
@@ -392,28 +403,6 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
     return LAUNCH_SKIP;
 }
 
-static void node_process_stored(node_p n)
-{
-    int pid = (int)getpid();
-
-    switch(n->type)
-    {
-        case NODE_BIG:
-        {
-            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), pid, get_wall_time(), "already stored", n->as.big.i_0, n->as.big.remainder, n->as.big.depth);
-        }
-        break;
-
-        case NODE_SPAN:
-        {
-            tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), pid, get_wall_time(), "already stored", n->as.span.i_0, n->as.span.span, n->as.span.depth);
-        }
-        break;
-
-        default: revert()
-    }
-}
-
 static uint64_t node_get_next(node_p *out_n, tree_scheduler_p s, node_p n)
 {
     if(!node_is_open(n))
@@ -434,12 +423,9 @@ static uint64_t node_get_next(node_p *out_n, tree_scheduler_p s, node_p n)
         }
 
         n->children[i].n = node_expand(n, i);
-        if(n->children[i].n->is_stored)
+        if(n->children[i].n == NULL)
         {
-            node_process_stored(n->children[i].n);
             n->children[i].done = true;
-            free(n->children[i].n);
-            n->children[i].n = NULL;
         }
     }
 
@@ -639,10 +625,8 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
     node_p n_root = node_big_create(NULL, size, 1, index_max, 0);
-    if(n_root->is_stored)
+    if(n_root == NULL)
     {
-        node_process_stored(n_root);
-        free(n_root);
         return;
     }
 
