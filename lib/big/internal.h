@@ -5,17 +5,24 @@
 
 #include "header.h"
 #include "../../mods/macros/struct.h"
+#include "../../mods/macros/uint.h"
+
+// Set by the task itself once it has begun its final multiplication: past that
+// it never reads the slot again, so a donation would be booked and never used.
+#define SPLIT_TASK_CLOSED B(63)
 
 // A task handed to a join: the node's identity, plus a pointer to this task's
 // thread grant in the scheduler's shared slot array. The scheduler can raise
-// the grant while the join runs, so every multiplication re-reads it.
+// the grant while the join runs, so every multiplication re-reads it. The
+// grant is the low bits; SPLIT_TASK_CLOSED rides on the same word so closing
+// and reading can be one atomic step.
 STRUCT(split_task)
 {
     uint64_t index;
     uint64_t size;
     uint64_t i_0;
     uint64_t depth;
-    const _Atomic uint64_t *threads;
+    _Atomic uint64_t *threads;
 };
 
 bool split_big_res_is_stored(
