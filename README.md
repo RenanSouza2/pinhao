@@ -89,6 +89,19 @@ output to `thread_log/run.log`:
 ./run_debug.sh  # debug build with sanitizers
 ```
 
+Every run opens with a `=== run <timestamp> | main.c <cksum> ===` marker, and
+wipes `thread_log/` first. Pass `--keep` to append to the existing log instead;
+`dashboard.py` resets its parser on each marker and shows the newest run:
+```bash
+./run.sh --keep
+```
+
+`--keep` is for stacking runs of one configuration, so it refuses when
+`src/main.c` — where every `pi()` argument is a literal — has changed since the
+run that wrote the log; `--force` appends anyway. The dashboard checks the same
+thing exactly, from the config lines `pi_tree` logs, and warns when a run
+disagrees with the one before it in the log.
+
 While a run is in progress (or after one finishes), `./dashboard.py` renders
 a live terminal dashboard from `thread_log/run.log`:
 ```bash

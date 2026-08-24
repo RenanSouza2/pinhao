@@ -560,6 +560,9 @@ class State:
         self.mem_max = None  # the first slot may overshoot up to here beside running tasks
         self.mem_solo = None  # past here the first slot runs only with nothing else running
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
+        self.config = {}  # every "<label> | <int>" config line this run logged
+        self.prev_config = {}  # the same, from the run before this one in an appended log
+        self.config_diff = {}  # name -> (previous run's value, this run's) where the two disagree
         self.pieces_done = 0
         self.pieces_from_cache = 0
         self.joins_done = 0
@@ -879,15 +882,34 @@ def handle_scheduler(state, content):
 def handle_phase(state, content):
     m = RE_PIECE_SIZE.match(content)
     if m:
-        apply_piece_size(int(m.group("piece_size")))
-        if state.total_pieces is None and state.explicit_size is not None:
-            apply_index_max(state, get_index_max(state.explicit_size))
-        return
-
-    m = RE_RUN_SIZE.match(content)
-    if m:
-        if state.total_pieces is None:
-            apply_index_max(state, int(m.group("index_max")))
+        name, val = m.group("name"), int(m.group("val"))
+        state.config[name] = val
+        # run.sh --keep is for stacking runs of one config; a disagreement
+        # across the boundary means the log now holds two different runs.
+        if state.prev_config.get(name, val) != val:
+            state.config_diff[name] = (state.prev_config[name], val)
+        if name == "piece size":
+            apply_piece_size(val)
+            if state.total_pieces is None and state.explicit_size is not None:
+                apply_index_max(state, get_index_max(state.explicit_size))
+        elif name == "run size":
+            # The log wins over --size, which only exists to fill the totals in
+            # one line earlier: a --size left over from an earlier run would
+            # otherwise size the tree, the progress bar and every ETA for the
+            # whole run. Rebuilds only on a real disagreement, so a matching
+            # --size keeps the tree it already built.
+            if state.total_pieces != val // PIECES_PER_LEAF:
+                apply_index_max(state, val)
+        elif name == "n process":
+            state.n_process_logged = val
+        elif name == "mem launch":
+            state.mem_launch = val
+        elif name == "mem max":
+            state.mem_max = val
+        elif name == "mem solo":
+            state.mem_solo = val
+        elif name == "disk lock":
+            state.disk_lock_enabled = bool(val)
         return
 
     m = RE_PHASE.match(content)
@@ -1574,6 +1596,15 @@ def render(state):
                 "- the run may have stopped"
             )
 
+    if state.config_diff:
+        detail = ", ".join(
+            f"{name} {before} -> {after}" for name, (before, after) in sorted(state.config_diff.items())
+        )
+        lines.append(
+            f"{ALERT_ON}WARNING: config changed from the previous run in this log "
+            f"({detail}){ALERT_OFF}"
+        )
+
     lines.append("")
 
     ram_used, ram_total = get_system_ram()
@@ -1678,6 +1709,13 @@ def render(state):
 
 
 RESTARTED = object()
+
+# run.sh --keep appends the next run to the same file, so the inode stops
+# changing between runs and tail() never reports a restart. The marker the
+# script writes ahead of the run is the only boundary there is; matched
+# anywhere in the record because a finished run's last line ends in a tab
+# rather than a newline, which can glue the marker onto it.
+RUN_MARKER = "=== run "
 
 
 def tail(path):
@@ -1887,8 +1925,12 @@ def main():
     try:
         last_render = 0.0
         for line in tail(args.log_path):
-            if line is RESTARTED:
+            if line is RESTARTED or (line is not None and RUN_MARKER in line):
+                # Only across a marker: a RESTARTED is a new file, with no
+                # previous run to disagree with.
+                prev_config = state.config if line is not RESTARTED else {}
                 state = make_state()
+                state.prev_config = prev_config
                 done_announced = False
                 continue
             if line is not None:
