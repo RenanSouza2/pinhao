@@ -105,12 +105,14 @@ BAR_ON = "\x1b[38;2;110;128;184m"
 # weight: a bar is already a loud shape, so the tone alone carries it.
 BAR_ALERT = "\x1b[38;2;224;122;95m"
 
-# The mid-limit mark, in the amber SEVERITY_STOPS reaches at 0.70. Sharing the
-# ramp's own tone puts the memory tiers on the escalation the bar colour walks:
-# default foreground, amber, coral - a ladder rather than three unrelated
-# rules. It is IO_ATTN_ON's hue, but that one only ever marks a micro-phase in
-# the tree, so the two never sit on the same reading.
-BAR_WARN = "\x1b[38;2;201;166;107m"
+# The mid-limit mark, in BAR_ALERT's coral: mem max and mem solo carry the same
+# tone, and only their position on the bar tells them apart.
+BAR_WARN = "\x1b[38;2;224;122;95m"
+
+# The soft-limit mark, in the amber SEVERITY_STOPS reaches at 0.70. It is
+# IO_ATTN_ON's hue, but that one only ever marks a micro-phase in the tree, so
+# the two never sit on the same reading.
+BAR_INFO = "\x1b[38;2;201;166;107m"
 
 # Marks laid on a bar: a dotted rule for a threshold, a half cell for a
 # measured value. Shape says which kind of reading it is, so colour is left
@@ -1491,7 +1493,8 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         tiers = "  ".join(
             f"{colour}{BAR_LIMIT}{fmt_bytes(limit)}{OFF}"
             for limit, colour in (
-                (state.mem_launch, ""), (state.mem_max, BAR_WARN), (state.mem_solo, BAR_ALERT),
+                (state.mem_launch, BAR_INFO), (state.mem_max, BAR_WARN),
+                (state.mem_solo, BAR_ALERT),
             ) if limit
         )
         row = "workers:".ljust(LABEL_W) + reading
@@ -1516,7 +1519,7 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         # the run has emptied out to a single task.
         ticks = []
         drawn = set()
-        for limit, colour in ((state.mem_launch, OFF), (state.mem_max, BAR_WARN),
+        for limit, colour in ((state.mem_launch, BAR_INFO), (state.mem_max, BAR_WARN),
                               (state.mem_solo, BAR_ALERT)):
             # A limit at the end of the scale needs no rule: the bar stops
             # there, so the bracket already draws it. It earns one back the
