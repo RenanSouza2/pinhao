@@ -51,15 +51,16 @@ static void split_sig_join(
 }
 
 // out vector length 3, returns P, Q, R in that order
-// NOLINTBEGIN(readability-magic-numbers)
 static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 {
     if(span == 0)
     {
+        // NOLINTBEGIN(readability-magic-numbers)
         int128_t p = ((int128_t)2 * i_0) - 3;
         int128_t q = ((int128_t)8 * i_0);
         int128_t u = (int128_t)1 - ((int128_t)2 * i_0);
         int128_t v = ((int128_t)2 * i_0) + 1;
+        // NOLINTEND(readability-magic-numbers)
 
         out[0] = sig_num_wrap_int128(p * v);
         out[1] = sig_num_wrap_int128(q * v);
@@ -73,7 +74,6 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
     split_sig(res_2, i_0 + B(span - 1), span - 1);
     split_sig_join(out, res_1, res_2);
 }
-// NOLINTEND(readability-magic-numbers)
 
 
 

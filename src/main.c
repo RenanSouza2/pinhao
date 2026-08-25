@@ -39,15 +39,16 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    // araucaria_disk_config_t config = {
-    //     .disk_path = "/mnt/wsl/workspace/tmp",
-    //     .disk_threshold_bytes = 2'048'000'000 // bytes per number
-    // };
-    // araucaria_disk_config_set(&config);
+    uint64_t mem_launch = U64(35) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(40) * 1024 * 1024 * 1024;
 
-    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
-    pi(64'000'000, 16, mem_launch, mem_max);
+    araucaria_disk_config_t config = {
+        .disk_path = "cache/tmp",
+        .disk_threshold_bytes = mem_max / 2
+    };
+    araucaria_disk_config_set(&config);
+
+    pi(2'000'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;

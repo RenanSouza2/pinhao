@@ -326,7 +326,12 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 
     node_op_sizes(n);
 
-    return num_mul_estimate_memory(n->op_1, n->op_2, UINT64_MAX, threads);
+    return num_mul_estimate_memory(
+        n->op_1,
+        n->op_2,
+        araucaria_disk_config_get_threshold_bytes(),
+        threads
+    );
 }
 
 static bool scheduler_has_slot(tree_scheduler_p s)
