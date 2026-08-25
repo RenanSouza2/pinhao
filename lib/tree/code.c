@@ -16,6 +16,11 @@
 #define TREE_PIECE_SIZE 24
 #define TREE_LEAF_COST_BYTES (U64(512) * 1024 * 1024)
 
+// index into node.ops, matching split_sig_join's P, Q, R ordering
+#define NODE_OP_P 0
+#define NODE_OP_Q 1
+#define NODE_OP_R 2
+
 #define NODE_BIG 0
 #define NODE_SPAN 1
 
@@ -55,8 +60,8 @@ STRUCT(node)
     uint64_t type;
     bool processing;
     bool ops_set;
-    uint64_t op_1;
-    uint64_t op_2;
+    // [0] left child, [1] right child; inner index is NODE_OP_P/Q/R
+    uint64_t ops[2][3];
     tree_plan_t plan;
     union {
         big_t big;
@@ -223,8 +228,11 @@ static void node_op_sizes(node_p n)
             uint64_t span = n->as.span.span;
             uint64_t depth = n->as.span.depth;
 
-            n->op_1 = split_span_res_op_size(size, i_0, span - 1, depth + 1, 2);
-            n->op_2 = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
+            for(uint64_t i = 0; i < 3; i++)
+            {
+                n->ops[0][i] = split_span_res_op_size(size, i_0, span - 1, depth + 1, i);
+                n->ops[1][i] = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1, i);
+            }
         }
         break;
 
@@ -236,8 +244,11 @@ static void node_op_sizes(node_p n)
             uint64_t depth = n->as.big.depth;
             uint64_t span = stdc_bit_width(remainder) - 1;
 
-            n->op_1 = split_span_res_op_size(size, i_0, span, depth + 1, 2);
-            n->op_2 = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
+            for(uint64_t i = 0; i < 3; i++)
+            {
+                n->ops[0][i] = split_span_res_op_size(size, i_0, span, depth + 1, i);
+                n->ops[1][i] = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1, i);
+            }
         }
         break;
 
@@ -326,12 +337,31 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 
     node_op_sizes(n);
 
-    return num_mul_estimate_memory(
-        n->op_1,
-        n->op_2,
-        araucaria_disk_config_get_threshold_bytes(),
-        threads
+    uint64_t threshold = araucaria_disk_config_get_threshold_bytes();
+
+    // split_span_res_join's four terms, in order: P1xP2, Q1xQ2, P1xR2, R1xQ2
+    const uint64_t terms[4][2] = {
+        { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_P] },
+        { n->ops[0][NODE_OP_Q], n->ops[1][NODE_OP_Q] },
+        { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_R] },
+        { n->ops[0][NODE_OP_R], n->ops[1][NODE_OP_Q] }
+    };
+
+    double total = 0.0;
+    for(uint64_t i = 0; i < 4; i++)
+    {
+        total += (double)num_mul_estimate_memory(terms[i][0], terms[i][1], threshold, threads);
+    }
+
+    // P1xR2's product stays live across R1xQ2, so it counts for one term
+    total += (double)num_estimate_ram_bytes(
+        n->ops[0][NODE_OP_P] + n->ops[1][NODE_OP_R],
+        threshold
     );
+
+    // P, Q and R run within a few percent of each other, so the four terms are
+    // weighted equally rather than by a duration that would not tell them apart
+    return (uint64_t)(total / 4.0);
 }
 
 static bool scheduler_has_slot(tree_scheduler_p s)
@@ -382,7 +412,7 @@ static uint64_t node_threads_ceiling(node_p n)
     }
 
     node_op_sizes(n);
-    return num_mul_threads_ceiling(n->op_1, n->op_2);
+    return num_mul_threads_ceiling(n->ops[0][NODE_OP_R], n->ops[1][NODE_OP_Q]);
 }
 
 static uint64_t node_threads(node_p n, uint64_t free_threads)
