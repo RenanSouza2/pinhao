@@ -39,8 +39,8 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    uint64_t mem_launch = U64(35) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(40) * 1024 * 1024 * 1024;
+    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
 
     araucaria_disk_config_t config = {
         .disk_path = "cache/tmp",

@@ -1224,7 +1224,8 @@ def post_split_done(state):
 BOX_MIN_WIDTH = 24
 
 
-def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks=()):
+def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks=(),
+               tick_cols=None):
     """A bracketed bar of `width` cells split between `glyphs` in proportion to
     `counts`. Apportioned by largest remainder, so the segments always sum to
     the full width and a segment is empty only when its count really is zero --
@@ -1249,7 +1250,12 @@ def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks
     each laid on the bar at its own position and each widening it by one cell.
     Unlike `mark` they may sit on either bracket; a caller whose scale ends on
     one of its own thresholds is better off dropping that tick, since the
-    bracket there already says the same thing."""
+    bracket there already says the same thing.
+
+    `tick_cols`, if a list, is filled with the column each tick landed on,
+    counted from the first cell inside the left bracket. A caller labelling its
+    ticks cannot work these out for itself: every insert shifts the ones right
+    of it, so a threshold's column depends on how many ticks precede it."""
     tints = colour if isinstance(colour, tuple) else (BAR_ON if colour is None else colour,) * len(counts)
     total = sum(counts)
     if total <= 0:
@@ -1288,11 +1294,19 @@ def render_bar(width, counts, glyphs, mark=None, colour=None, cursor=None, ticks
         # Left in the default foreground so it reads against the bar rather
         # than as part of it.
         inserts.append((at, (OFF, tick)))
+    first_tick = len(inserts)
     for value, glyph, pen in ticks:
         inserts.append((min(max(round(width * value / total), 0), width), (pen, glyph)))
+    # `where` takes every insertion `cells` takes, so an insert's final column
+    # is just where its own index ended up - no need to reason about how the
+    # shifts compose.
+    where = [None] * len(cells)
     # Rightmost first, so an insertion never shifts one still to be placed.
-    for index, cell in sorted(inserts, key=lambda p: p[0], reverse=True):
-        cells.insert(index, cell)
+    for k in sorted(range(len(inserts)), key=lambda i: inserts[i][0], reverse=True):
+        cells.insert(inserts[k][0], inserts[k][1])
+        where.insert(inserts[k][0], k)
+    if tick_cols is not None:
+        tick_cols.extend(where.index(k) for k in range(first_tick, len(inserts)))
     out, current = [], None
     for t, g in cells:
         if t != current:
@@ -1455,6 +1469,31 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
     return rows
 
 
+def _tier_row(state, bar_w, cols):
+    """The memory tiers written under the bar, each ending on its own rule.
+
+    `cols` maps a limit to the column its tick landed on; a limit with no tick
+    sits on the closing bracket, which already draws it. Labels are laid from
+    the right, and one that will not clear the label beside it is dropped
+    rather than nudged aside - a tier shifted off its rule reads as a threshold
+    somewhere it is not, which is worse than not naming it at all."""
+    end = bar_w  # the closing bracket, counted like a tick column
+    tiers = [(cols.get(limit, end), f"{fmt_bytes(limit)}{BAR_LIMIT}", colour)
+             for limit, colour in ((state.mem_launch, BAR_INFO), (state.mem_max, BAR_WARN),
+                                   (state.mem_solo, BAR_ALERT)) if limit]
+    out, taken = [], None
+    for col, text, colour in sorted(tiers, reverse=True):
+        start = LABEL_W + 1 + col - len(text) + 1
+        if start < LABEL_W or (taken is not None and start + len(text) > taken):
+            continue
+        taken = start
+        out.append((start, f"{colour}{text}{OFF}"))
+    line = ""
+    for start, text in sorted(out):
+        line += " " * (start - visible_len(line)) + text
+    return line
+
+
 def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over_launch):
     rows = []
     # The box's top right corner reads whether the scheduler can still admit
@@ -1487,24 +1526,7 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         # beside it stays grey. Same pair, same order, same colours as the
         # label on a running node, so it reads the same wherever it appears.
         reading = f"{fmt_bytes(est)} / {RSS_ON}{fmt_bytes(real)}{OFF}"
-        # Each tier is written with the bar's own limit glyph in the colour of
-        # its rule below, so a number here and a mark down there are one
-        # reading rather than two things to line up by eye.
-        tiers = "  ".join(
-            f"{colour}{BAR_LIMIT}{fmt_bytes(limit)}{OFF}"
-            for limit, colour in (
-                (state.mem_launch, BAR_INFO), (state.mem_max, BAR_WARN),
-                (state.mem_solo, BAR_ALERT),
-            ) if limit
-        )
         row = "workers:".ljust(LABEL_W) + reading
-        # With no machine reading above it there is no corner to hang the flag
-        # in, so this row takes it and gives up the columns for it.
-        reserve = 0 if rows else FLAG_W + 1
-        # The tiers are what gives way in a box too narrow to hold everything:
-        # they are standing configuration, while the reading is the live part.
-        if tiers and visible_len(row) + 3 + visible_len(tiers) <= row_w - 1 - reserve:
-            row += f"   {tiers}"
         rows.append(row if rows else corner(row))
     mem_budget = state.mem_solo or state.mem_max or state.mem_launch
     if est is not None and mem_budget:
@@ -1513,12 +1535,11 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         # then sit still for as long as nothing is wrong, and moving marks are
         # themselves the signal that something is.
         scale = max(mem_budget, est, real or 0)
-        # A dotted rule at each limit, climbing the ramp's own tones: launch in
-        # the default foreground since crossing it only holds launches back,
-        # max in amber, and the solo ceiling in coral, a bar past which means
-        # the run has emptied out to a single task.
+        # A dotted rule at each limit: launch in amber, since crossing it only
+        # holds launches back, and max and the solo ceiling in coral, a bar
+        # past which means the run has emptied out to a single task.
         ticks = []
-        drawn = set()
+        drawn, drawn_order = set(), []
         for limit, colour in ((state.mem_launch, BAR_INFO), (state.mem_max, BAR_WARN),
                               (state.mem_solo, BAR_ALERT)):
             # A limit at the end of the scale needs no rule: the bar stops
@@ -1526,6 +1547,7 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
             # moment a reading overshoots and the scale runs past it.
             if limit and limit < scale and limit not in drawn:
                 drawn.add(limit)
+                drawn_order.append(limit)
                 ticks.append((limit, BAR_LIMIT, colour))
         # Colour stays coolest through three quarters of mem_launch - the band
         # where the scheduler is still launching freely - and ramps from there
@@ -1538,10 +1560,15 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         # seeing at the moment it happens rather than afterwards.
         if real is not None:
             ticks.append((real, BAR_MEASURED, OFF))
+        cols = []
         rows.append(" " * LABEL_W + render_bar(
             bar_w - len(ticks), (est, scale - est), BAR_FULL + BAR_NONE,
             colour=severity_colour(est / mem_budget, calm, alarm), ticks=tuple(ticks),
+            tick_cols=cols,
         ))
+        tier_row = _tier_row(state, bar_w, dict(zip(drawn_order, cols)))
+        if tier_row:
+            rows.append(tier_row)
     elif ram_total is not None and ram_used is not None:
         # No budget in the log yet, so fall back to the machine's own usage.
         # Memory is comfortable well past half the machine; it only starts to
