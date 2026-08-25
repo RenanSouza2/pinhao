@@ -902,41 +902,6 @@ def handle_scheduler(state, content):
 def handle_phase(state, content):
     m = RE_CONFIG.match(content)
     if m:
-<<<<<<< HEAD
-        name, val = m.group("name"), int(m.group("val"))
-        if name == "piece size":
-            apply_piece_size(val)
-            if state.total_pieces is None and state.explicit_size is not None:
-                apply_index_max(state, get_index_max(state.explicit_size))
-        elif name == "run size":
-            # The log wins over --size, which only exists to fill the totals in
-            # one line earlier: a --size left over from an earlier run would
-            # otherwise size the tree, the progress bar and every ETA for the
-            # whole run. Rebuilds only on a real disagreement, so a matching
-            # --size keeps the tree it already built.
-            if state.total_pieces != val // PIECES_PER_LEAF:
-                apply_index_max(state, val)
-        elif name == "n process":
-            state.n_process_logged = val
-        elif name == "mem launch":
-            state.mem_launch = val
-        elif name == "mem max":
-            state.mem_max = val
-        elif name == "mem solo":
-            state.mem_solo = val
-        elif name == "disk lock":
-            state.disk_lock_enabled = bool(val)
-||||||| parent of a84ed66 (keep logs)
-        apply_piece_size(int(m.group("piece_size")))
-        if state.total_pieces is None and state.explicit_size is not None:
-            apply_index_max(state, get_index_max(state.explicit_size))
-        return
-
-    m = RE_RUN_SIZE.match(content)
-    if m:
-        if state.total_pieces is None:
-            apply_index_max(state, int(m.group("index_max")))
-=======
         name, val = m.group("name"), int(m.group("val"))
         state.config[name] = val
         # run.sh --keep is for stacking runs of one config; a disagreement
@@ -965,7 +930,6 @@ def handle_phase(state, content):
             state.mem_solo = val
         elif name == "disk lock":
             state.disk_lock_enabled = bool(val)
->>>>>>> a84ed66 (keep logs)
         return
 
     m = RE_PHASE.match(content)
