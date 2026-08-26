@@ -44,7 +44,7 @@ int main(void)
 
     araucaria_disk_config_t config = {
         .disk_path = "cache/tmp",
-        .disk_threshold_bytes = mem_max / 2
+        .disk_threshold_bytes = mem_max / 4
     };
     araucaria_disk_config_set(&config);
 

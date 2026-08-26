@@ -561,13 +561,18 @@ def get_dir_size(path):
     return total
 
 
+def fmt_num(n):
+    # one decimal, but a whole number prints without the ".0"
+    return f"{n:.1f}".removesuffix(".0")
+
+
 def fmt_bytes(n):
     if n is None:
         return "?"
     n = float(n)
     for unit in ("B", "K", "M", "G"):
         if n < 1024 or unit == "G":
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+            return f"{n:.0f}{unit}" if unit == "B" else f"{fmt_num(n)}{unit}"
         n /= 1024
 
 
@@ -1394,7 +1399,7 @@ def _completion_rows(state, bar_w):
         rows.append(
             "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
         )
-    rows.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({pct:5.1f}%)")
+    rows.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({fmt_num(pct)}%)")
     rows.append(" " * LABEL_W + bar)
     return rows
 
@@ -1465,7 +1470,7 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
     if state.thread_span > 0:
         util = thread_util(state, now)
         pct = f" ({100.0 * util / budget:.0f}%)" if budget else ""
-        rows.append(" " * LABEL_W + f"util: {util:.1f} / {budget or '?'} avg{pct}")
+        rows.append(" " * LABEL_W + f"util: {fmt_num(util)} / {budget or '?'} avg{pct}")
     return rows
 
 
@@ -1518,7 +1523,7 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
     if ram_total is not None:
         row = "ram:".ljust(LABEL_W) + f"{fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
         if ram_used is not None:
-            row += f" ({100.0 * ram_used / ram_total:4.1f}%)"
+            row += f" ({fmt_num(100.0 * ram_used / ram_total)}%)"
         rows.append(corner(row))
     if pid_rss or state.tree_root is not None:
         # Estimate then measured, in a task node's own scheme: the estimate is
