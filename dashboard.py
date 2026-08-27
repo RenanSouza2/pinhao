@@ -799,7 +799,8 @@ def handle_piece(state, content):
 
 def handle_phase_line(state, content):
     """split_piece, split_span_res_join and split_big_res_join log phase lines
-    (evaluating/loading/multiplying/.../written/locking/locked) and, for joins
+    (evaluating/loading/multiplying/.../written/locking/locked, plus "resumed"
+    for a term a previous run already committed) and, for joins
     only, a "mul P1xP2" header, all in the same [idx][pid] | i0 n2 depth shape
     as node_process, so RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
