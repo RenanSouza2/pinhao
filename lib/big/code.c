@@ -376,8 +376,16 @@ static void split_span_res_path_set(
     union_res_path_set(path, size, i_0, B(span), depth);
 }
 
+// Only one of the two forms exists, so both paths are removed. The sig one is
+// not keyed by size and is left for later runs unless KEEP_PIECES is off; a
+// join taking the sig branch instead deletes its children outright, since its
+// own result covers their range and keeping them would duplicate it.
 static void split_span_res_delete(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
 {
+#ifndef KEEP_PIECES
+    sig_res_delete(i_0, span);
+#endif
+
     char path[PATH_MAX_LEN];
     split_span_res_path_set(path, size, i_0, span, depth);
     remove(path);
@@ -964,6 +972,20 @@ uint64_t split_big_res_op_size(
     return union_res_op_size(size, i_0, remainder, depth, index);
 }
 
+// Mirrors split_big_res_is_stored's span-collapse check: a power-of-two
+// remainder is a span node, whose result may be in either form.
+static void split_big_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+{
+    if(stdc_count_ones(remainder) == 1)
+    {
+        uint64_t span = stdc_bit_width(remainder) - 1;
+        split_span_res_delete(size, i_0, span, depth);
+        return;
+    }
+
+    union_res_delete(size, i_0, remainder, depth);
+}
+
 void split_big_res_join(split_task_p t, uint64_t remainder)
 {
     int pid = (int)getpid();
@@ -1084,7 +1106,7 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
     file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span, depth + 1);
-    union_res_delete(size, i_0 + B(span), remainder - B(span), depth + 1);
+    split_big_res_delete(size, i_0 + B(span), remainder - B(span), depth + 1);
 }
 
 // Joins two adjacent ranges, [i_0, i_0 + remainder_1) and [i_0 + remainder_1,
