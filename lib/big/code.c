@@ -920,23 +920,6 @@ static union_num_t split_big_res_load(
     return union_res_load(size, i_0, remainder, depth, index);
 }
 
-static void split_big_res_delete(
-    uint64_t size,
-    uint64_t i_0,
-    uint64_t remainder,
-    uint64_t depth
-)
-{
-    if(stdc_count_ones(remainder) == 1)
-    {
-        uint64_t span = stdc_bit_width(remainder) - 1;
-        split_span_res_delete(size, i_0, span, depth);
-        return;
-    }
-
-    union_res_delete(size, i_0, remainder, depth);
-}
-
 bool split_big_res_is_stored(
     uint64_t size,
     uint64_t i_0,
