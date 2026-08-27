@@ -1274,6 +1274,14 @@ def node_label(node, depth_base=0, span_w=0, i0_w=0):
     return f"[{node.depth - depth_base}, {span:>{span_w}}, {node.i0:>{i0_w},}]"
 
 
+def chain_tag(node, chunk):
+    """A done chain node names the chunks it has absorbed rather than itself.
+    The tag spans chunk boundaries, counted from 0: the first chunk reads
+    [C, 0, 1] and k chunks folded together read [C, 0, k]."""
+    i_max = node.i0 + node_extent(node) - 1
+    return f"[C, {(node.i0 - 1) // chunk}, {i_max // chunk}]"
+
+
 def node_extent(node):
     return (1 << node.n2) if node.kind == "SPAN" else node.n2
 
@@ -1338,11 +1346,18 @@ def render_chain_ladder(root, view):
         else:
             rows.append((chunk_node, chunk_node, chunk_node))
 
-    span_w = max(len(node_label(n, n.depth).split(", ")[1]) for _, n, _ in rows)
+    def is_folded(n):
+        return n.kind == "CHAIN" and n.own_done
+
+    span_w = max(
+        (len(node_label(n, n.depth).split(", ")[1]) for _, n, _ in rows if not is_folded(n)),
+        default=0,
+    )
 
     for row_i, (node, label_node, chunk_node) in enumerate(rows):
         mark, state, status, tint = node_state(node, view)
-        label = node_label(label_node, label_node.depth, span_w)
+        label = (chain_tag(label_node, chunk) if is_folded(label_node)
+                 else node_label(label_node, label_node.depth, span_w))
         # The rungs hang off the root row on the tree's own connectors, so an
         # expanded rung's subtree does not break the ladder in two.
         is_last = row_i == len(rows) - 1
