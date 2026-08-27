@@ -43,6 +43,7 @@ bool split_span_res_is_stored(
     uint64_t depth
 );
 void split_big_res_join(split_task_p t, uint64_t remainder);
+void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_1);
 uint64_t split_span_res_op_size(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t index);
 
 bool pi_is_stored(uint64_t size);

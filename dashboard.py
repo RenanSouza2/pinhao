@@ -194,7 +194,8 @@ RE_PHASE = re.compile(r"(?:\[\s*(?P<ts>[\d.]+)\]\s*)?(?P<action>.+?)\s*\|(?:\s*(
 
 # pi_tree's run configuration, all logged as "<label> | <int>".
 RE_CONFIG = re.compile(
-    r"(?P<name>piece size|run size|n process|mem launch|mem max|mem solo|disk lock)\s*\|\s*(?P<val>\d+)"
+    r"(?P<name>piece size|chunk span|run size|n process|mem launch|mem max|mem solo|disk lock)"
+    r"\s*\|\s*(?P<val>\d+)"
 )
 
 # Leading task id of any per-task line, used only to advance the thread-time
@@ -209,6 +210,16 @@ def get_index_max(size, piece_size=None):
     if aux == 0:
         return index_max
     return index_max + (1 << piece_size) - aux
+
+
+# Mirrors TREE_CHAIN_BITS in lib/tree/code.c. Only a fallback: the run logs the
+# chunk span it actually used.
+TREE_CHAIN_BITS = 3
+
+
+def tree_chunk_span(index_max):
+    width = index_max.bit_length()
+    return width - min(TREE_CHAIN_BITS, width - TREE_PIECE_SIZE)
 
 
 SPAN_VS_REMAINDER_CUTOFF = 64
@@ -242,9 +253,9 @@ class TreeNode:
     def __init__(self, i0, depth, kind, n2, parent):
         self.i0 = i0
         self.depth = depth
-        self.kind = kind  # "BIG" or "SPAN"
-        self.n2 = n2  # remainder (BIG) or span (SPAN)
-        self.leaves_total = (n2 // PIECES_PER_LEAF) if kind == "BIG" else (1 << (n2 - TREE_PIECE_SIZE))
+        self.kind = kind  # "BIG", "SPAN" or "CHAIN"
+        self.n2 = n2  # remainder (BIG, CHAIN) or span (SPAN)
+        self.leaves_total = (1 << (n2 - TREE_PIECE_SIZE)) if kind == "SPAN" else (n2 // PIECES_PER_LEAF)
         self.leaves_done = 0
         self.own_done = False
         self.in_progress = False
@@ -287,18 +298,46 @@ def _build_big(i0, remainder, depth, parent, by_key):
     return node
 
 
-def build_tree(index_max):
+def _build_chain(i0, remainder, chunk_span, depth, parent, by_key):
+    node = TreeNode(i0, depth, "CHAIN", remainder, parent)
+    by_key[(i0, depth)] = node
+    chunk = (remainder & ((1 << chunk_span) - 1)) or (1 << chunk_span)
+    prefix = remainder - chunk
+    node.children = [
+        _build_chunked(i0, prefix, chunk_span, depth + 1, node, by_key),
+        _build_span(i0 + prefix, chunk_span, depth + 1, node, by_key)
+        if chunk == (1 << chunk_span)
+        else _build_big(i0 + prefix, chunk, depth + 1, node, by_key),
+    ]
+    return node
+
+
+def _build_chunked(i0, remainder, chunk_span, depth, parent, by_key):
+    if remainder == (1 << chunk_span):
+        return _build_span(i0, chunk_span, depth, parent, by_key)
+    if remainder == (2 << chunk_span):
+        return _build_span(i0, chunk_span + 1, depth, parent, by_key)
+    return _build_chain(i0, remainder, chunk_span, depth, parent, by_key)
+
+
+def build_tree(index_max, chunk_span):
     total_pieces = index_max // PIECES_PER_LEAF
     if 2 * total_pieces - 1 > TREE_NODE_CAP:
         return None, None
     by_key = {}
-    root = _build_big(1, index_max, 0, None, by_key)
+    root = _build_chunked(1, index_max, chunk_span, 0, None, by_key)
     return root, by_key
 
 
 def apply_index_max(state, index_max):
     state.total_pieces = index_max // PIECES_PER_LEAF
-    state.tree_root, state.tree_by_key = build_tree(index_max)
+    state.index_max = index_max
+    # The logged span wins, but "run size" can arrive first (or, with --size,
+    # before any of it): fall back to what the run would have computed.
+    state.tree_chunk_span = (
+        state.chunk_span if state.chunk_span is not None else tree_chunk_span(index_max)
+    )
+    state.tree_root, state.tree_by_key = build_tree(index_max, state.tree_chunk_span)
     if state.tree_root is None:
         state.tree_skipped_reason = (
             f"tree too large to display ({2 * state.total_pieces - 1} nodes > {TREE_NODE_CAP})"
@@ -613,6 +652,9 @@ class State:
         self.thread_last_ts = None  # log timestamp the two above are folded up to
         self.phase = "splitting"
         self.phase_start_time = None  # set by set_phase() on every transition away from "splitting"
+        self.index_max = None  # from the log's "run size" line, or computed from --size
+        self.chunk_span = None  # from the log's "chunk span" line
+        self.tree_chunk_span = None  # the span the tree on screen was built with
         self.tree_root = None
         self.tree_by_key = None  # (i0, depth) -> TreeNode
         self.tree_skipped_reason = None
@@ -927,6 +969,10 @@ def handle_phase(state, content):
             # --size keeps the tree it already built.
             if state.total_pieces != val // PIECES_PER_LEAF:
                 apply_index_max(state, val)
+        elif name == "chunk span":
+            state.chunk_span = val
+            if state.index_max is not None and val != state.tree_chunk_span:
+                apply_index_max(state, state.index_max)
         elif name == "n process":
             state.n_process_logged = val
         elif name == "mem launch":
@@ -975,8 +1021,10 @@ DISPATCH = {
     "node_process": handle_node_process,
     "node_big_process": handle_node_process,
     "node_span_process": handle_node_process,
+    "node_chain_process": handle_node_process,
     "node_span_create": handle_node_process,
     "node_big_create": handle_node_process,
+    "node_chain_create": handle_node_process,
     "split_piece": handle_phase_line,
     "task_start": handle_task_start,
     "task_donate": handle_task_start,
@@ -990,6 +1038,7 @@ DISPATCH = {
     "split_big": handle_untracked,
     "split_span_res_join": handle_phase_line,
     "split_big_res_join": handle_phase_line,
+    "split_pair_res_join": handle_phase_line,
 }
 
 
@@ -1125,10 +1174,10 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
         mark, state, status, tint = "\u00b7", "pending", None, NODE_PENDING
 
     connector = "" if is_root else ("└─ " if is_last else "├─ ")
-    if node.kind == "BIG":
-        label = f"[{node.depth}, B, {node.i0:,}]"
-    else:
+    if node.kind == "SPAN":
         label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
+    else:
+        label = f"[{node.depth}, {'B' if node.kind == 'BIG' else 'C'}, {node.i0:,}]"
     label = f"{tint}{label}{OFF}"
     if status is not None:
         label += f" [{status}]"

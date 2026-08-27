@@ -719,6 +719,23 @@ static union_num_t split_big_res_load(
     return union_res_load(size, i_0, remainder, depth, index);
 }
 
+static void split_big_res_delete(
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t depth
+)
+{
+    if(stdc_count_ones(remainder) == 1)
+    {
+        uint64_t span = stdc_bit_width(remainder) - 1;
+        split_span_res_delete(size, i_0, span, depth);
+        return;
+    }
+
+    union_res_delete(size, i_0, remainder, depth);
+}
+
 bool split_big_res_is_stored(
     uint64_t size,
     uint64_t i_0,
@@ -845,6 +862,107 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
 
     split_span_res_delete(size, i_0, span, depth + 1);
     union_res_delete(size, i_0 + B(span), remainder - B(span), depth + 1);
+}
+
+// Joins two adjacent ranges, [i_0, i_0 + remainder_1) and [i_0 + remainder_1,
+// i_0 + remainder). The split point is the caller's: unlike split_big_res_join
+// it is not the top power of two.
+void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_1)
+{
+    int pid = (int)getpid();
+    uint64_t index = t->index;
+    uint64_t size = t->size;
+    uint64_t i_0 = t->i_0;
+    uint64_t depth = t->depth;
+
+    assert(remainder_1 > 0);
+    assert(remainder_1 < remainder);
+
+    uint64_t i_0_2 = i_0 + remainder_1;
+    uint64_t remainder_2 = remainder - remainder_1;
+
+    file_t fp = union_res_open_write(size, i_0, remainder, depth);
+
+    static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
+    static const char *const p_op_1[2] = {"P1", "Q1"};
+    static const char *const p_op_2[2] = {"P2", "Q2"};
+    for(uint64_t i=0; i<2; i++)
+    {
+        LOG_HEADER(p_terms[i], index, pid, i_0, remainder, depth);
+
+        union_num_t u_1;
+        union_num_t u_2;
+        if(i == 0)
+        {
+            LOG_LOCK(index, pid, i_0, remainder, depth);
+        }
+        LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
+            u_1 = split_big_res_load(size, i_0, remainder_1, depth + 1, i);
+        );
+        LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
+            u_2 = split_big_res_load(size, i_0_2, remainder_2, depth + 1, i);
+        );
+        disk_unlock();
+
+        union_num_t u;
+        LOG_MUL(index, pid, i_0, remainder, depth,
+            u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        );
+
+        LOG_WRITE_HOLD(index, pid, i_0, remainder, depth,
+            file_write_union_num(&fp, u);
+        );
+        union_num_free(u);
+    }
+
+    LOG_HEADER("P1xR2", index, pid, i_0, remainder, depth);
+
+    union_num_t u_1;
+    union_num_t u_2;
+    LOG_LOAD("P1", index, pid, i_0, remainder, depth,
+        u_1 = split_big_res_load(size, i_0, remainder_1, depth + 1, 0);
+    );
+    LOG_LOAD("R2", index, pid, i_0, remainder, depth,
+        u_2 = split_big_res_load(size, i_0_2, remainder_2, depth + 1, 2);
+    );
+    disk_unlock();
+
+    union_num_t u_r_1;
+    LOG_MUL(index, pid, i_0, remainder, depth,
+        u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        if(araucaria_disk_config_is_set())
+        {
+            u_r_1 = union_num_realloc_disk(u_r_1);
+        }
+    );
+
+    LOG_HEADER("R1xQ2", index, pid, i_0, remainder, depth);
+
+    LOG_LOCK(index, pid, i_0, remainder, depth);
+    LOG_LOAD("R1", index, pid, i_0, remainder, depth,
+        u_1 = split_big_res_load(size, i_0, remainder_1, depth + 1, 2);
+    );
+    LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
+        u_2 = split_big_res_load(size, i_0_2, remainder_2, depth + 1, 1);
+    );
+    disk_unlock();
+
+    union_num_t u_r_2;
+    LOG_MUL(index, pid, i_0, remainder, depth,
+        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+    );
+
+    union_num_t u;
+    LOG_WRITE(index, pid, i_0, remainder, depth,
+        u = union_num_add(u_r_1, u_r_2);
+        file_write_union_num(&fp, u);
+    );
+    union_num_free(u);
+
+    file_write_close(&fp);
+
+    split_big_res_delete(size, i_0, remainder_1, depth + 1);
+    split_big_res_delete(size, i_0_2, remainder_2, depth + 1);
 }
 
 // out vector length 3, returns P, Q, R in that order
