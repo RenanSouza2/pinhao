@@ -8,6 +8,7 @@
 #include "debug.h" // IWYU pragma: keep
 #include "../../mods/clu/header.h" // IWYU pragma: keep
 #include "../../mods/macros/assert.h"
+#include "../../mods/macros/block.h"
 #include "../../mods/macros/fork.h"
 #include "../../mods/macros/stdbit.h" // IWYU pragma: keep
 #include "../../mods/macros/uint.h"
@@ -518,22 +519,22 @@ bool disk_lock_enabled(void)
     tprintf("[" U64P(2) "][%7d][%17.6f] mul %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), TERM, I_0, SPAN_ARG, DEPTH)
 
 #define LOG_PHASE(BEGIN, END, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                               \
-    do {                                                                                                             \
+    MACRO_BEGIN                                                                                                      \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), BEGIN, I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                   \
         STMT                                                                                                         \
         TIME_END(_t)                                                                                                 \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), END, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
-    } while(0)
+    MACRO_END
 
 #define LOG_LOAD_LABELED(BEGIN, END, LABEL, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                              \
-    do {                                                                                                                          \
+    MACRO_BEGIN                                                                                                                   \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), BEGIN, LABEL, I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                                \
         STMT                                                                                                                      \
         TIME_END(_t)                                                                                                              \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), END, LABEL, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
-    } while(0)
+    MACRO_END
 
 #define LOG_LOAD(OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) LOG_LOAD_LABELED("loading", "loaded", OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 #define LOG_MUL(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      LOG_PHASE("multiplying", "multiplied", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
@@ -541,46 +542,46 @@ bool disk_lock_enabled(void)
 // The "locked" line carries HIT or MISS: whether the lock was free when asked
 // for. Not derivable from the timing, which rounds a short wait to 0.0.
 #define LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH)                                                                   \
-    do {                                                                                                             \
+    MACRO_BEGIN                                                                                                      \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), "locking", I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                   \
         bool _miss = disk_lock();                                                                                    \
         TIME_END(_t)                                                                                                 \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f %s", INDEX, PID, get_wall_time(), "locked", I_0, SPAN_ARG, DEPTH, dtime(_t), _miss ? "MISS" : "HIT"); \
-    } while(0)
+    MACRO_END
 
 // HELD tracks whether this task already owns the lock. A resumed join skips
 // the terms it has already committed, including the one whose LOG_WRITE_HOLD
 // would have left the lock held for the next term's reads, so acquire and
 // release go through the flag rather than through a fixed term order.
 #define LOCK_ACQUIRE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH) \
-    do { \
+    MACRO_BEGIN \
         if(!(HELD)) \
         { \
             LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \
             (HELD) = true; \
         } \
-    } while(0)
+    MACRO_END
 
 #define LOCK_RELEASE(HELD) \
-    do { \
+    MACRO_BEGIN \
         disk_unlock(); \
         (HELD) = false; \
-    } while(0)
+    MACRO_END
 
 #define LOG_WRITE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
-    do { \
+    MACRO_BEGIN \
         LOCK_ACQUIRE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH); \
         LOG_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
         LOCK_RELEASE(HELD); \
-    } while(0)
+    MACRO_END
 
 // Like LOG_WRITE, but leaves the lock held for the next term's operand reads.
 #define LOG_WRITE_HOLD(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
-    do { \
+    MACRO_BEGIN \
         LOCK_ACQUIRE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH); \
         LOG_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
-    } while(0)
+    MACRO_END
 
 // A term whose result a previous run already committed.
 #define LOG_RESUMED(INDEX, PID, I_0, SPAN_ARG, DEPTH) \
