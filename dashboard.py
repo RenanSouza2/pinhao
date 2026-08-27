@@ -169,11 +169,11 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
-    r"(?P<i0>\d+)\s+(?P<n2>\d+)\s+(?P<depth>\d+)"
+    r"(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<depth>\d+)"
     r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B)(?:\s+(?P<lock>HIT|MISS))?)?"
 )
 RE_PIECE = re.compile(
-    _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<span>\d+)\s*\|\s*(?P<dur>[\d.]+)"
+    _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<i_max>\d+)\s*\|\s*(?P<dur>[\d.]+)"
 )
 # SUM (the scheduler's running total at launch) is matched but not captured:
 # the total shown is rebuilt from the per-task THR counts, which also fall as
@@ -188,13 +188,20 @@ RE_TASK_START = re.compile(
 )
 RE_TASK_END = re.compile(_TASK_ID)
 RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
+# node_can_launch's "launch halt". The scheduler-wide gates carry a reason
+# only; "leaf" and "barrier" also name the task that could not be afforded and
+# is holding the walk open.
+RE_HALT = re.compile(
+    r"launch halt\s*\|\s*(?P<reason>\S+)"
+    r"(?:\s*\|\s*(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<depth>\d+)\s*\|\s*(?P<mem>\d+)B)?"
+)
 # The leading [ts] is optional: the config lines it shares this shape with
 # don't carry one, nor do logs from a build predating it.
 RE_PHASE = re.compile(r"(?:\[\s*(?P<ts>[\d.]+)\]\s*)?(?P<action>.+?)\s*\|(?:\s*(?P<dur>[\d.]+))?")
 
 # pi_tree's run configuration, all logged as "<label> | <int>".
 RE_CONFIG = re.compile(
-    r"(?P<name>piece size|chunk span|run size|n process|mem launch|mem max|mem solo|disk lock)"
+    r"(?P<name>piece size|chunk span|run size|n process|mem launch|mem max|mem solo|disk lock|size)"
     r"\s*\|\s*(?P<val>\d+)"
 )
 
@@ -222,13 +229,8 @@ def tree_chunk_span(index_max):
     return width - min(TREE_CHAIN_BITS, width - TREE_PIECE_SIZE)
 
 
-SPAN_VS_REMAINDER_CUTOFF = 64
-
-
-def leaves_covered(n2):
-    if n2 > SPAN_VS_REMAINDER_CUTOFF:
-        return n2 // PIECES_PER_LEAF
-    return 1 << (n2 - TREE_PIECE_SIZE)
+def leaves_covered(i0, i_max):
+    return (i_max - i0 + 1) // PIECES_PER_LEAF
 
 
 TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
@@ -657,6 +659,9 @@ class State:
         self.tree_chunk_span = None  # the span the tree on screen was built with
         self.tree_root = None
         self.tree_by_key = None  # (i0, depth) -> TreeNode
+        self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
+        self.halt = None  # last "launch halt" as (reason, i0, i_max, depth, mem), cleared by the next launch
+        self.halt_seen = False  # whether this log carries halt lines at all
         self.tree_skipped_reason = None
         self.process_running = False
         self.process_gone_since = None  # time.time() process_running first went False since done
@@ -797,7 +802,7 @@ def handle_node_process(state, content):
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
-        covered = leaves_covered(int(m.group("n2")))
+        covered = leaves_covered(i0, int(m.group("i_max")))
         state.pieces_done += covered
         state.joins_done += covered - 1
         if tree_node is not None:
@@ -843,7 +848,7 @@ def handle_phase_line(state, content):
     """split_piece, split_span_res_join and split_big_res_join log phase lines
     (evaluating/loading/multiplying/.../written/locking/locked, plus "resumed"
     for a term a previous run already committed) and, for joins
-    only, a "mul P1xP2" header, all in the same [idx][pid] | i0 n2 depth shape
+    only, a "mul P1xP2" header, all in the same [idx][pid] | i0 i_max depth shape
     as node_process, so RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
     "locking"/"locked" additionally maintain the set of pids currently
@@ -907,6 +912,10 @@ def handle_task_start(state, content):
     if not m:
         return
     pid = int(m.group("pid"))
+    # A launch means the walk got past every gate; a donation says nothing
+    # about it, and shares this handler.
+    if m.group("action").strip() == "task start":
+        state.halt = None
     entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
 
     mem = m.group("mem")
@@ -947,6 +956,23 @@ def handle_scheduler(state, content):
         state.active_max = max(state.active_max, int(m.group("val")))
     elif action == "active threads":
         state.threads_reported = int(m.group("val"))
+    elif action == "active memory":
+        state.mem_booked = int(m.group("val"))
+
+
+def handle_halt(state, content):
+    m = RE_HALT.match(content)
+    if not m:
+        return
+    state.halt_seen = True
+    i0 = m.group("i0")
+    state.halt = (
+        m.group("reason"),
+        int(i0) if i0 else None,
+        int(m.group("i_max")) if i0 else None,
+        int(m.group("depth")) if i0 else None,
+        int(m.group("mem")) if i0 else None,
+    )
 
 
 def handle_phase(state, content):
@@ -1031,6 +1057,7 @@ DISPATCH = {
     "task_donate": handle_task_start,
     "task_end": handle_task_end,
     "scheduler": handle_scheduler,
+    "node_can_launch": handle_halt,
     "pi_tree": handle_phase,
     "pi_finish": handle_phase,
     "pi_big": handle_phase,
@@ -1147,104 +1174,209 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now avg_piece_dur avg_join_dur piece_events_by_depth join_events_by_depth"
-    " pid_rss disk_lock_enabled starved",
+    " pid_rss disk_lock_enabled starved chunk_span index_max size",
 )
 
 
-def render_tree(node, view, prefix="", is_last=True, is_root=True):
-    # `state` drives the recursion cutoff below; `tint` is separate because a
-    # node can be partly chewed through with nothing running in it, which must
-    # stay expanded but reads as work still ahead.
+def node_state(node, view):
+    # out mark, recursion state, status text, tint
+    #
+    # `state` drives render_tree's recursion cutoff; `tint` is separate because
+    # a node can be partly chewed through with nothing running in it, which
+    # must stay expanded but reads as work still ahead.
     #
     # active_count is tested before leaves_done so that every ancestor of a
     # running node shows a lit "\u25cb": that chain is the trail from the root down
     # to the work, and any ancestor with a finished leaf would otherwise break it.
     if node.own_done:
-        mark, state, status, tint = "\u2713", "done", None, NODE_DONE
-    elif node.in_progress:
-        mark, state, status, tint = "\u25b8", "in_progress", str(node.task_idx), NODE_RUNNING
-    elif node.children and all(c.own_done for c in node.children):
+        return "\u2713", "done", None, NODE_DONE
+    if node.in_progress:
+        return "\u25b8", "in_progress", str(node.task_idx), NODE_RUNNING
+    if node.children and all(c.own_done for c in node.children):
         # Ready either way; the tint says whether it could actually start.
-        mark, state, status = "\u00b7", "ready", None
-        tint = NODE_STARVED if view.starved else NODE_READY
-    elif node.active_count > 0:
-        mark, state, status, tint = "\u25cb", "in_progress", None, NODE_ACTIVE
-    elif node.leaves_done > 0:
-        mark, state, status, tint = "\u00b7", "in_progress", None, NODE_PENDING
-    else:
-        mark, state, status, tint = "\u00b7", "pending", None, NODE_PENDING
+        return "\u00b7", "ready", None, (NODE_STARVED if view.starved else NODE_READY)
+    if node.active_count > 0:
+        return "\u25cb", "in_progress", None, NODE_ACTIVE
+    if node.leaves_done > 0:
+        return "\u00b7", "in_progress", None, NODE_PENDING
+    return "\u00b7", "pending", None, NODE_PENDING
 
-    connector = "" if is_root else ("└─ " if is_last else "├─ ")
-    if node.kind == "SPAN":
-        label = f"[{node.depth}, {node.n2}, {node.i0:,}]"
-    else:
-        label = f"[{node.depth}, {'B' if node.kind == 'BIG' else 'C'}, {node.i0:,}]"
-    label = f"{tint}{label}{OFF}"
-    if status is not None:
-        label += f" [{status}]"
-        if node.start_time is not None:
-            node_elapsed = view.now - node.start_time
-            label += f" {fmt_duration(node_elapsed)}"
-            if node.in_progress:
-                is_leaf = node.leaves_total == 1
-                events_by_depth = view.piece_events_by_depth if is_leaf else view.join_events_by_depth
-                fallback = view.avg_piece_dur if is_leaf else view.avg_join_dur
-                avg = depth_avg(events_by_depth, node.depth, fallback)
-                if avg is not None:
-                    remaining = avg - node_elapsed
-                    # Signed against the depth's average: unsigned is time
-                    # left, "+" is time overrun, and the overrun keeps growing
-                    # on screen. A phrase like "any moment" reads calmest
-                    # exactly when a task is worst overdue.
-                    eta_str = (
-                        fmt_duration(remaining) if remaining > 0
-                        else "+" + fmt_duration(-remaining)
-                    )
-                    label += f" ({eta_str})"
-                current = view.pid_rss.get(node.pid) if node.pid is not None else None
-                if node.mem_estimate is not None or current is not None:
-                    est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
-                    cur_str = fmt_bytes(current) if current is not None else "?"
-                    # Estimate first, measured second - the order is what says
-                    # which is which, so it never varies.
-                    label += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
-                # Single-threaded tasks get no badge at all: its presence is
-                # what flags a task holding more than one thread slot. "x" is
-                # already the multiply in the term below, so the badge takes
-                # the multiplication sign to keep the two apart.
-                if node.threads is not None:
-                    live = node.threads_live
-                    if live is None:
-                        live = node.threads
-                    # Threads donated to a running task but not yet picked up,
-                    # in the RSS grey: like a measured RSS beside its estimate,
-                    # this is the softer half of the pair - the scheduler has
-                    # booked them, the worker is not on them yet.
-                    pending = max(0, node.threads - live)
-                    if node.threads > 1 or pending:
-                        label += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
-                        if pending:
-                            label += f" {RSS_ON}(\u00d7{pending}){OFF}"
-                if node.term:
-                    op1, _, op2 = node.term.partition("x")
-                    label += f" | {op1} x {op2}"
-                if node.micro:
-                    micro = node.micro
-                    if micro == "locking" and view.disk_lock_enabled:
-                        micro = f"{LOCK_ON}{micro}{OFF}"
-                    elif micro in ("multiplying", "evaluating"):
-                        micro = f"{MUL_ON}{micro}{OFF}"
-                    elif micro.startswith("loading") or micro == "writing":
-                        micro = f"{IO_ATTN_ON}{micro}{OFF}"
-                    label += f" | {micro}"
+
+def node_detail(node, view, status):
+    """The reading beside a node's label: task id, elapsed, ETA, memory,
+    threads, term and micro-phase. Empty unless the node is the live task."""
+    if status is None:
+        return ""
+    detail = f" [{status}]"
+    if node.start_time is None:
+        return detail
+    node_elapsed = view.now - node.start_time
+    detail += f" {fmt_duration(node_elapsed)}"
+    if node.in_progress:
+        is_leaf = node.leaves_total == 1
+        events_by_depth = view.piece_events_by_depth if is_leaf else view.join_events_by_depth
+        fallback = view.avg_piece_dur if is_leaf else view.avg_join_dur
+        avg = depth_avg(events_by_depth, node.depth, fallback)
+        if avg is not None:
+            remaining = avg - node_elapsed
+            # Signed against the depth's average: unsigned is time
+            # left, "+" is time overrun, and the overrun keeps growing
+            # on screen. A phrase like "any moment" reads calmest
+            # exactly when a task is worst overdue.
+            eta_str = (
+                fmt_duration(remaining) if remaining > 0
+                else "+" + fmt_duration(-remaining)
+            )
+            detail += f" ({eta_str})"
+        current = view.pid_rss.get(node.pid) if node.pid is not None else None
+        if node.mem_estimate is not None or current is not None:
+            est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
+            cur_str = fmt_bytes(current) if current is not None else "?"
+            # Estimate first, measured second - the order is what says
+            # which is which, so it never varies.
+            detail += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
+        # Single-threaded tasks get no badge at all: its presence is
+        # what flags a task holding more than one thread slot. "x" is
+        # already the multiply in the term below, so the badge takes
+        # the multiplication sign to keep the two apart.
+        if node.threads is not None:
+            live = node.threads_live
+            if live is None:
+                live = node.threads
+            # Threads donated to a running task but not yet picked up,
+            # in the RSS grey: like a measured RSS beside its estimate,
+            # this is the softer half of the pair - the scheduler has
+            # booked them, the worker is not on them yet.
+            pending = max(0, node.threads - live)
+            if node.threads > 1 or pending:
+                detail += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
+                if pending:
+                    detail += f" {RSS_ON}(\u00d7{pending}){OFF}"
+        if node.term:
+            op1, _, op2 = node.term.partition("x")
+            detail += f" | {op1} x {op2}"
+        if node.micro:
+            micro = node.micro
+            if micro == "locking" and view.disk_lock_enabled:
+                micro = f"{LOCK_ON}{micro}{OFF}"
+            elif micro in ("multiplying", "evaluating"):
+                micro = f"{MUL_ON}{micro}{OFF}"
+            elif micro.startswith("loading") or micro == "writing":
+                micro = f"{IO_ATTN_ON}{micro}{OFF}"
+            detail += f" | {micro}"
+    return detail
+
+
+def node_label(node, depth_base=0, span_w=0, i0_w=0):
+    """A node's own [depth, span, i0]. depth_base renumbers the depth so a
+    subtree can count from its own root rather than from the tree's."""
+    span = f"{node.n2}" if node.kind == "SPAN" else ("B" if node.kind == "BIG" else "C")
+    return f"[{node.depth - depth_base}, {span:>{span_w}}, {node.i0:>{i0_w},}]"
+
+
+def node_extent(node):
+    return (1 << node.n2) if node.kind == "SPAN" else node.n2
+
+
+def chain_rungs(root):
+    """The root chain flattened: (chunk, join) per rung in ascending index
+    order. The first rung is the accumulator's base and has no join."""
+    spine = []
+    n = root
+    while n.kind == "CHAIN":
+        spine.append(n)
+        n = n.children[0]
+    return [(n, None)] + [(c.children[1], c) for c in reversed(spine)]
+
+
+def chain_bound(value, chunk, index_max):
+    """A rung boundary in chunk units. The run's own two ends are the exact
+    indices instead: they are the range the whole ladder tiles."""
+    if value == 0:
+        return "1"
+    if value == index_max:
+        return f"{index_max:,}"
+    return f"{value // chunk}C"
+
+
+def render_chain_ladder(root, view):
+    """The root chain as a flat ladder, one rung per chunk in index order,
+    every folded rung merged into a single accumulator row - so the rows always
+    tile [1, imax] exactly and the fold is visible as arithmetic. A rung shows
+    its chunk until that chunk is done, then the join that folds it in: the two
+    never run at once, since a join waits on its own chunk."""
+    chunk = 1 << view.chunk_span
+    rungs = chain_rungs(root)
+
+    # The run itself, named by the three fields the cache path is keyed by.
+    # The root chain is also the last rung's join, so it reads here and the
+    # rung below it keeps showing its chunk rather than repeating this task.
+    mark, _, status, tint = node_state(root, view)
+    size = f"{view.size:,}" if view.size is not None else "?"
+    view.lines.append(
+        f"{tint}{mark}{OFF} {tint}[{size}, {root.i0:,}, {view.index_max:,}]{OFF}"
+        + node_detail(root, view, status)
+    )
+
+    # The last join to have landed. Everything at or below it is one number.
+    folded = 0
+    for i, (_, join) in enumerate(rungs):
+        if join is not None and join.own_done:
+            folded = i
+
+    # (node the row reads its state from, node it takes its label from, chunk
+    # to expand). A rung keeps its chunk's label even while its join is the
+    # live task: the label is what says which rung this is, and the join's own
+    # i_0 is the accumulator's, not the rung's.
+    rows = []
+    if folded:
+        acc = rungs[folded][1]
+        rows.append((acc, acc, None))
+    for chunk_node, join in rungs[folded + 1 if folded else 0:]:
+        if join is not None and join is not root and join.in_progress:
+            rows.append((join, chunk_node, None))
+        else:
+            rows.append((chunk_node, chunk_node, chunk_node))
+
+    span_w = max(len(node_label(n, n.depth).split(", ")[1]) for _, n, _ in rows)
+
+    for row_i, (node, label_node, chunk_node) in enumerate(rows):
+        mark, state, status, tint = node_state(node, view)
+        label = node_label(label_node, label_node.depth, span_w)
+        # The rungs hang off the root row on the tree's own connectors, so an
+        # expanded rung's subtree does not break the ladder in two.
+        is_last = row_i == len(rows) - 1
+        connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
+        view.lines.append(
+            f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}{node_detail(node, view, status)}"
+        )
+        if chunk_node is None or state in ("done", "pending"):
+            continue
+        if chunk_node.children and all(c.own_done for c in chunk_node.children):
+            continue
+        child_prefix = "   " if is_last else "\u2502  "
+        for i, child in enumerate(chunk_node.children):
+            render_tree(child, view, child_prefix, i == len(chunk_node.children) - 1,
+                        is_root=False, depth_base=chunk_node.depth)
+
+
+def render_tree(node, view, prefix="", is_last=True, is_root=True, depth_base=0):
+    # Only the root can be a chain: node_expand never puts one anywhere else.
+    if is_root and node.kind == "CHAIN":
+        render_chain_ladder(node, view)
+        return
+
+    mark, state, status, tint = node_state(node, view)
+    connector = "" if is_root else ("\u2514\u2500 " if is_last else "\u251c\u2500 ")
+    label = f"{tint}{node_label(node, depth_base)}{OFF}" + node_detail(node, view, status)
     view.lines.append(f"{prefix}{connector}{tint}{mark}{OFF} {label}")
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
         return
 
-    child_prefix = prefix if is_root else prefix + ("   " if is_last else "│  ")
+    child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
     for i, child in enumerate(node.children):
-        render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False)
+        render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False, depth_base=depth_base)
 
 
 def render_status_screen(state):
@@ -1583,6 +1715,14 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         reading = f"{fmt_bytes(est)} / {RSS_ON}{fmt_bytes(real)}{OFF}"
         row = "workers:".ljust(LABEL_W) + reading
         rows.append(row if rows else corner(row))
+    if state.halt is not None:
+        # Which gate closed, and for "leaf"/"barrier" the task that is holding
+        # the walk open: its booking, then its depth and start index.
+        reason, halt_i0, _, halt_depth, halt_mem = state.halt
+        row = "halt:".ljust(LABEL_W) + f"{ALERT_ON}{reason}{ALERT_OFF}"
+        if halt_i0 is not None:
+            row += f" {fmt_bytes(halt_mem)} @ [{halt_depth}] {halt_i0:,}"
+        rows.append(row)
     mem_budget = state.mem_solo or state.mem_max or state.mem_launch
     if est is not None and mem_budget:
         # The bar ends at the budget and stretches only far enough to keep an
@@ -1760,7 +1900,12 @@ def render(state):
     # arithmetic: what a right-aligned flag has to align against.
     ram_row_w = max(BOX_MIN_WIDTH, widths[2] - 2) - 1
 
-    est = active_mem_estimate(state.tree_root) if state.tree_root is not None else None
+    # The scheduler logs its own total_mem_cost, the number it gates launches
+    # on. Summing the tree's bookings only reconstructs it, so that is the
+    # fallback for logs predating the "active memory" line.
+    est = state.mem_booked
+    if est is None and state.tree_root is not None:
+        est = active_mem_estimate(state.tree_root)
     if state.phase in ("dividing", "displaying"):
         # No task scheduler booking exists once the split tree is done - "0"
         # would read as a real reading of no memory in use, not as unknown.
@@ -1806,12 +1951,21 @@ def render(state):
         # to run, and the tree says so by dimming it.
         # Booked, not running: a donation nobody has picked up yet still keeps
         # the next task from launching.
-        starved = bool(over_launch or (budget and threads_booked is not None and threads_booked >= budget))
+        # node_can_launch states outright why it stopped admitting work, and
+        # sees gates the reading below cannot - a node that did not fit under
+        # mem_max halts the walk while usage is still under mem_launch. The
+        # inference is kept only for logs predating the "launch halt" line.
+        if state.halt_seen:
+            starved = state.halt is not None
+        else:
+            starved = bool(over_launch or (budget and threads_booked is not None and threads_booked >= budget))
         if state.tree_root is not None:
             render_tree(state.tree_root, TreeView(
                 lines, now, avg_piece_dur, avg_join_dur,
                 state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
                 state.disk_lock_enabled is not False, starved,
+                state.tree_chunk_span, state.index_max,
+                state.config.get("size", state.explicit_size),
             ))
         elif state.tree_skipped_reason:
             lines.append(f"tree: {state.tree_skipped_reason}")

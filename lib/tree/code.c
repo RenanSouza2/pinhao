@@ -29,6 +29,35 @@
 #define NODE_SPAN 1
 #define NODE_CHAIN 2
 
+// Per-node log lines. i_0 and i_max are the node's inclusive range; with depth
+// they are the key union_res_path_set builds the cache path from. A piece
+// logs no depth: cache/pieces is not depth-keyed.
+#define LOG_NODE(IDX, PID, LABEL, I_0, I_MAX, DEPTH) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", \
+        IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, DEPTH)
+
+#define LOG_NODE_DUR(IDX, PID, LABEL, I_0, I_MAX, DEPTH, DUR) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", \
+        IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, DEPTH, DUR)
+
+#define LOG_NODE_MEM(IDX, PID, LABEL, I_0, I_MAX, DEPTH, MEM) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", \
+        IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, DEPTH, MEM)
+
+#define LOG_NODE_PIECE(IDX, PID, I_0, I_MAX, DUR) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", \
+        IDX, PID, get_wall_time(), "piece", I_0, I_MAX, "", DUR)
+
+// Why the launch walk stopped. The node form names the task that could not be
+// afforded and is holding the walk open; the plain form is a scheduler-wide
+// gate that no single node owns.
+#define LOG_HALT(REASON) \
+    tprintf("              %-20s| %-10s", "launch halt", REASON)
+
+#define LOG_HALT_NODE(REASON, I_0, I_MAX, DEPTH, MEM) \
+    tprintf("              %-20s| %-10s | " U64P(10) " " U64P(10) " " U64P(3) " | " U64P(12) "B", \
+        "launch halt", REASON, I_0, I_MAX, DEPTH, MEM)
+
 STRUCT(big)
 {
     uint64_t size;
@@ -101,7 +130,7 @@ static node_p node_span_create(
 
     if(split_span_res_is_stored(size, i_0, span, depth))
     {
-        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), (int)getpid(), get_wall_time(), "already stored", i_0, span, depth);
+        LOG_NODE(U64(0), (int)getpid(), "already stored", i_0, i_0 + B(span) - 1, depth);
         return NULL;
     }
 
@@ -144,7 +173,7 @@ static node_p node_big_create(
 
     if(split_big_res_is_stored(size, i_0, remainder, depth))
     {
-        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), (int)getpid(), get_wall_time(), "already stored", i_0, remainder, depth);
+        LOG_NODE(U64(0), (int)getpid(), "already stored", i_0, i_0 + remainder - 1, depth);
         return NULL;
     }
 
@@ -186,7 +215,7 @@ static node_p node_chain_create(
 
     if(split_big_res_is_stored(size, i_0, remainder, depth))
     {
-        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", U64(0), (int)getpid(), get_wall_time(), "already stored", i_0, remainder, depth);
+        LOG_NODE(U64(0), (int)getpid(), "already stored", i_0, i_0 + remainder - 1, depth);
         return NULL;
     }
 
@@ -321,6 +350,39 @@ static bool node_is_ready(node_p n)
 static bool node_is_leaf(node_p n)
 {
     return n->type == NODE_SPAN && n->as.span.span == TREE_PIECE_SIZE;
+}
+
+// out i_0, i_max (inclusive) and depth, whatever the node type
+static void node_range(node_p n, uint64_t *out_i_0, uint64_t *out_i_max, uint64_t *out_depth)
+{
+    switch(n->type)
+    {
+        case NODE_BIG:
+        {
+            *out_i_0 = n->as.big.i_0;
+            *out_i_max = n->as.big.i_0 + n->as.big.remainder - 1;
+            *out_depth = n->as.big.depth;
+        }
+        break;
+
+        case NODE_SPAN:
+        {
+            *out_i_0 = n->as.span.i_0;
+            *out_i_max = n->as.span.i_0 + B(n->as.span.span) - 1;
+            *out_depth = n->as.span.depth;
+        }
+        break;
+
+        case NODE_CHAIN:
+        {
+            *out_i_0 = n->as.chain.i_0;
+            *out_i_max = n->as.chain.i_0 + n->as.chain.remainder - 1;
+            *out_depth = n->as.chain.depth;
+        }
+        break;
+
+        default: revert()
+    }
 }
 
 static void node_op_sizes(node_p n)
@@ -570,11 +632,13 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
 {
     if(!scheduler_has_threads(s))
     {
+        LOG_HALT("threads");
         return LAUNCH_HALT;
     }
 
     if(!scheduler_can_launch(s))
     {
+        LOG_HALT("mem_launch");
         return LAUNCH_HALT;
     }
 
@@ -600,13 +664,20 @@ static uint64_t node_can_launch(tree_scheduler_p s, node_p n)
         return node_set_plan(n, mem_cost, threads);
     }
 
+    uint64_t i_0;
+    uint64_t i_max;
+    uint64_t depth;
+    node_range(n, &i_0, &i_max, &depth);
+
     if(node_is_leaf(n))
     {
+        LOG_HALT_NODE("leaf", i_0, i_max, depth, mem_cost);
         return LAUNCH_HALT;
     }
 
     if(scheduler_at_first_slot(s))
     {
+        LOG_HALT_NODE("barrier", i_0, i_max, depth, mem_cost);
         return LAUNCH_HALT;
     }
 
@@ -675,8 +746,9 @@ static void node_big_process(node_p n, uint64_t index, _Atomic uint64_t *threads
     uint64_t i_0 = n->as.big.i_0;
     uint64_t remainder = n->as.big.remainder;
     uint64_t depth = n->as.big.depth;
+    uint64_t i_max = i_0 + remainder - 1;
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
+    LOG_NODE(index, pid, "begin", i_0, i_max, depth);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -687,7 +759,7 @@ static void node_big_process(node_p n, uint64_t index, _Atomic uint64_t *threads
     TIME_SETUP
     split_big_res_join(&t, remainder);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, remainder, depth, dtime(t1));
+    LOG_NODE_DUR(index, pid, "joined", i_0, i_max, depth, dtime(t1));
 }
 
 static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *threads)
@@ -697,18 +769,19 @@ static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *thread
     uint64_t i_0 = n->as.span.i_0;
     uint64_t span = n->as.span.span;
     uint64_t depth = n->as.span.depth;
+    uint64_t i_max = i_0 + B(span) - 1;
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
+    LOG_NODE(index, pid, "begin", i_0, i_max, depth);
     if(span == TREE_PIECE_SIZE)
     {
         TIME_SETUP
         split_piece(index, i_0, span, depth);
         TIME_END(t1)
-        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", index, pid, get_wall_time(), "piece", i_0, span, "", dtime(t1));
+        LOG_NODE_PIECE(index, pid, i_0, i_max, dtime(t1));
         return;
     }
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, span, depth, n->plan.mem_cost);
+    LOG_NODE_MEM(index, pid, "joining", i_0, i_max, depth, n->plan.mem_cost);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -719,7 +792,7 @@ static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *thread
     TIME_SETUP
     split_span_res_join(&t, span);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
+    LOG_NODE_DUR(index, pid, "joined", i_0, i_max, depth, dtime(t1));
 }
 
 static void node_chain_process(node_p n, uint64_t index, _Atomic uint64_t *threads)
@@ -729,10 +802,11 @@ static void node_chain_process(node_p n, uint64_t index, _Atomic uint64_t *threa
     uint64_t i_0 = n->as.chain.i_0;
     uint64_t remainder = n->as.chain.remainder;
     uint64_t depth = n->as.chain.depth;
+    uint64_t i_max = i_0 + remainder - 1;
     uint64_t prefix = remainder - node_chain_chunk(n);
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", index, pid, get_wall_time(), "joining", i_0, remainder, depth, n->plan.mem_cost);
+    LOG_NODE(index, pid, "begin", i_0, i_max, depth);
+    LOG_NODE_MEM(index, pid, "joining", i_0, i_max, depth, n->plan.mem_cost);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -743,7 +817,7 @@ static void node_chain_process(node_p n, uint64_t index, _Atomic uint64_t *threa
     TIME_SETUP
     split_pair_res_join(&t, remainder, prefix);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, remainder, depth, dtime(t1));
+    LOG_NODE_DUR(index, pid, "joined", i_0, i_max, depth, dtime(t1));
 }
 
 static void node_process(node_p n, uint64_t index, _Atomic uint64_t *threads)
@@ -995,6 +1069,7 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 
         tprintf("              %-20s| " U64P(2) "", "active processes", s.active);
         tprintf("              %-20s| " U64P(2) "", "active threads", s.total_threads);
+        tprintf("              %-20s| " U64P(12) "", "active memory", s.total_mem_cost);
         int status;
         pid_t pid = waitpid_safe(0, &status);
         task_check_exit(pid, status);
@@ -1006,6 +1081,7 @@ static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, ui
 
 flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+    tprintf("              %-20s| " U64P(10) "", "size", size);
     tprintf("              %-20s| " U64P(10) "", "piece size", (uint64_t)TREE_PIECE_SIZE);
     tprintf("              %-20s| " U64P(10) "", "chunk span", tree_chunk_span(get_index_max(size, TREE_PIECE_SIZE)));
     tprintf("              %-20s| " U64P(10) "", "run size", get_index_max(size, TREE_PIECE_SIZE));
