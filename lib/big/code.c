@@ -8,6 +8,7 @@
 #include "debug.h" // IWYU pragma: keep
 #include "../../mods/clu/header.h" // IWYU pragma: keep
 #include "../../mods/macros/assert.h"
+#include "../../mods/macros/block.h"
 #include "../../mods/macros/fork.h"
 #include "../../mods/macros/stdbit.h" // IWYU pragma: keep
 #include "../../mods/macros/uint.h"
@@ -88,6 +89,15 @@ static file_t sig_res_open_write(uint64_t i_0, uint64_t span)
     char path[PATH_MAX_LEN];
     sig_res_path_set(path, i_0, span);
     return file_write_open(path, 3);
+}
+
+// Keeps whatever a previous run committed; fp.count says how many of P, Q, R
+// are already there.
+static file_t sig_res_open_resume(uint64_t i_0, uint64_t span)
+{
+    char path[PATH_MAX_LEN];
+    sig_res_path_set(path, i_0, span);
+    return file_write_open_resume(path, 3);
 }
 
 static void sig_res_save(sig_num_t res[3], uint64_t i_0, uint64_t span)
@@ -193,11 +203,11 @@ static FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remai
     return file_read_open(path);
 }
 
-static file_t union_res_open_write(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static file_t union_res_open_resume(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
 {
     char path[PATH_MAX_LEN];
     union_res_path_set(path, size, i_0, remainder, depth);
-    return file_write_open(path, 3);
+    return file_write_open_resume(path, 3);
 }
 
 static union_num_t union_res_load(
@@ -255,6 +265,102 @@ static uint64_t union_res_op_size(
 
     fclose(fp);
     return op_size;
+}
+
+
+
+// The P1xR2 product stays live across the R1xQ2 multiplication, so a join
+// interrupted between the two would lose it. It is checkpointed under
+// cache/tmp and removed as soon as the join's R is committed: transient, never
+// part of a node's stored result.
+static void sig_rh_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
+{
+    uint64_t i_max = i_0 + B(span) - 1;
+    snprintf(path, PATH_MAX_LEN, CACHE "/tmp/rh_p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
+}
+
+static void sig_rh_save(sig_num_t sig, uint64_t i_0, uint64_t span)
+{
+    char path[PATH_MAX_LEN];
+    sig_rh_path_set(path, i_0, span);
+
+    file_t fp = file_write_open(path, 1);
+    file_write_sig_num(&fp, sig);
+    file_write_close(&fp);
+}
+
+static bool sig_rh_try_load(sig_num_p out, uint64_t i_0, uint64_t span)
+{
+    char path[PATH_MAX_LEN];
+    sig_rh_path_set(path, i_0, span);
+
+    FILE *fp = file_read_open(path);
+    if(fp == NULL)
+    {
+        return false;
+    }
+
+    *out = file_read_sig_num(fp, 0);
+    fclose(fp);
+    return true;
+}
+
+static void sig_rh_delete(uint64_t i_0, uint64_t span)
+{
+    char path[PATH_MAX_LEN];
+    sig_rh_path_set(path, i_0, span);
+    remove(path);
+}
+
+static void union_rh_path_set(
+    char path[PATH_MAX_LEN],
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t depth
+)
+{
+    uint64_t i_max = i_0 + remainder - 1;
+    snprintf(path, PATH_MAX_LEN, CACHE "/tmp/rh_u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
+}
+
+static void union_rh_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+{
+    char path[PATH_MAX_LEN];
+    union_rh_path_set(path, size, i_0, remainder, depth);
+
+    file_t fp = file_write_open(path, 1);
+    file_write_union_num(&fp, u);
+    file_write_close(&fp);
+}
+
+static bool union_rh_try_load(
+    union_num_p out,
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t depth
+)
+{
+    char path[PATH_MAX_LEN];
+    union_rh_path_set(path, size, i_0, remainder, depth);
+
+    FILE *fp = file_read_open(path);
+    if(fp == NULL)
+    {
+        return false;
+    }
+
+    *out = file_read_union_num(fp, 0);
+    fclose(fp);
+    return true;
+}
+
+static void union_rh_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+{
+    char path[PATH_MAX_LEN];
+    union_rh_path_set(path, size, i_0, remainder, depth);
+    remove(path);
 }
 
 
@@ -413,22 +519,22 @@ bool disk_lock_enabled(void)
     tprintf("[" U64P(2) "][%7d][%17.6f] mul %-16s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), TERM, I_0, SPAN_ARG, DEPTH)
 
 #define LOG_PHASE(BEGIN, END, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                               \
-    do {                                                                                                             \
+    MACRO_BEGIN                                                                                                      \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), BEGIN, I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                   \
         STMT                                                                                                         \
         TIME_END(_t)                                                                                                 \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), END, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
-    } while(0)
+    MACRO_END
 
 #define LOG_LOAD_LABELED(BEGIN, END, LABEL, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                              \
-    do {                                                                                                                          \
+    MACRO_BEGIN                                                                                                                   \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), BEGIN, LABEL, I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                                \
         STMT                                                                                                                      \
         TIME_END(_t)                                                                                                              \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-11s%-9s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), END, LABEL, I_0, SPAN_ARG, DEPTH, dtime(_t)); \
-    } while(0)
+    MACRO_END
 
 #define LOG_LOAD(OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) LOG_LOAD_LABELED("loading", "loaded", OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 #define LOG_MUL(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      LOG_PHASE("multiplying", "multiplied", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
@@ -436,29 +542,50 @@ bool disk_lock_enabled(void)
 // The "locked" line carries HIT or MISS: whether the lock was free when asked
 // for. Not derivable from the timing, which rounds a short wait to 0.0.
 #define LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH)                                                                   \
-    do {                                                                                                             \
+    MACRO_BEGIN                                                                                                      \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), "locking", I_0, SPAN_ARG, DEPTH); \
         TIME_SETUP                                                                                                   \
         bool _miss = disk_lock();                                                                                    \
         TIME_END(_t)                                                                                                 \
         tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f %s", INDEX, PID, get_wall_time(), "locked", I_0, SPAN_ARG, DEPTH, dtime(_t), _miss ? "MISS" : "HIT"); \
-    } while(0)
+    MACRO_END
 
-#define LOG_WRITE(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
-    do { \
-        LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \
-        LOG_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
+// HELD tracks whether this task already owns the lock. A resumed join skips
+// the terms it has already committed, including the one whose LOG_WRITE_HOLD
+// would have left the lock held for the next term's reads, so acquire and
+// release go through the flag rather than through a fixed term order.
+#define LOCK_ACQUIRE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH) \
+    MACRO_BEGIN \
+        if(!(HELD)) \
+        { \
+            LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \
+            (HELD) = true; \
+        } \
+    MACRO_END
+
+#define LOCK_RELEASE(HELD) \
+    MACRO_BEGIN \
         disk_unlock(); \
-    } while(0)
+        (HELD) = false; \
+    MACRO_END
 
-// Like LOG_WRITE, but leaves the lock held: for a write immediately followed
-// by the next term's operand reads. The paired read must skip its own
-// LOG_LOCK and release the lock itself via a plain disk_unlock().
-#define LOG_WRITE_HOLD(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
-    do { \
-        LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH); \
+#define LOG_WRITE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
+    MACRO_BEGIN \
+        LOCK_ACQUIRE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH); \
         LOG_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
-    } while(0)
+        LOCK_RELEASE(HELD); \
+    MACRO_END
+
+// Like LOG_WRITE, but leaves the lock held for the next term's operand reads.
+#define LOG_WRITE_HOLD(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) \
+    MACRO_BEGIN \
+        LOCK_ACQUIRE(HELD, INDEX, PID, I_0, SPAN_ARG, DEPTH); \
+        LOG_PHASE("writing", "written", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT); \
+    MACRO_END
+
+// A term whose result a previous run already committed.
+#define LOG_RESUMED(INDEX, PID, I_0, SPAN_ARG, DEPTH) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", INDEX, PID, get_wall_time(), "resumed", I_0, SPAN_ARG, DEPTH)
 
 // A leaf: evaluating the series terms over the piece's range into P, Q, R, then
 // writing them out. Phases are logged in the same shape as a join's, so the
@@ -472,7 +599,8 @@ void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t depth)
         split_sig(res, i_0, span);
     );
 
-    LOG_WRITE(index, pid, i_0, span, depth,
+    bool lock_held = false;
+    LOG_WRITE(lock_held, index, pid, i_0, span, depth,
         sig_res_save(res, i_0, span);
     );
 }
@@ -501,79 +629,113 @@ void split_span_res_join(split_task_p t, uint64_t span)
     uint64_t i_0 = t->i_0;
     uint64_t depth = t->depth;
 
+    static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
+    static const char *const p_op_1[2] = {"P1", "Q1"};
+    static const char *const p_op_2[2] = {"P2", "Q2"};
+
     if(split_span_res_is_sig(size, i_0, span))
     {
-        file_t fp = sig_res_open_write(i_0, span);
-        static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
-        static const char *const p_op_1[2] = {"P1", "Q1"};
-        static const char *const p_op_2[2] = {"P2", "Q2"};
+        file_t fp = sig_res_open_resume(i_0, span);
+        bool lock_held = false;
+
         for(uint64_t i=0; i<2; i++)
         {
             LOG_HEADER(p_terms[i], index, pid, i_0, span, depth);
+            if(fp.count > i)
+            {
+                LOG_RESUMED(index, pid, i_0, span, depth);
+                continue;
+            }
 
             sig_num_t sig_1;
             sig_num_t sig_2;
-            if(i == 0)
-            {
-                LOG_LOCK(index, pid, i_0, span, depth);
-            }
+            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
             LOG_LOAD(p_op_1[i], index, pid, i_0, span, depth,
                 sig_1 = sig_res_load(i_0, span - 1, i);
             );
             LOG_LOAD(p_op_2[i], index, pid, i_0, span, depth,
                 sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, i);
             );
-            disk_unlock();
+            LOCK_RELEASE(lock_held);
 
             sig_num_t sig;
             LOG_MUL(index, pid, i_0, span, depth,
                 sig = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
             );
 
-            LOG_WRITE_HOLD(index, pid, i_0, span, depth,
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
                 file_write_sig_num(&fp, sig);
             );
             sig_num_free(sig);
         }
 
-        LOG_HEADER("P1xR2", index, pid, i_0, span, depth);
+        if(fp.count < 3)
+        {
+            LOG_HEADER("P1xR2", index, pid, i_0, span, depth);
 
-        sig_num_t sig_1;
-        sig_num_t sig_2;
-        LOG_LOAD("P1", index, pid, i_0, span, depth,
-            sig_1 = sig_res_load(i_0, span - 1, 0);
-        );
-        LOG_LOAD("R2", index, pid, i_0, span, depth,
-            sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 2);
-        );
-        disk_unlock();
+            sig_num_t sig_r_1;
+            bool rh_loaded = false;
+            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
+            LOG_LOAD("Rh", index, pid, i_0, span, depth,
+                rh_loaded = sig_rh_try_load(&sig_r_1, i_0, span);
+            );
 
-        sig_num_t sig_r_1;
-        LOG_MUL(index, pid, i_0, span, depth,
-            sig_r_1 = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
-        );
+            if(rh_loaded)
+            {
+                LOCK_RELEASE(lock_held);
+            }
+            else
+            {
+                sig_num_t sig_1;
+                sig_num_t sig_2;
+                LOG_LOAD("P1", index, pid, i_0, span, depth,
+                    sig_1 = sig_res_load(i_0, span - 1, 0);
+                );
+                LOG_LOAD("R2", index, pid, i_0, span, depth,
+                    sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 2);
+                );
+                LOCK_RELEASE(lock_held);
 
-        LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
+                LOG_MUL(index, pid, i_0, span, depth,
+                    sig_r_1 = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
+                );
 
-        LOG_LOCK(index, pid, i_0, span, depth);
-        LOG_LOAD("R1", index, pid, i_0, span, depth,
-            sig_1 = sig_res_load(i_0, span - 1, 2);
-        );
-        LOG_LOAD("Q2", index, pid, i_0, span, depth,
-            sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 1);
-        );
-        disk_unlock();
+                LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
+                    sig_rh_save(sig_r_1, i_0, span);
+                );
+            }
 
-        sig_num_t sig_r_2;
-        LOG_MUL(index, pid, i_0, span, depth,
-            sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
-        );
-        LOG_WRITE(index, pid, i_0, span, depth,
-            sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
-            file_write_sig_num(&fp, sig_r_1);
-        );
-        sig_num_free(sig_r_1);
+            LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
 
+            sig_num_t sig_1;
+            sig_num_t sig_2;
+            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
+            LOG_LOAD("R1", index, pid, i_0, span, depth,
+                sig_1 = sig_res_load(i_0, span - 1, 2);
+            );
+            LOG_LOAD("Q2", index, pid, i_0, span, depth,
+                sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 1);
+            );
+            LOCK_RELEASE(lock_held);
+
+            sig_num_t sig_r_2;
+            LOG_MUL(index, pid, i_0, span, depth,
+                sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
+            );
+            LOG_WRITE(lock_held, index, pid, i_0, span, depth,
+                sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
+                file_write_sig_num(&fp, sig_r_1);
+            );
+            sig_num_free(sig_r_1);
+        }
+        else
+        {
+            split_task_threads_final(t);
+        }
+
+        // R is committed, so the checkpoint is dead weight -- dropped before
+        // MAGIC_FILE, so the node is never complete while it survives.
+        sig_rh_delete(i_0, span);
         file_write_close(&fp);
 
         sig_res_delete(i_0, span - 1);
@@ -581,86 +743,117 @@ void split_span_res_join(split_task_p t, uint64_t span)
         return;
     }
 
-    file_t fp = union_res_open_write(size, i_0, B(span), depth);
-    static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
-    static const char *const p_op_1[2] = {"P1", "Q1"};
-    static const char *const p_op_2[2] = {"P2", "Q2"};
+    uint64_t remainder = B(span);
+    file_t fp = union_res_open_resume(size, i_0, remainder, depth);
+    bool lock_held = false;
+
     for(uint64_t i=0; i<2; i++)
     {
         LOG_HEADER(p_terms[i], index, pid, i_0, span, depth);
+        if(fp.count > i)
+        {
+            LOG_RESUMED(index, pid, i_0, span, depth);
+            continue;
+        }
 
         union_num_t u_1;
         union_num_t u_2;
-        if(i == 0)
-        {
-            LOG_LOCK(index, pid, i_0, span, depth);
-        }
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
         LOG_LOAD(p_op_1[i], index, pid, i_0, span, depth,
             u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
         );
         LOG_LOAD(p_op_2[i], index, pid, i_0, span, depth,
             u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, i);
         );
-        disk_unlock();
+        LOCK_RELEASE(lock_held);
 
         union_num_t u;
         LOG_MUL(index, pid, i_0, span, depth,
             u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
-        LOG_WRITE_HOLD(index, pid, i_0, span, depth,
+        LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
     }
 
-    LOG_HEADER("P1xR2", index, pid, i_0, span, depth);
+    if(fp.count < 3)
+    {
+        LOG_HEADER("P1xR2", index, pid, i_0, span, depth);
 
-    union_num_t u_1;
-    union_num_t u_2;
-    LOG_LOAD("P1", index, pid, i_0, span, depth,
-        u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
-    );
-    LOG_LOAD("R2", index, pid, i_0, span, depth,
-        u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
-    );
-    disk_unlock();
+        union_num_t u_r_1;
+        bool rh_loaded = false;
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
+        LOG_LOAD("Rh", index, pid, i_0, span, depth,
+            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, depth);
+        );
 
-    union_num_t u_r_1;
-    LOG_MUL(index, pid, i_0, span, depth,
-        u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
-        if(araucaria_disk_config_is_set())
+        if(rh_loaded)
         {
-            u_r_1 = union_num_realloc_disk(u_r_1);
+            LOCK_RELEASE(lock_held);
         }
-    );
+        else
+        {
+            union_num_t u_1;
+            union_num_t u_2;
+            LOG_LOAD("P1", index, pid, i_0, span, depth,
+                u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
+            );
+            LOG_LOAD("R2", index, pid, i_0, span, depth,
+                u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
+            );
+            LOCK_RELEASE(lock_held);
 
-    LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
+            LOG_MUL(index, pid, i_0, span, depth,
+                u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+                if(araucaria_disk_config_is_set())
+                {
+                    u_r_1 = union_num_realloc_disk(u_r_1);
+                }
+            );
 
-    LOG_LOCK(index, pid, i_0, span, depth);
-    LOG_LOAD("R1", index, pid, i_0, span, depth,
-        u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
-    );
-    LOG_LOAD("Q2", index, pid, i_0, span, depth,
-        u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
-    );
-    disk_unlock();
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
+                union_rh_save(u_r_1, size, i_0, remainder, depth);
+            );
+        }
 
-    union_num_t u_r_2;
-    LOG_MUL(index, pid, i_0, span, depth,
-        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
-    );
-    LOG_WRITE(index, pid, i_0, span, depth,
-        u_r_1 = union_num_add(u_r_1, u_r_2);
-        file_write_union_num(&fp, u_r_1);
-    );
-    union_num_free(u_r_1);
+        LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
 
+        union_num_t u_1;
+        union_num_t u_2;
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
+        LOG_LOAD("R1", index, pid, i_0, span, depth,
+            u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
+        );
+        LOG_LOAD("Q2", index, pid, i_0, span, depth,
+            u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
+        );
+        LOCK_RELEASE(lock_held);
+
+        union_num_t u_r_2;
+        LOG_MUL(index, pid, i_0, span, depth,
+            u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+        );
+        LOG_WRITE(lock_held, index, pid, i_0, span, depth,
+            u_r_1 = union_num_add(u_r_1, u_r_2);
+            file_write_union_num(&fp, u_r_1);
+        );
+        union_num_free(u_r_1);
+    }
+    else
+    {
+        split_task_threads_final(t);
+    }
+
+    union_rh_delete(size, i_0, remainder, depth);
     file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span - 1, depth + 1);
     split_span_res_delete(size, i_0 + B(span - 1), span - 1, depth + 1);
 }
+
+
 
 // out vector length 3, returns P, Q, R in that order
 static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
@@ -779,7 +972,8 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
     uint64_t i_0 = t->i_0;
     uint64_t depth = t->depth;
 
-    file_t fp = union_res_open_write(size, i_0, remainder, depth);
+    file_t fp = union_res_open_resume(size, i_0, remainder, depth);
+    bool lock_held = false;
 
     uint64_t span = stdc_bit_width(remainder) - 1;
     static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
@@ -788,82 +982,112 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
     for(uint64_t i=0; i<2; i++)
     {
         LOG_HEADER(p_terms[i], index, pid, i_0, remainder, depth);
+        if(fp.count > i)
+        {
+            LOG_RESUMED(index, pid, i_0, remainder, depth);
+            continue;
+        }
 
         union_num_t u_1;
         union_num_t u_2;
-        if(i == 0)
-        {
-            LOG_LOCK(index, pid, i_0, remainder, depth);
-        }
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
             u_1 = split_span_res_load(size, i_0, span, depth + 1, i);
         );
         LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
             u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, i);
         );
-        disk_unlock();
+        LOCK_RELEASE(lock_held);
 
         union_num_t u;
         LOG_MUL(index, pid, i_0, remainder, depth,
             u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
-        LOG_WRITE_HOLD(index, pid, i_0, remainder, depth,
+        LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
     }
 
-    LOG_HEADER("P1xR2", index, pid, i_0, remainder, depth);
+    if(fp.count < 3)
+    {
+        LOG_HEADER("P1xR2", index, pid, i_0, remainder, depth);
 
-    union_num_t u_1;
-    union_num_t u_2;
-    LOG_LOAD("P1", index, pid, i_0, remainder, depth,
-        u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
-    );
-    LOG_LOAD("R2", index, pid, i_0, remainder, depth,
-        u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
-    );
-    disk_unlock();
+        union_num_t u_r_1;
+        bool rh_loaded = false;
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
+        LOG_LOAD("Rh", index, pid, i_0, remainder, depth,
+            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, depth);
+        );
 
-    union_num_t u_r_1;
-    LOG_MUL(index, pid, i_0, remainder, depth,
-        u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
-        if(araucaria_disk_config_is_set())
+        if(rh_loaded)
         {
-            u_r_1 = union_num_realloc_disk(u_r_1);
+            LOCK_RELEASE(lock_held);
         }
-    );
+        else
+        {
+            union_num_t u_1;
+            union_num_t u_2;
+            LOG_LOAD("P1", index, pid, i_0, remainder, depth,
+                u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
+            );
+            LOG_LOAD("R2", index, pid, i_0, remainder, depth,
+                u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
+            );
+            LOCK_RELEASE(lock_held);
 
-    LOG_HEADER("R1xQ2", index, pid, i_0, remainder, depth);
+            LOG_MUL(index, pid, i_0, remainder, depth,
+                u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+                if(araucaria_disk_config_is_set())
+                {
+                    u_r_1 = union_num_realloc_disk(u_r_1);
+                }
+            );
 
-    LOG_LOCK(index, pid, i_0, remainder, depth);
-    LOG_LOAD("R1", index, pid, i_0, remainder, depth,
-        u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
-    );
-    LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
-        u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
-    );
-    disk_unlock();
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
+                union_rh_save(u_r_1, size, i_0, remainder, depth);
+            );
+        }
 
-    union_num_t u_r_2;
-    LOG_MUL(index, pid, i_0, remainder, depth,
-        u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
-    );
+        LOG_HEADER("R1xQ2", index, pid, i_0, remainder, depth);
 
-    union_num_t u;
-    LOG_WRITE(index, pid, i_0, remainder, depth,
-        u = union_num_add(u_r_1, u_r_2);
-        file_write_union_num(&fp, u);
-    );
-    union_num_free(u);
+        union_num_t u_1;
+        union_num_t u_2;
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
+        LOG_LOAD("R1", index, pid, i_0, remainder, depth,
+            u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
+        );
+        LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
+            u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
+        );
+        LOCK_RELEASE(lock_held);
 
+        union_num_t u_r_2;
+        LOG_MUL(index, pid, i_0, remainder, depth,
+            u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+        );
+
+        union_num_t u;
+        LOG_WRITE(lock_held, index, pid, i_0, remainder, depth,
+            u = union_num_add(u_r_1, u_r_2);
+            file_write_union_num(&fp, u);
+        );
+        union_num_free(u);
+    }
+    else
+    {
+        split_task_threads_final(t);
+    }
+
+    union_rh_delete(size, i_0, remainder, depth);
     file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span, depth + 1);
     union_res_delete(size, i_0 + B(span), remainder - B(span), depth + 1);
 }
 
+<<<<<<< HEAD
 // Joins two adjacent ranges, [i_0, i_0 + remainder_1) and [i_0 + remainder_1,
 // i_0 + remainder). The split point is the caller's: unlike split_big_res_join
 // it is not the top power of two.
@@ -964,6 +1188,9 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
     split_big_res_delete(size, i_0, remainder_1, depth + 1);
     split_big_res_delete(size, i_0_2, remainder_2, depth + 1);
 }
+=======
+
+>>>>>>> origin/v11-scratch
 
 // out vector length 3, returns P, Q, R in that order
 [[maybe_unused]]
