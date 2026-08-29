@@ -163,10 +163,18 @@ It's fine to clean generated files out of `cache/*/` between runs, but always
 keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,
 `tmp/`) — those keep the empty dirs tracked in git and must not be deleted.
 
-The commented-out `araucaria_disk_config_t` example near the top of `main()`
-names `/mnt/wsl/workspace/tmp`, which does not exist. The real scratch
-directory in this repo is `cache/tmp` (README documents it correctly) — use
-that if enabling araucaria's disk-backed numbers.
+`cache/tmp` holds two unrelated things. araucaria's disk-backed numbers go
+there — the `araucaria_disk_config_t` block near the top of `main()` is
+enabled and points at `cache/tmp` — but those files are `unlink`ed the moment
+they are created (`num_create_disk`), so they never appear in a listing and
+clearing the directory never touches them. Everything visible in `cache/tmp`
+is pinhao's own: a half-finished join's `P1xR2` checkpoint, stored under
+exactly the name its node uses in `pieces/` or `numbers/`.
+
+Cache filenames are documented in README's *Cache file names*. Two rules there
+are load-bearing and easy to "tidy" wrongly: `p_` carries no `size` because an
+exact triple is reused across runs of different precisions, and `c_` carries
+no `begin` because every chain node in a run starts at the same index.
 
 ## Line endings
 

@@ -143,6 +143,31 @@ a live terminal dashboard from `thread_log/run.log`:
 ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 ```
 
+### Cache file names
+
+A cached result is named after the node that produced it, so a directory
+listing reads as the shape of the tree. Fields are zero-padded so `ls` sorts
+by index.
+
+- `pieces/p_<begin>_<span>_<end>.bin` — an exact P/Q/R triple over
+  `[begin, end]`. It carries no `size`: an exact triple does not depend on the
+  target precision, so it is reused across runs of different sizes.
+- `numbers/r_<begin>_<level>_<end>_<size>.bin` — a `size`-truncated P/Q/R over
+  any range, power-of-two-wide or not. `level` is the depth below the chunk a
+  chain fuses, `0` at that chunk and restarting at every fold, so two files at
+  level *k* fuse into one at *k-1* wherever they sit in the run.
+- `numbers/c_<chunks>_<end>_<size>.bin` — a chain node, named by how many
+  chunks it has fused. It carries no `begin`, because every chain node in a run
+  starts at the same index. The count runs down to 3; at two chunks the chain
+  ends as an ordinary `r_` span.
+- `tmp/<name of its node>.bin` — a half-finished join's `P1xR2` checkpoint,
+  under exactly the name of the node it belongs to, so `comm` against
+  `pieces/` or `numbers/` shows what was in flight when a run stopped.
+- `res/pi_<size>.bin` — the finished value.
+
+These match what `dashboard.py` draws: a folded chain shows as `[C, 0, k]` for
+the same *k*, and a chunk's subtree is numbered from the chunk, like `level`.
+
 ### Note on Disk Cache
 
 There are two independent caching layers, and only one of them is optional:
@@ -214,8 +239,9 @@ choice. The run log reports which mode is active on its `disk lock` line.
 - `config.h`: Build-time switches for the program itself (currently
   `LOCK_DISK_IO`).
 - `cache/`: Default location for out-of-core file persistence — `pieces/`,
-  `numbers/` and `res/` hold the binary-splitting checkpoints, `tmp/` is the
-  suggested `disk_path` for `araucaria`'s disk-backed numbers, and
-  `disk.lock` is the cross-process I/O lock.
+  `numbers/` and `res/` hold the binary-splitting checkpoints, `tmp/` holds
+  half-finished joins and is also the `disk_path` for `araucaria`'s
+  disk-backed numbers, and `disk.lock` is the cross-process I/O lock. See
+  *Cache file names* above for the naming scheme.
 - `dashboard.py`: Live terminal dashboard that visualizes a run's progress
   from `thread_log/run.log`.

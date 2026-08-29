@@ -64,6 +64,7 @@ STRUCT(big)
     uint64_t i_0;
     uint64_t remainder;
     uint64_t depth;
+    uint64_t level;
 };
 
 STRUCT(span)
@@ -72,6 +73,7 @@ STRUCT(span)
     uint64_t i_0;
     uint64_t span;
     uint64_t depth;
+    uint64_t level;
 };
 
 // [i_0, i_0 + remainder), split as [prefix][trailing chunk] rather than in
@@ -124,11 +126,12 @@ static node_p node_span_create(
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
-    uint64_t depth
+    uint64_t depth,
+    uint64_t level
 ) {
     assert(span >= TREE_PIECE_SIZE);
 
-    if(split_span_res_is_stored(size, i_0, span, depth))
+    if(split_span_res_is_stored(size, i_0, span, level))
     {
         LOG_NODE(U64(0), (int)getpid(), "already stored", i_0, i_0 + B(span) - 1, depth);
         return NULL;
@@ -145,7 +148,8 @@ static node_p node_span_create(
             .size = size,
             .i_0 = i_0,
             .span = span,
-            .depth = depth
+            .depth = depth,
+            .level = level
         }
     };
 
@@ -163,15 +167,16 @@ static node_p node_big_create(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth
+    uint64_t depth,
+    uint64_t level
 ) {
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
-        return node_span_create(parent, size, i_0, span, depth);
+        return node_span_create(parent, size, i_0, span, depth, level);
     }
 
-    if(split_big_res_is_stored(size, i_0, remainder, depth))
+    if(split_big_res_is_stored(size, i_0, remainder, level))
     {
         LOG_NODE(U64(0), (int)getpid(), "already stored", i_0, i_0 + remainder - 1, depth);
         return NULL;
@@ -188,7 +193,8 @@ static node_p node_big_create(
             .size = size,
             .i_0 = i_0,
             .remainder = remainder,
-            .depth = depth
+            .depth = depth,
+            .level = level
         }
     };
 
@@ -213,7 +219,7 @@ static node_p node_chain_create(
 ) {
     assert(remainder > 2 * B(chunk_span));
 
-    if(split_big_res_is_stored(size, i_0, remainder, depth))
+    if(split_big_res_is_stored(size, i_0, remainder, 0))
     {
         LOG_NODE(U64(0), (int)getpid(), "already stored", i_0, i_0 + remainder - 1, depth);
         return NULL;
@@ -247,16 +253,17 @@ static node_p node_chunked_create(
     uint64_t i_0,
     uint64_t remainder,
     uint64_t chunk_span,
-    uint64_t depth
+    uint64_t depth,
+    uint64_t level
 ) {
     if(remainder == B(chunk_span))
     {
-        return node_span_create(parent, size, i_0, chunk_span, depth);
+        return node_span_create(parent, size, i_0, chunk_span, depth, level);
     }
 
     if(remainder == 2 * B(chunk_span))
     {
-        return node_span_create(parent, size, i_0, chunk_span + 1, depth);
+        return node_span_create(parent, size, i_0, chunk_span + 1, depth, level);
     }
 
     return node_chain_create(parent, size, i_0, remainder, chunk_span, depth);
@@ -273,17 +280,18 @@ static node_p node_expand(node_p n, uint64_t index)
             uint64_t remainder = n->as.big.remainder;
             uint64_t span = stdc_bit_width(remainder) - 1;
             uint64_t depth = n->as.big.depth;
+            uint64_t level = n->as.big.level;
 
             switch(index)
             {
                 case 0:
                 {
-                    return node_span_create(n, size, i_0, span, depth + 1);
+                    return node_span_create(n, size, i_0, span, depth + 1, level + 1);
                 }
 
                 case 1:
                 {
-                    return node_big_create(n, size, i_0 + B(span), remainder - B(span), depth + 1);
+                    return node_big_create(n, size, i_0 + B(span), remainder - B(span), depth + 1, level + 1);
                 }
 
                 default: revert()
@@ -296,8 +304,9 @@ static node_p node_expand(node_p n, uint64_t index)
             uint64_t i_0 = n->as.span.i_0;
             uint64_t span = n->as.span.span;
             uint64_t depth = n->as.span.depth;
+            uint64_t level = n->as.span.level;
             uint64_t offset = index * B(span - 1);
-            return node_span_create(n, size, i_0 + offset, span - 1, depth + 1);
+            return node_span_create(n, size, i_0 + offset, span - 1, depth + 1, level + 1);
         }
 
         case NODE_CHAIN:
@@ -313,17 +322,17 @@ static node_p node_expand(node_p n, uint64_t index)
             {
                 case 0:
                 {
-                    return node_chunked_create(n, size, i_0, prefix, chunk_span, depth + 1);
+                    return node_chunked_create(n, size, i_0, prefix, chunk_span, depth + 1, 0);
                 }
 
                 case 1:
                 {
                     if(chunk == B(chunk_span))
                     {
-                        return node_span_create(n, size, i_0 + prefix, chunk_span, depth + 1);
+                        return node_span_create(n, size, i_0 + prefix, chunk_span, depth + 1, 0);
                     }
 
-                    return node_big_create(n, size, i_0 + prefix, chunk, depth + 1);
+                    return node_big_create(n, size, i_0 + prefix, chunk, depth + 1, 0);
                 }
 
                 default: revert()
@@ -402,12 +411,12 @@ static void node_op_sizes(node_p n)
             uint64_t size = n->as.span.size;
             uint64_t i_0 = n->as.span.i_0;
             uint64_t span = n->as.span.span;
-            uint64_t depth = n->as.span.depth;
+            uint64_t level = n->as.span.level;
 
             for(uint64_t i = 0; i < 3; i++)
             {
-                n->ops[0][i] = split_span_res_op_size(size, i_0, span - 1, depth + 1, i);
-                n->ops[1][i] = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, depth + 1, i);
+                n->ops[0][i] = split_span_res_op_size(size, i_0, span - 1, level + 1, i);
+                n->ops[1][i] = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, level + 1, i);
             }
         }
         break;
@@ -417,13 +426,13 @@ static void node_op_sizes(node_p n)
             uint64_t size = n->as.big.size;
             uint64_t i_0 = n->as.big.i_0;
             uint64_t remainder = n->as.big.remainder;
-            uint64_t depth = n->as.big.depth;
+            uint64_t level = n->as.big.level;
             uint64_t span = stdc_bit_width(remainder) - 1;
 
             for(uint64_t i = 0; i < 3; i++)
             {
-                n->ops[0][i] = split_span_res_op_size(size, i_0, span, depth + 1, i);
-                n->ops[1][i] = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), depth + 1, i);
+                n->ops[0][i] = split_span_res_op_size(size, i_0, span, level + 1, i);
+                n->ops[1][i] = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), level + 1, i);
             }
         }
         break;
@@ -432,14 +441,13 @@ static void node_op_sizes(node_p n)
         {
             uint64_t size = n->as.chain.size;
             uint64_t i_0 = n->as.chain.i_0;
-            uint64_t depth = n->as.chain.depth;
             uint64_t chunk = node_chain_chunk(n);
             uint64_t prefix = n->as.chain.remainder - chunk;
 
             for(uint64_t i = 0; i < 3; i++)
             {
-                n->ops[0][i] = split_big_res_op_size(size, i_0, prefix, depth + 1, i);
-                n->ops[1][i] = split_big_res_op_size(size, i_0 + prefix, chunk, depth + 1, i);
+                n->ops[0][i] = split_big_res_op_size(size, i_0, prefix, 0, i);
+                n->ops[1][i] = split_big_res_op_size(size, i_0 + prefix, chunk, 0, i);
             }
         }
         break;
@@ -754,6 +762,7 @@ static void node_big_process(node_p n, uint64_t index, _Atomic uint64_t *threads
         .size = size,
         .i_0 = i_0,
         .depth = depth,
+        .level = n->as.big.level,
         .threads = threads
     };
     TIME_SETUP
@@ -787,6 +796,7 @@ static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *thread
         .size = size,
         .i_0 = i_0,
         .depth = depth,
+        .level = n->as.span.level,
         .threads = threads
     };
     TIME_SETUP
@@ -812,6 +822,7 @@ static void node_chain_process(node_p n, uint64_t index, _Atomic uint64_t *threa
         .size = size,
         .i_0 = i_0,
         .depth = depth,
+        .level = 0,
         .threads = threads
     };
     TIME_SETUP
@@ -1043,7 +1054,7 @@ static uint64_t tree_chunk_span(uint64_t index_max)
 static void scheduler(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
     uint64_t index_max = get_index_max(size, TREE_PIECE_SIZE);
-    node_p n_root = node_chunked_create(NULL, size, 1, index_max, tree_chunk_span(index_max), 0);
+    node_p n_root = node_chunked_create(NULL, size, 1, index_max, tree_chunk_span(index_max), 0, 0);
     if(n_root == NULL)
     {
         return;
@@ -1089,6 +1100,8 @@ flt_num_t pi_tree(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64
     tprintf("              %-20s| " U64P(10) "", "mem launch", mem_launch);
     tprintf("              %-20s| " U64P(10) "", "mem max", mem_max);
     tprintf("              %-20s| " U64P(10) "", "disk lock", (uint64_t)disk_lock_enabled());
+
+    split_chunk_set(B(tree_chunk_span(get_index_max(size, TREE_PIECE_SIZE))));
 
     if(pi_is_stored(size))
     {

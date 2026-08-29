@@ -32,6 +32,22 @@
 #define CACHE "cache"
 #endif
 
+// The chain's chunk width in indices, fixed for the run. Cache names key off
+// it: a range wider than two chunks is a chain node.
+static uint64_t g_chunk = 0;
+
+void split_chunk_set(uint64_t chunk)
+{
+    g_chunk = chunk;
+}
+
+// A chain's children restart the count: each is a range the chain fuses, and
+// those are level 0.
+static uint64_t level_child(uint64_t level, uint64_t remainder)
+{
+    return remainder > 2 * g_chunk ? 0 : level + 1;
+}
+
 
 static void split_sig_join(
     sig_num_t out[3],
@@ -78,10 +94,22 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 
 
 
-static void sig_res_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
+// dir picks the committed result or the half-join checkpoint under tmp: the
+// two carry the same name, so a crashed join pairs with its node by eye.
+static void sig_res_path_dir(
+    char path[PATH_MAX_LEN],
+    const char *dir,
+    uint64_t i_0,
+    uint64_t span
+)
 {
     uint64_t i_max = i_0 + B(span) - 1;
-    snprintf(path, PATH_MAX_LEN, CACHE "/pieces/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
+    snprintf(path, PATH_MAX_LEN, CACHE "/%s/p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", dir, i_0, span, i_max);
+}
+
+static void sig_res_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
+{
+    sig_res_path_dir(path, "pieces", i_0, span);
 }
 
 static file_t sig_res_open_write(uint64_t i_0, uint64_t span)
@@ -177,36 +205,61 @@ static uint64_t sig_res_get_size(uint64_t i_0, uint64_t span, uint64_t index)
 
 
 
+// A chain is named by the chunks it fuses and carries no i_0: every chain in a
+// run starts at the same index. Any other range is named by its level -- the
+// depth below the chunk a chain fuses, 0 at that chunk. dir as in
+// sig_res_path_dir.
+static void union_res_path_dir(
+    char path[PATH_MAX_LEN],
+    const char *dir,
+    uint64_t size,
+    uint64_t i_0,
+    uint64_t remainder,
+    uint64_t level
+)
+{
+    assert(g_chunk);
+
+    uint64_t i_max = i_0 + remainder - 1;
+    if(remainder > 2 * g_chunk)
+    {
+        uint64_t chunks = (remainder + g_chunk - 1) / g_chunk;
+        snprintf(path, PATH_MAX_LEN, CACHE "/%s/c_" U64P(02) "_" U64P(015) "_" U64P(015) ".bin", dir, chunks, i_max, size);
+        return;
+    }
+
+    snprintf(path, PATH_MAX_LEN, CACHE "/%s/r_" U64P(015) "_" U64P(02) "_" U64P(015) "_" U64P(015) ".bin", dir, i_0, level, i_max, size);
+}
+
 static void union_res_path_set(
     char path[PATH_MAX_LEN],
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth
+    uint64_t level
 )
 {
-    uint64_t i_max = i_0 + remainder - 1;
-    snprintf(path, PATH_MAX_LEN, CACHE "/numbers/u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
+    union_res_path_dir(path, "numbers", size, i_0, remainder, level);
 }
 
-static void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void union_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_res_path_set(path, size, i_0, remainder, depth);
+    union_res_path_set(path, size, i_0, remainder, level);
     remove(path);
 }
 
-static FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static FILE* union_res_try_open_read(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_res_path_set(path, size, i_0, remainder, depth);
+    union_res_path_set(path, size, i_0, remainder, level);
     return file_read_open(path);
 }
 
-static file_t union_res_open_resume(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static file_t union_res_open_resume(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_res_path_set(path, size, i_0, remainder, depth);
+    union_res_path_set(path, size, i_0, remainder, level);
     return file_write_open_resume(path, 3);
 }
 
@@ -214,11 +267,11 @@ static union_num_t union_res_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth,
+    uint64_t level,
     uint64_t index
 )
 {
-    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
+    FILE *fp = union_res_try_open_read(size, i_0, remainder, level);
     assert(fp);
 
     union_num_t u = file_read_union_num(fp, index);
@@ -226,9 +279,9 @@ static union_num_t union_res_load(
     return u;
 }
 
-static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static bool union_res_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
-    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
+    FILE *fp = union_res_try_open_read(size, i_0, remainder, level);
     if(fp == NULL)
     {
         return false;
@@ -245,11 +298,11 @@ static uint64_t union_res_op_size(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth,
+    uint64_t level,
     uint64_t index
 )
 {
-    FILE *fp = union_res_try_open_read(size, i_0, remainder, depth);
+    FILE *fp = union_res_try_open_read(size, i_0, remainder, level);
     assert(fp);
 
     file_read_move_to_index(fp, index);
@@ -275,8 +328,7 @@ static uint64_t union_res_op_size(
 // part of a node's stored result.
 static void sig_rh_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
-    uint64_t i_max = i_0 + B(span) - 1;
-    snprintf(path, PATH_MAX_LEN, CACHE "/tmp/rh_p_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", i_0, span, i_max);
+    sig_res_path_dir(path, "tmp", i_0, span);
 }
 
 static void sig_rh_save(sig_num_t sig, uint64_t i_0, uint64_t span)
@@ -317,17 +369,16 @@ static void union_rh_path_set(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth
+    uint64_t level
 )
 {
-    uint64_t i_max = i_0 + remainder - 1;
-    snprintf(path, PATH_MAX_LEN, CACHE "/tmp/rh_u_" U64P(015) "_" U64P(015) "_" U64P(02) "_" U64P(015) ".bin", size, i_0, depth, i_max);
+    union_res_path_dir(path, "tmp", size, i_0, remainder, level);
 }
 
-static void union_rh_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void union_rh_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, depth);
+    union_rh_path_set(path, size, i_0, remainder, level);
 
     file_t fp = file_write_open(path, 1);
     file_write_union_num(&fp, u);
@@ -339,11 +390,11 @@ static bool union_rh_try_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth
+    uint64_t level
 )
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, depth);
+    union_rh_path_set(path, size, i_0, remainder, level);
 
     FILE *fp = file_read_open(path);
     if(fp == NULL)
@@ -356,10 +407,10 @@ static bool union_rh_try_load(
     return true;
 }
 
-static void union_rh_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void union_rh_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, depth);
+    union_rh_path_set(path, size, i_0, remainder, level);
     remove(path);
 }
 
@@ -370,24 +421,24 @@ static void split_span_res_path_set(
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
-    uint64_t depth
+    uint64_t level
 )
 {
-    union_res_path_set(path, size, i_0, B(span), depth);
+    union_res_path_set(path, size, i_0, B(span), level);
 }
 
 // Only one of the two forms exists, so both paths are removed. The sig one is
 // not keyed by size and is left for later runs unless KEEP_PIECES is off; a
 // join taking the sig branch instead deletes its children outright, since its
 // own result covers their range and keeping them would duplicate it.
-static void split_span_res_delete(uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+static void split_span_res_delete(uint64_t size, uint64_t i_0, uint64_t span, uint64_t level)
 {
 #ifndef KEEP_PIECES
     sig_res_delete(i_0, span);
 #endif
 
     char path[PATH_MAX_LEN];
-    split_span_res_path_set(path, size, i_0, span, depth);
+    split_span_res_path_set(path, size, i_0, span, level);
     remove(path);
 }
 
@@ -395,7 +446,7 @@ static union_num_t split_span_res_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
-    uint64_t depth,
+    uint64_t level,
     uint64_t index
 )
 {
@@ -405,14 +456,14 @@ static union_num_t split_span_res_load(
         return union_num_wrap_sig(sig, size);
     }
 
-    return union_res_load(size, i_0, B(span), depth, index);
+    return union_res_load(size, i_0, B(span), level, index);
 }
 
 bool split_span_res_is_stored(
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
-    uint64_t depth
+    uint64_t level
 )
 {
     if(sig_res_is_stored(i_0, span))
@@ -421,7 +472,7 @@ bool split_span_res_is_stored(
     }
 
     uint64_t remainder = B(span);
-    return union_res_is_stored(size, i_0, remainder, depth);
+    return union_res_is_stored(size, i_0, remainder, level);
 }
 
 // Real op size for a span node's already-stored result -- mirrors
@@ -430,7 +481,7 @@ uint64_t split_span_res_op_size(
     uint64_t size,
     uint64_t i_0,
     uint64_t span,
-    uint64_t depth,
+    uint64_t level,
     uint64_t index
 )
 {
@@ -440,18 +491,18 @@ uint64_t split_span_res_op_size(
     }
 
     uint64_t remainder = B(span);
-    return union_res_op_size(size, i_0, remainder, depth, index);
+    return union_res_op_size(size, i_0, remainder, level, index);
 }
 
 static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 {
-    // size, i_0 , span - 1, depth + 1
+    // size, i_0 , span - 1, level + 1
     if(!sig_res_is_stored(i_0, span - 1))
     {
         return false;
     }
 
-    // size, i_0 + B(span - 1), span - 1, depth + 1
+    // size, i_0 + B(span - 1), span - 1, level + 1
     if(!sig_res_is_stored(i_0 + B(span - 1), span - 1))
     {
         return false;
@@ -636,6 +687,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
     uint64_t size = t->size;
     uint64_t i_0 = t->i_0;
     uint64_t depth = t->depth;
+    uint64_t level = t->level;
 
     static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
     static const char *const p_op_1[2] = {"P1", "Q1"};
@@ -752,7 +804,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
     }
 
     uint64_t remainder = B(span);
-    file_t fp = union_res_open_resume(size, i_0, remainder, depth);
+    file_t fp = union_res_open_resume(size, i_0, remainder, level);
     bool lock_held = false;
 
     for(uint64_t i=0; i<2; i++)
@@ -768,10 +820,10 @@ void split_span_res_join(split_task_p t, uint64_t span)
         union_num_t u_2;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
         LOG_LOAD(p_op_1[i], index, pid, i_0, span, depth,
-            u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, i);
+            u_1 = split_span_res_load(size, i_0, span - 1, level_child(level, remainder), i);
         );
         LOG_LOAD(p_op_2[i], index, pid, i_0, span, depth,
-            u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, i);
+            u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, level_child(level, remainder), i);
         );
         LOCK_RELEASE(lock_held);
 
@@ -794,7 +846,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
         bool rh_loaded = false;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
         LOG_LOAD("Rh", index, pid, i_0, span, depth,
-            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, depth);
+            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, level);
         );
 
         if(rh_loaded)
@@ -806,10 +858,10 @@ void split_span_res_join(split_task_p t, uint64_t span)
             union_num_t u_1;
             union_num_t u_2;
             LOG_LOAD("P1", index, pid, i_0, span, depth,
-                u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 0);
+                u_1 = split_span_res_load(size, i_0, span - 1, level_child(level, remainder), 0);
             );
             LOG_LOAD("R2", index, pid, i_0, span, depth,
-                u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 2);
+                u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, level_child(level, remainder), 2);
             );
             LOCK_RELEASE(lock_held);
 
@@ -822,7 +874,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
-                union_rh_save(u_r_1, size, i_0, remainder, depth);
+                union_rh_save(u_r_1, size, i_0, remainder, level);
             );
         }
 
@@ -832,10 +884,10 @@ void split_span_res_join(split_task_p t, uint64_t span)
         union_num_t u_2;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
         LOG_LOAD("R1", index, pid, i_0, span, depth,
-            u_1 = split_span_res_load(size, i_0, span - 1, depth + 1, 2);
+            u_1 = split_span_res_load(size, i_0, span - 1, level_child(level, remainder), 2);
         );
         LOG_LOAD("Q2", index, pid, i_0, span, depth,
-            u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, depth + 1, 1);
+            u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, level_child(level, remainder), 1);
         );
         LOCK_RELEASE(lock_held);
 
@@ -854,24 +906,24 @@ void split_span_res_join(split_task_p t, uint64_t span)
         split_task_threads_final(t);
     }
 
-    union_rh_delete(size, i_0, remainder, depth);
+    union_rh_delete(size, i_0, remainder, level);
     file_write_close(&fp);
 
-    split_span_res_delete(size, i_0, span - 1, depth + 1);
-    split_span_res_delete(size, i_0 + B(span - 1), span - 1, depth + 1);
+    split_span_res_delete(size, i_0, span - 1, level_child(level, remainder));
+    split_span_res_delete(size, i_0 + B(span - 1), span - 1, level_child(level, remainder));
 }
 
 
 
 // out vector length 3, returns P, Q, R in that order
-static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth)
+static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t level)
 {
     int pid = (int)getpid();
 
     assert(span >= PIECE_SIZE);
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
 
-    if(split_span_res_is_stored(size, i_0, span, depth))
+    if(split_span_res_is_stored(size, i_0, span, level))
     {
         return;
     }
@@ -882,8 +934,8 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
         return;
     }
 
-    split_span(index, size, i_0              , span - 1, depth + 1);
-    split_span(index, size, i_0 + B(span - 1), span - 1, depth + 1);
+    split_span(index, size, i_0              , span - 1, depth + 1, level + 1);
+    split_span(index, size, i_0 + B(span - 1), span - 1, depth + 1, level + 1);
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
@@ -894,6 +946,7 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
         .size = size,
         .i_0 = i_0,
         .depth = depth,
+        .level = level,
         .threads = &threads_solo
     };
     split_span_res_join(&t, span);
@@ -907,33 +960,33 @@ static union_num_t split_big_res_load(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth,
+    uint64_t level,
     uint64_t index
 )
 {
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
-        return split_span_res_load(size, i_0, span, depth, index);
+        return split_span_res_load(size, i_0, span, level, index);
     }
 
-    return union_res_load(size, i_0, remainder, depth, index);
+    return union_res_load(size, i_0, remainder, level, index);
 }
 
 bool split_big_res_is_stored(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth
+    uint64_t level
 )
 {
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
-        return split_span_res_is_stored(size, i_0, span, depth);
+        return split_span_res_is_stored(size, i_0, span, level);
     }
 
-    return union_res_is_stored(size, i_0, remainder, depth);
+    return union_res_is_stored(size, i_0, remainder, level);
 }
 
 // Real op size for a big node's already-stored result -- mirrors
@@ -942,31 +995,31 @@ uint64_t split_big_res_op_size(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth,
+    uint64_t level,
     uint64_t index
 )
 {
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
-        return split_span_res_op_size(size, i_0, span, depth, index);
+        return split_span_res_op_size(size, i_0, span, level, index);
     }
 
-    return union_res_op_size(size, i_0, remainder, depth, index);
+    return union_res_op_size(size, i_0, remainder, level, index);
 }
 
 // Mirrors split_big_res_is_stored's span-collapse check: a power-of-two
 // remainder is a span node, whose result may be in either form.
-static void split_big_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t depth)
+static void split_big_res_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     if(stdc_count_ones(remainder) == 1)
     {
         uint64_t span = stdc_bit_width(remainder) - 1;
-        split_span_res_delete(size, i_0, span, depth);
+        split_span_res_delete(size, i_0, span, level);
         return;
     }
 
-    union_res_delete(size, i_0, remainder, depth);
+    union_res_delete(size, i_0, remainder, level);
 }
 
 void split_big_res_join(split_task_p t, uint64_t remainder)
@@ -976,8 +1029,9 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
     uint64_t size = t->size;
     uint64_t i_0 = t->i_0;
     uint64_t depth = t->depth;
+    uint64_t level = t->level;
 
-    file_t fp = union_res_open_resume(size, i_0, remainder, depth);
+    file_t fp = union_res_open_resume(size, i_0, remainder, level);
     bool lock_held = false;
 
     uint64_t span = stdc_bit_width(remainder) - 1;
@@ -997,10 +1051,10 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         union_num_t u_2;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
-            u_1 = split_span_res_load(size, i_0, span, depth + 1, i);
+            u_1 = split_span_res_load(size, i_0, span, level_child(level, remainder), i);
         );
         LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
-            u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, i);
+            u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), level_child(level, remainder), i);
         );
         LOCK_RELEASE(lock_held);
 
@@ -1023,7 +1077,7 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         bool rh_loaded = false;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD("Rh", index, pid, i_0, remainder, depth,
-            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, depth);
+            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, level);
         );
 
         if(rh_loaded)
@@ -1035,10 +1089,10 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
             union_num_t u_1;
             union_num_t u_2;
             LOG_LOAD("P1", index, pid, i_0, remainder, depth,
-                u_1 = split_span_res_load(size, i_0, span, depth + 1, 0);
+                u_1 = split_span_res_load(size, i_0, span, level_child(level, remainder), 0);
             );
             LOG_LOAD("R2", index, pid, i_0, remainder, depth,
-                u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 2);
+                u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), level_child(level, remainder), 2);
             );
             LOCK_RELEASE(lock_held);
 
@@ -1051,7 +1105,7 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
-                union_rh_save(u_r_1, size, i_0, remainder, depth);
+                union_rh_save(u_r_1, size, i_0, remainder, level);
             );
         }
 
@@ -1061,10 +1115,10 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         union_num_t u_2;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD("R1", index, pid, i_0, remainder, depth,
-            u_1 = split_span_res_load(size, i_0, span, depth + 1, 2);
+            u_1 = split_span_res_load(size, i_0, span, level_child(level, remainder), 2);
         );
         LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
-            u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), depth + 1, 1);
+            u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), level_child(level, remainder), 1);
         );
         LOCK_RELEASE(lock_held);
 
@@ -1085,11 +1139,11 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         split_task_threads_final(t);
     }
 
-    union_rh_delete(size, i_0, remainder, depth);
+    union_rh_delete(size, i_0, remainder, level);
     file_write_close(&fp);
 
-    split_span_res_delete(size, i_0, span, depth + 1);
-    split_big_res_delete(size, i_0 + B(span), remainder - B(span), depth + 1);
+    split_span_res_delete(size, i_0, span, level_child(level, remainder));
+    split_big_res_delete(size, i_0 + B(span), remainder - B(span), level_child(level, remainder));
 }
 
 // Joins two adjacent ranges, [i_0, i_0 + remainder_1) and [i_0 + remainder_1,
@@ -1102,6 +1156,7 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
     uint64_t size = t->size;
     uint64_t i_0 = t->i_0;
     uint64_t depth = t->depth;
+    uint64_t level = t->level;
 
     assert(remainder_1 > 0);
     assert(remainder_1 < remainder);
@@ -1109,7 +1164,7 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
     uint64_t i_0_2 = i_0 + remainder_1;
     uint64_t remainder_2 = remainder - remainder_1;
 
-    file_t fp = union_res_open_resume(size, i_0, remainder, depth);
+    file_t fp = union_res_open_resume(size, i_0, remainder, level);
     bool lock_held = false;
 
     static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
@@ -1128,10 +1183,10 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         union_num_t u_2;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
-            u_1 = split_big_res_load(size, i_0, remainder_1, depth + 1, i);
+            u_1 = split_big_res_load(size, i_0, remainder_1, level_child(level, remainder), i);
         );
         LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
-            u_2 = split_big_res_load(size, i_0_2, remainder_2, depth + 1, i);
+            u_2 = split_big_res_load(size, i_0_2, remainder_2, level_child(level, remainder), i);
         );
         LOCK_RELEASE(lock_held);
 
@@ -1154,7 +1209,7 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         bool rh_loaded = false;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD("Rh", index, pid, i_0, remainder, depth,
-            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, depth);
+            rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, level);
         );
 
         if(rh_loaded)
@@ -1166,10 +1221,10 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
             union_num_t u_1;
             union_num_t u_2;
             LOG_LOAD("P1", index, pid, i_0, remainder, depth,
-                u_1 = split_big_res_load(size, i_0, remainder_1, depth + 1, 0);
+                u_1 = split_big_res_load(size, i_0, remainder_1, level_child(level, remainder), 0);
             );
             LOG_LOAD("R2", index, pid, i_0, remainder, depth,
-                u_2 = split_big_res_load(size, i_0_2, remainder_2, depth + 1, 2);
+                u_2 = split_big_res_load(size, i_0_2, remainder_2, level_child(level, remainder), 2);
             );
             LOCK_RELEASE(lock_held);
 
@@ -1182,7 +1237,7 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
-                union_rh_save(u_r_1, size, i_0, remainder, depth);
+                union_rh_save(u_r_1, size, i_0, remainder, level);
             );
         }
 
@@ -1192,10 +1247,10 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         union_num_t u_2;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
         LOG_LOAD("R1", index, pid, i_0, remainder, depth,
-            u_1 = split_big_res_load(size, i_0, remainder_1, depth + 1, 2);
+            u_1 = split_big_res_load(size, i_0, remainder_1, level_child(level, remainder), 2);
         );
         LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
-            u_2 = split_big_res_load(size, i_0_2, remainder_2, depth + 1, 1);
+            u_2 = split_big_res_load(size, i_0_2, remainder_2, level_child(level, remainder), 1);
         );
         LOCK_RELEASE(lock_held);
 
@@ -1216,11 +1271,11 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         split_task_threads_final(t);
     }
 
-    union_rh_delete(size, i_0, remainder, depth);
+    union_rh_delete(size, i_0, remainder, level);
     file_write_close(&fp);
 
-    split_big_res_delete(size, i_0, remainder_1, depth + 1);
-    split_big_res_delete(size, i_0_2, remainder_2, depth + 1);
+    split_big_res_delete(size, i_0, remainder_1, level_child(level, remainder));
+    split_big_res_delete(size, i_0_2, remainder_2, level_child(level, remainder));
 }
 
 // out vector length 3, returns P, Q, R in that order
@@ -1230,14 +1285,15 @@ static void split_big(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth
+    uint64_t depth,
+    uint64_t level
 )
 {
     int pid = (int)getpid();
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
 
-    if(split_big_res_is_stored(size, i_0, remainder, depth))
+    if(split_big_res_is_stored(size, i_0, remainder, level))
     {
         return;
     }
@@ -1245,12 +1301,12 @@ static void split_big(
     uint64_t span = stdc_bit_width(remainder) - 1;
     if(stdc_count_ones(remainder) == 1)
     {
-        split_span(index, size, i_0, span, depth);
+        split_span(index, size, i_0, span, depth, level);
         return;
     }
 
-    split_span(index, size, i_0, span, depth + 1);
-    split_big(index, size, i_0 + B(span), remainder - B(span), depth + 1);
+    split_span(index, size, i_0, span, depth + 1, level_child(level, remainder));
+    split_big(index, size, i_0 + B(span), remainder - B(span), depth + 1, level_child(level, remainder));
 
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
     TIME_SETUP
@@ -1261,6 +1317,7 @@ static void split_big(
         .size = size,
         .i_0 = i_0,
         .depth = depth,
+        .level = level,
         .threads = &threads_solo
     };
     split_big_res_join(&t, remainder);
