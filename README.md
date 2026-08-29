@@ -165,8 +165,17 @@ by index.
   `pieces/` or `numbers/` shows what was in flight when a run stopped.
 - `res/pi_<size>.bin` — the finished value.
 
-These match what `dashboard.py` draws: a folded chain shows as `[C, 0, k]` for
-the same *k*, and a chunk's subtree is numbered from the chunk, like `level`.
+The run log carries the same number in its third column — a node's `level`,
+or a chain's chunk count — so a log line and a filename name the node the same
+way. `i_0` and `i_max`, the first two columns, identify a node on their own;
+nothing keys off an absolute tree depth. `dashboard.py` labels nodes
+`[level, pieces, first piece]`, both counts in pieces from 0, so a node whose
+extent is not a power of two reads as a plain count; `p` toggles to
+`[level, span, i_0]` in raw indices, which is the form the log lines and the
+cache filenames carry. Each rung of the chain ladder is named by its place in
+the chunk sequence instead: `[C, k-1, k]` for a single chunk, `[C, 0, k]` for
+the *k* chunks that are one number, and `[T, pieces]` for the run's partial
+last chunk. An expanded rung carries the node itself as its only child.
 
 ### Note on Disk Cache
 

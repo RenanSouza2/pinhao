@@ -649,17 +649,17 @@ bool disk_lock_enabled(void)
 // A leaf: evaluating the series terms over the piece's range into P, Q, R, then
 // writing them out. Phases are logged in the same shape as a join's, so the
 // dashboard reads both through one path.
-void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t depth)
+void split_piece(uint64_t index, uint64_t i_0, uint64_t span, uint64_t level)
 {
     int pid = (int)getpid();
 
     sig_num_t res[3];
-    LOG_PHASE("evaluating", "evaluated", index, pid, i_0, span, depth,
+    LOG_PHASE("evaluating", "evaluated", index, pid, i_0, span, level,
         split_sig(res, i_0, span);
     );
 
     bool lock_held = false;
-    LOG_WRITE(lock_held, index, pid, i_0, span, depth,
+    LOG_WRITE(lock_held, index, pid, i_0, span, level,
         sig_res_save(res, i_0, span);
     );
 }
@@ -686,7 +686,6 @@ void split_span_res_join(split_task_p t, uint64_t span)
     uint64_t index = t->index;
     uint64_t size = t->size;
     uint64_t i_0 = t->i_0;
-    uint64_t depth = t->depth;
     uint64_t level = t->level;
 
     static const char *const p_terms[2] = {"P1xP2", "Q1xQ2"};
@@ -700,30 +699,30 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
         for(uint64_t i=0; i<2; i++)
         {
-            LOG_HEADER(p_terms[i], index, pid, i_0, span, depth);
+            LOG_HEADER(p_terms[i], index, pid, i_0, span, level);
             if(fp.count > i)
             {
-                LOG_RESUMED(index, pid, i_0, span, depth);
+                LOG_RESUMED(index, pid, i_0, span, level);
                 continue;
             }
 
             sig_num_t sig_1;
             sig_num_t sig_2;
-            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
-            LOG_LOAD(p_op_1[i], index, pid, i_0, span, depth,
+            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
+            LOG_LOAD(p_op_1[i], index, pid, i_0, span, level,
                 sig_1 = sig_res_load(i_0, span - 1, i);
             );
-            LOG_LOAD(p_op_2[i], index, pid, i_0, span, depth,
+            LOG_LOAD(p_op_2[i], index, pid, i_0, span, level,
                 sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, i);
             );
             LOCK_RELEASE(lock_held);
 
             sig_num_t sig;
-            LOG_MUL(index, pid, i_0, span, depth,
+            LOG_MUL(index, pid, i_0, span, level,
                 sig = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
             );
 
-            LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
                 file_write_sig_num(&fp, sig);
             );
             sig_num_free(sig);
@@ -731,12 +730,12 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
         if(fp.count < 3)
         {
-            LOG_HEADER("P1xR2", index, pid, i_0, span, depth);
+            LOG_HEADER("P1xR2", index, pid, i_0, span, level);
 
             sig_num_t sig_r_1;
             bool rh_loaded = false;
-            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
-            LOG_LOAD("Rh", index, pid, i_0, span, depth,
+            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
+            LOG_LOAD("Rh", index, pid, i_0, span, level,
                 rh_loaded = sig_rh_try_load(&sig_r_1, i_0, span);
             );
 
@@ -748,41 +747,41 @@ void split_span_res_join(split_task_p t, uint64_t span)
             {
                 sig_num_t sig_1;
                 sig_num_t sig_2;
-                LOG_LOAD("P1", index, pid, i_0, span, depth,
+                LOG_LOAD("P1", index, pid, i_0, span, level,
                     sig_1 = sig_res_load(i_0, span - 1, 0);
                 );
-                LOG_LOAD("R2", index, pid, i_0, span, depth,
+                LOG_LOAD("R2", index, pid, i_0, span, level,
                     sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 2);
                 );
                 LOCK_RELEASE(lock_held);
 
-                LOG_MUL(index, pid, i_0, span, depth,
+                LOG_MUL(index, pid, i_0, span, level,
                     sig_r_1 = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
                 );
 
-                LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
+                LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
                     sig_rh_save(sig_r_1, i_0, span);
                 );
             }
 
-            LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
+            LOG_HEADER("R1xQ2", index, pid, i_0, span, level);
 
             sig_num_t sig_1;
             sig_num_t sig_2;
-            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
-            LOG_LOAD("R1", index, pid, i_0, span, depth,
+            LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
+            LOG_LOAD("R1", index, pid, i_0, span, level,
                 sig_1 = sig_res_load(i_0, span - 1, 2);
             );
-            LOG_LOAD("Q2", index, pid, i_0, span, depth,
+            LOG_LOAD("Q2", index, pid, i_0, span, level,
                 sig_2 = sig_res_load(i_0 + B(span - 1), span - 1, 1);
             );
             LOCK_RELEASE(lock_held);
 
             sig_num_t sig_r_2;
-            LOG_MUL(index, pid, i_0, span, depth,
+            LOG_MUL(index, pid, i_0, span, level,
                 sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
             );
-            LOG_WRITE(lock_held, index, pid, i_0, span, depth,
+            LOG_WRITE(lock_held, index, pid, i_0, span, level,
                 sig_r_1 = sig_num_add(sig_r_1, sig_r_2);
                 file_write_sig_num(&fp, sig_r_1);
             );
@@ -809,30 +808,30 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
     for(uint64_t i=0; i<2; i++)
     {
-        LOG_HEADER(p_terms[i], index, pid, i_0, span, depth);
+        LOG_HEADER(p_terms[i], index, pid, i_0, span, level);
         if(fp.count > i)
         {
-            LOG_RESUMED(index, pid, i_0, span, depth);
+            LOG_RESUMED(index, pid, i_0, span, level);
             continue;
         }
 
         union_num_t u_1;
         union_num_t u_2;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
-        LOG_LOAD(p_op_1[i], index, pid, i_0, span, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
+        LOG_LOAD(p_op_1[i], index, pid, i_0, span, level,
             u_1 = split_span_res_load(size, i_0, span - 1, level_child(level, remainder), i);
         );
-        LOG_LOAD(p_op_2[i], index, pid, i_0, span, depth,
+        LOG_LOAD(p_op_2[i], index, pid, i_0, span, level,
             u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, level_child(level, remainder), i);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
-        LOG_MUL(index, pid, i_0, span, depth,
+        LOG_MUL(index, pid, i_0, span, level,
             u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
-        LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
+        LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
@@ -840,12 +839,12 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
     if(fp.count < 3)
     {
-        LOG_HEADER("P1xR2", index, pid, i_0, span, depth);
+        LOG_HEADER("P1xR2", index, pid, i_0, span, level);
 
         union_num_t u_r_1;
         bool rh_loaded = false;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
-        LOG_LOAD("Rh", index, pid, i_0, span, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
+        LOG_LOAD("Rh", index, pid, i_0, span, level,
             rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, level);
         );
 
@@ -857,15 +856,15 @@ void split_span_res_join(split_task_p t, uint64_t span)
         {
             union_num_t u_1;
             union_num_t u_2;
-            LOG_LOAD("P1", index, pid, i_0, span, depth,
+            LOG_LOAD("P1", index, pid, i_0, span, level,
                 u_1 = split_span_res_load(size, i_0, span - 1, level_child(level, remainder), 0);
             );
-            LOG_LOAD("R2", index, pid, i_0, span, depth,
+            LOG_LOAD("R2", index, pid, i_0, span, level,
                 u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, level_child(level, remainder), 2);
             );
             LOCK_RELEASE(lock_held);
 
-            LOG_MUL(index, pid, i_0, span, depth,
+            LOG_MUL(index, pid, i_0, span, level,
                 u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
                 if(araucaria_disk_config_is_set())
                 {
@@ -873,29 +872,29 @@ void split_span_res_join(split_task_p t, uint64_t span)
                 }
             );
 
-            LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, depth,
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
                 union_rh_save(u_r_1, size, i_0, remainder, level);
             );
         }
 
-        LOG_HEADER("R1xQ2", index, pid, i_0, span, depth);
+        LOG_HEADER("R1xQ2", index, pid, i_0, span, level);
 
         union_num_t u_1;
         union_num_t u_2;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, depth);
-        LOG_LOAD("R1", index, pid, i_0, span, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
+        LOG_LOAD("R1", index, pid, i_0, span, level,
             u_1 = split_span_res_load(size, i_0, span - 1, level_child(level, remainder), 2);
         );
-        LOG_LOAD("Q2", index, pid, i_0, span, depth,
+        LOG_LOAD("Q2", index, pid, i_0, span, level,
             u_2 = split_span_res_load(size, i_0 + B(span - 1), span - 1, level_child(level, remainder), 1);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u_r_2;
-        LOG_MUL(index, pid, i_0, span, depth,
+        LOG_MUL(index, pid, i_0, span, level,
             u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
         );
-        LOG_WRITE(lock_held, index, pid, i_0, span, depth,
+        LOG_WRITE(lock_held, index, pid, i_0, span, level,
             u_r_1 = union_num_add(u_r_1, u_r_2);
             file_write_union_num(&fp, u_r_1);
         );
@@ -916,12 +915,12 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
 
 // out vector length 3, returns P, Q, R in that order
-static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t depth, uint64_t level)
+static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t span, uint64_t level)
 {
     int pid = (int)getpid();
 
     assert(span >= PIECE_SIZE);
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, span, level);
 
     if(split_span_res_is_stored(size, i_0, span, level))
     {
@@ -930,14 +929,14 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
 
     if(span == PIECE_SIZE)
     {
-        split_piece(index, i_0, span, depth);
+        split_piece(index, i_0, span, level);
         return;
     }
 
-    split_span(index, size, i_0              , span - 1, depth + 1, level + 1);
-    split_span(index, size, i_0 + B(span - 1), span - 1, depth + 1, level + 1);
+    split_span(index, size, i_0              , span - 1, level + 1);
+    split_span(index, size, i_0 + B(span - 1), span - 1, level + 1);
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, level);
     TIME_SETUP
     // No scheduler behind this path: one thread, never donated to.
     _Atomic uint64_t threads_solo = 1;
@@ -945,13 +944,12 @@ static void split_span(uint64_t index, uint64_t size, uint64_t i_0, uint64_t spa
         .index = index,
         .size = size,
         .i_0 = i_0,
-        .depth = depth,
         .level = level,
         .threads = &threads_solo
     };
     split_span_res_join(&t, span);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, level, dtime(t1));
 }
 
 
@@ -1028,7 +1026,6 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
     uint64_t index = t->index;
     uint64_t size = t->size;
     uint64_t i_0 = t->i_0;
-    uint64_t depth = t->depth;
     uint64_t level = t->level;
 
     file_t fp = union_res_open_resume(size, i_0, remainder, level);
@@ -1040,30 +1037,30 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
     static const char *const p_op_2[2] = {"P2", "Q2"};
     for(uint64_t i=0; i<2; i++)
     {
-        LOG_HEADER(p_terms[i], index, pid, i_0, remainder, depth);
+        LOG_HEADER(p_terms[i], index, pid, i_0, remainder, level);
         if(fp.count > i)
         {
-            LOG_RESUMED(index, pid, i_0, remainder, depth);
+            LOG_RESUMED(index, pid, i_0, remainder, level);
             continue;
         }
 
         union_num_t u_1;
         union_num_t u_2;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
-        LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
+        LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, level,
             u_1 = split_span_res_load(size, i_0, span, level_child(level, remainder), i);
         );
-        LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
+        LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, level,
             u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), level_child(level, remainder), i);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
-        LOG_MUL(index, pid, i_0, remainder, depth,
+        LOG_MUL(index, pid, i_0, remainder, level,
             u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
-        LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
+        LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
@@ -1071,12 +1068,12 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
 
     if(fp.count < 3)
     {
-        LOG_HEADER("P1xR2", index, pid, i_0, remainder, depth);
+        LOG_HEADER("P1xR2", index, pid, i_0, remainder, level);
 
         union_num_t u_r_1;
         bool rh_loaded = false;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
-        LOG_LOAD("Rh", index, pid, i_0, remainder, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
+        LOG_LOAD("Rh", index, pid, i_0, remainder, level,
             rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, level);
         );
 
@@ -1088,15 +1085,15 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         {
             union_num_t u_1;
             union_num_t u_2;
-            LOG_LOAD("P1", index, pid, i_0, remainder, depth,
+            LOG_LOAD("P1", index, pid, i_0, remainder, level,
                 u_1 = split_span_res_load(size, i_0, span, level_child(level, remainder), 0);
             );
-            LOG_LOAD("R2", index, pid, i_0, remainder, depth,
+            LOG_LOAD("R2", index, pid, i_0, remainder, level,
                 u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), level_child(level, remainder), 2);
             );
             LOCK_RELEASE(lock_held);
 
-            LOG_MUL(index, pid, i_0, remainder, depth,
+            LOG_MUL(index, pid, i_0, remainder, level,
                 u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
                 if(araucaria_disk_config_is_set())
                 {
@@ -1104,31 +1101,31 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
                 }
             );
 
-            LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
                 union_rh_save(u_r_1, size, i_0, remainder, level);
             );
         }
 
-        LOG_HEADER("R1xQ2", index, pid, i_0, remainder, depth);
+        LOG_HEADER("R1xQ2", index, pid, i_0, remainder, level);
 
         union_num_t u_1;
         union_num_t u_2;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
-        LOG_LOAD("R1", index, pid, i_0, remainder, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
+        LOG_LOAD("R1", index, pid, i_0, remainder, level,
             u_1 = split_span_res_load(size, i_0, span, level_child(level, remainder), 2);
         );
-        LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
+        LOG_LOAD("Q2", index, pid, i_0, remainder, level,
             u_2 = split_big_res_load(size, i_0 + B(span), remainder - B(span), level_child(level, remainder), 1);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u_r_2;
-        LOG_MUL(index, pid, i_0, remainder, depth,
+        LOG_MUL(index, pid, i_0, remainder, level,
             u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
         );
 
         union_num_t u;
-        LOG_WRITE(lock_held, index, pid, i_0, remainder, depth,
+        LOG_WRITE(lock_held, index, pid, i_0, remainder, level,
             u = union_num_add(u_r_1, u_r_2);
             file_write_union_num(&fp, u);
         );
@@ -1155,7 +1152,6 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
     uint64_t index = t->index;
     uint64_t size = t->size;
     uint64_t i_0 = t->i_0;
-    uint64_t depth = t->depth;
     uint64_t level = t->level;
 
     assert(remainder_1 > 0);
@@ -1172,30 +1168,30 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
     static const char *const p_op_2[2] = {"P2", "Q2"};
     for(uint64_t i=0; i<2; i++)
     {
-        LOG_HEADER(p_terms[i], index, pid, i_0, remainder, depth);
+        LOG_HEADER(p_terms[i], index, pid, i_0, remainder, level);
         if(fp.count > i)
         {
-            LOG_RESUMED(index, pid, i_0, remainder, depth);
+            LOG_RESUMED(index, pid, i_0, remainder, level);
             continue;
         }
 
         union_num_t u_1;
         union_num_t u_2;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
-        LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
+        LOG_LOAD(p_op_1[i], index, pid, i_0, remainder, level,
             u_1 = split_big_res_load(size, i_0, remainder_1, level_child(level, remainder), i);
         );
-        LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, depth,
+        LOG_LOAD(p_op_2[i], index, pid, i_0, remainder, level,
             u_2 = split_big_res_load(size, i_0_2, remainder_2, level_child(level, remainder), i);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
-        LOG_MUL(index, pid, i_0, remainder, depth,
+        LOG_MUL(index, pid, i_0, remainder, level,
             u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
         );
 
-        LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
+        LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
             file_write_union_num(&fp, u);
         );
         union_num_free(u);
@@ -1203,12 +1199,12 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
 
     if(fp.count < 3)
     {
-        LOG_HEADER("P1xR2", index, pid, i_0, remainder, depth);
+        LOG_HEADER("P1xR2", index, pid, i_0, remainder, level);
 
         union_num_t u_r_1;
         bool rh_loaded = false;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
-        LOG_LOAD("Rh", index, pid, i_0, remainder, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
+        LOG_LOAD("Rh", index, pid, i_0, remainder, level,
             rh_loaded = union_rh_try_load(&u_r_1, size, i_0, remainder, level);
         );
 
@@ -1220,15 +1216,15 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         {
             union_num_t u_1;
             union_num_t u_2;
-            LOG_LOAD("P1", index, pid, i_0, remainder, depth,
+            LOG_LOAD("P1", index, pid, i_0, remainder, level,
                 u_1 = split_big_res_load(size, i_0, remainder_1, level_child(level, remainder), 0);
             );
-            LOG_LOAD("R2", index, pid, i_0, remainder, depth,
+            LOG_LOAD("R2", index, pid, i_0, remainder, level,
                 u_2 = split_big_res_load(size, i_0_2, remainder_2, level_child(level, remainder), 2);
             );
             LOCK_RELEASE(lock_held);
 
-            LOG_MUL(index, pid, i_0, remainder, depth,
+            LOG_MUL(index, pid, i_0, remainder, level,
                 u_r_1 = union_num_mul_threads(u_1, u_2, split_task_threads(t));
                 if(araucaria_disk_config_is_set())
                 {
@@ -1236,31 +1232,31 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
                 }
             );
 
-            LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, depth,
+            LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
                 union_rh_save(u_r_1, size, i_0, remainder, level);
             );
         }
 
-        LOG_HEADER("R1xQ2", index, pid, i_0, remainder, depth);
+        LOG_HEADER("R1xQ2", index, pid, i_0, remainder, level);
 
         union_num_t u_1;
         union_num_t u_2;
-        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, depth);
-        LOG_LOAD("R1", index, pid, i_0, remainder, depth,
+        LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
+        LOG_LOAD("R1", index, pid, i_0, remainder, level,
             u_1 = split_big_res_load(size, i_0, remainder_1, level_child(level, remainder), 2);
         );
-        LOG_LOAD("Q2", index, pid, i_0, remainder, depth,
+        LOG_LOAD("Q2", index, pid, i_0, remainder, level,
             u_2 = split_big_res_load(size, i_0_2, remainder_2, level_child(level, remainder), 1);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u_r_2;
-        LOG_MUL(index, pid, i_0, remainder, depth,
+        LOG_MUL(index, pid, i_0, remainder, level,
             u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
         );
 
         union_num_t u;
-        LOG_WRITE(lock_held, index, pid, i_0, remainder, depth,
+        LOG_WRITE(lock_held, index, pid, i_0, remainder, level,
             u = union_num_add(u_r_1, u_r_2);
             file_write_union_num(&fp, u);
         );
@@ -1285,13 +1281,12 @@ static void split_big(
     uint64_t size,
     uint64_t i_0,
     uint64_t remainder,
-    uint64_t depth,
     uint64_t level
 )
 {
     int pid = (int)getpid();
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "begin", i_0, remainder, level);
 
     if(split_big_res_is_stored(size, i_0, remainder, level))
     {
@@ -1301,14 +1296,14 @@ static void split_big(
     uint64_t span = stdc_bit_width(remainder) - 1;
     if(stdc_count_ones(remainder) == 1)
     {
-        split_span(index, size, i_0, span, depth, level);
+        split_span(index, size, i_0, span, level);
         return;
     }
 
-    split_span(index, size, i_0, span, depth + 1, level_child(level, remainder));
-    split_big(index, size, i_0 + B(span), remainder - B(span), depth + 1, level_child(level, remainder));
+    split_span(index, size, i_0, span, level_child(level, remainder));
+    split_big(index, size, i_0 + B(span), remainder - B(span), level_child(level, remainder));
 
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, depth);
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) "", index, pid, get_wall_time(), "joining", i_0, span, level);
     TIME_SETUP
     // No scheduler behind this path: one thread, never donated to.
     _Atomic uint64_t threads_solo = 1;
@@ -1316,13 +1311,12 @@ static void split_big(
         .index = index,
         .size = size,
         .i_0 = i_0,
-        .depth = depth,
         .level = level,
         .threads = &threads_solo
     };
     split_big_res_join(&t, remainder);
     TIME_END(t1)
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, depth, dtime(t1));
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", index, pid, get_wall_time(), "joined", i_0, span, level, dtime(t1));
 }
 
 

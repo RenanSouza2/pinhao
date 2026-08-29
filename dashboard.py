@@ -169,7 +169,7 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
-    r"(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<depth>\d+)"
+    r"(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<level>\d+)"
     r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B)(?:\s+(?P<lock>HIT|MISS))?)?"
 )
 RE_PIECE = re.compile(
@@ -193,7 +193,7 @@ RE_SCHEDULER = re.compile(r"(?P<action>.+?)\s*\|\s*(?P<val>\d+)")
 # is holding the walk open.
 RE_HALT = re.compile(
     r"launch halt\s*\|\s*(?P<reason>\S+)"
-    r"(?:\s*\|\s*(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<depth>\d+)\s*\|\s*(?P<mem>\d+)B)?"
+    r"(?:\s*\|\s*(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<level>\d+)\s*\|\s*(?P<mem>\d+)B)?"
 )
 # The leading [ts] is optional: the config lines it shares this shape with
 # don't carry one, nor do logs from a build predating it.
@@ -225,6 +225,11 @@ def leaves_covered(i0, i_max):
 
 TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 
+# Tree labels in pieces rather than raw indices; "p" toggles. Raw indices are
+# what the log lines and cache filenames carry, so that view is the one to
+# reach for when a label has to be matched against either.
+PIECE_UNITS = True
+
 # Where system memory stops being comfortable and starts being the thing that
 # ends the run: below RAM_CALM there is room for the page cache as well as the
 # workers, by RAM_ALARM there is neither and the workers are being swapped.
@@ -237,14 +242,14 @@ RAM_ALARM = 0.95
 
 class TreeNode:
     __slots__ = (
-        "i0", "depth", "kind", "n2", "leaves_total", "leaves_done",
+        "i0", "level", "kind", "n2", "leaves_total", "leaves_done",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro",
     )
 
-    def __init__(self, i0, depth, kind, n2, parent):
+    def __init__(self, i0, level, kind, n2, parent):
         self.i0 = i0
-        self.depth = depth
+        self.level = level  # for CHAIN, the chunks it spans
         self.kind = kind  # "BIG", "SPAN" or "CHAIN"
         self.n2 = n2  # remainder (BIG, CHAIN) or span (SPAN)
         self.leaves_total = (1 << (n2 - TREE_PIECE_SIZE)) if kind == "SPAN" else (n2 // PIECES_PER_LEAF)
@@ -264,52 +269,55 @@ class TreeNode:
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
 
 
-def _build_span(i0, span, depth, parent, by_key):
-    node = TreeNode(i0, depth, "SPAN", span, parent)
-    by_key[(i0, depth)] = node
+def _build_span(i0, span, level, parent, by_key):
+    node = TreeNode(i0, level, "SPAN", span, parent)
+    by_key[(i0, i0 + (1 << span) - 1)] = node
     if span > TREE_PIECE_SIZE:
         half = span - 1
         node.children = [
-            _build_span(i0, half, depth + 1, node, by_key),
-            _build_span(i0 + (1 << half), half, depth + 1, node, by_key),
+            _build_span(i0, half, level + 1, node, by_key),
+            _build_span(i0 + (1 << half), half, level + 1, node, by_key),
         ]
     return node
 
 
-def _build_big(i0, remainder, depth, parent, by_key):
+def _build_big(i0, remainder, level, parent, by_key):
     if bin(remainder).count("1") == 1:
-        return _build_span(i0, remainder.bit_length() - 1, depth, parent, by_key)
+        return _build_span(i0, remainder.bit_length() - 1, level, parent, by_key)
 
-    node = TreeNode(i0, depth, "BIG", remainder, parent)
-    by_key[(i0, depth)] = node
+    node = TreeNode(i0, level, "BIG", remainder, parent)
+    by_key[(i0, i0 + remainder - 1)] = node
     span = remainder.bit_length() - 1
     node.children = [
-        _build_span(i0, span, depth + 1, node, by_key),
-        _build_big(i0 + (1 << span), remainder - (1 << span), depth + 1, node, by_key),
+        _build_span(i0, span, level + 1, node, by_key),
+        _build_big(i0 + (1 << span), remainder - (1 << span), level + 1, node, by_key),
     ]
     return node
 
 
-def _build_chain(i0, remainder, chunk_span, depth, parent, by_key):
-    node = TreeNode(i0, depth, "CHAIN", remainder, parent)
-    by_key[(i0, depth)] = node
+# A chain carries the chunks it spans where other nodes carry a level, matching
+# what it is named by on disk. Everything it fuses restarts the count at 0.
+def _build_chain(i0, remainder, chunk_span, parent, by_key):
+    chunks = -(-remainder // (1 << chunk_span))
+    node = TreeNode(i0, chunks, "CHAIN", remainder, parent)
+    by_key[(i0, i0 + remainder - 1)] = node
     chunk = (remainder & ((1 << chunk_span) - 1)) or (1 << chunk_span)
     prefix = remainder - chunk
     node.children = [
-        _build_chunked(i0, prefix, chunk_span, depth + 1, node, by_key),
-        _build_span(i0 + prefix, chunk_span, depth + 1, node, by_key)
+        _build_chunked(i0, prefix, chunk_span, 0, node, by_key),
+        _build_span(i0 + prefix, chunk_span, 0, node, by_key)
         if chunk == (1 << chunk_span)
-        else _build_big(i0 + prefix, chunk, depth + 1, node, by_key),
+        else _build_big(i0 + prefix, chunk, 0, node, by_key),
     ]
     return node
 
 
-def _build_chunked(i0, remainder, chunk_span, depth, parent, by_key):
+def _build_chunked(i0, remainder, chunk_span, level, parent, by_key):
     if remainder == (1 << chunk_span):
-        return _build_span(i0, chunk_span, depth, parent, by_key)
+        return _build_span(i0, chunk_span, level, parent, by_key)
     if remainder == (2 << chunk_span):
-        return _build_span(i0, chunk_span + 1, depth, parent, by_key)
-    return _build_chain(i0, remainder, chunk_span, depth, parent, by_key)
+        return _build_span(i0, chunk_span + 1, level, parent, by_key)
+    return _build_chain(i0, remainder, chunk_span, parent, by_key)
 
 
 def build_tree(index_max, chunk_span):
@@ -573,6 +581,38 @@ def get_pid_rss(pids):
     return result
 
 
+def get_mmap_bytes(pids):
+    """Disk held by araucaria's disk-backed numbers, over the given pids.
+
+    num_create_disk unlinks each temp file as soon as it mmaps it, so these
+    never appear under cache/tmp and get_dir_size cannot count them -- they
+    hold space until the mapping goes. Keyed by (device, inode): a forked
+    worker inherits its parent's mappings, so one file shows up under several
+    pids and must not be counted twice.
+
+    This is the mapping length, i.e. the file's apparent size. Allocated blocks
+    would need /proc/<pid>/map_files, which wants CAP_SYS_ADMIN; the limb
+    arrays are written through in full, so the two track each other. Returns
+    None where /proc is unreadable (macOS), 0 when nothing has spilled.
+    """
+    seen = {}
+    read_any = False
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/maps") as f:
+                read_any = True
+                for line in f:
+                    if "/bignum_" not in line:
+                        continue
+                    parts = line.split()
+                    lo, hi = (int(x, 16) for x in parts[0].split("-"))
+                    key = (parts[3], parts[4])  # device, inode
+                    seen[key] = max(seen.get(key, 0), hi - lo)
+        except OSError:
+            continue
+    return sum(seen.values()) if read_any else None
+
+
 def get_dir_size(path):
     """Sum of file sizes under path, recursing into subdirectories. Returns
     None if path doesn't exist (e.g. cache/ layout changed)."""
@@ -631,13 +671,13 @@ class State:
         self.joins_done = 0
         self.piece_events = collections.deque(maxlen=2000)  # durations, seconds
         self.join_events = collections.deque(maxlen=2000)  # durations, seconds
-        self.piece_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
-        self.join_events_by_depth = collections.defaultdict(lambda: collections.deque(maxlen=200))
+        self.piece_events_by_level = collections.defaultdict(lambda: collections.deque(maxlen=200))
+        self.join_events_by_level = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.lock_requests = 0  # "locked" lines seen, across all workers
         self.lock_misses = 0  # of those, the ones that found the lock already held
         self.lock_tokens_seen = False  # a "locked" line carried HIT/MISS (older builds log neither)
         self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
-        self.active = {}  # pid -> {"start", "depth", "i0", "threads"}
+        self.active = {}  # pid -> {"start", "level", "i0", "node", "threads"}
         self.active_max = 0
         self.threads_seen = False  # a "task start"/"task donate" line carried THR/SUM (older builds don't log it)
         self.threads_reported = None  # scheduler's own "active threads" total, used until THR arrives
@@ -650,9 +690,9 @@ class State:
         self.chunk_span = None  # from the log's "chunk span" line
         self.tree_chunk_span = None  # the span the tree on screen was built with
         self.tree_root = None
-        self.tree_by_key = None  # (i0, depth) -> TreeNode
+        self.tree_by_key = None  # (i0, i_max) -> TreeNode; the range identifies a node on its own
         self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
-        self.halt = None  # last "launch halt" as (reason, i0, i_max, depth, mem), cleared by the next launch
+        self.halt = None  # last "launch halt" as (reason, i0, i_max, level, mem), cleared by the next launch
         self.halt_seen = False  # whether this log carries halt lines at all
         self.tree_skipped_reason = None
         self.process_running = False
@@ -775,16 +815,20 @@ def handle_node_process(state, content):
     idx = int(m.group("idx"))
     action = m.group("action").strip()
     i0 = int(m.group("i0"))
-    depth = int(m.group("depth"))
+    i_max = int(m.group("i_max"))
+    level = int(m.group("level"))
 
-    tree_node = state.tree_by_key.get((i0, depth)) if state.tree_by_key else None
+    tree_node = state.tree_by_key.get((i0, i_max)) if state.tree_by_key else None
 
     if action == "begin":
         ts = float(m.group("ts"))
         entry = state.active.setdefault(pid, {})
         entry["start"] = ts
-        entry["depth"] = depth
+        entry["level"] = level
         entry["i0"] = i0
+        # Phase lines carry a span or remainder where this one carries i_max,
+        # so they resolve their node through here rather than by key.
+        entry["node"] = tree_node
         if tree_node is not None:
             tree_node.in_progress = True
             tree_node.task_idx = idx
@@ -794,7 +838,7 @@ def handle_node_process(state, content):
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
-        covered = leaves_covered(i0, int(m.group("i_max")))
+        covered = leaves_covered(i0, i_max)
         state.pieces_done += covered
         state.joins_done += covered - 1
         if tree_node is not None:
@@ -810,7 +854,8 @@ def handle_node_process(state, content):
         if dur is not None:
             dur = float(dur)
             state.join_events.append(dur)
-            state.join_events_by_depth[depth].append(dur)
+            bucket = dur_bucket(tree_node) if tree_node is not None else level
+            state.join_events_by_level[bucket].append(dur)
         if tree_node is not None:
             mark_node_done(tree_node)
 
@@ -824,13 +869,13 @@ def handle_piece(state, content):
     state.piece_events.append(dur)
 
     entry = state.active.get(int(m.group("pid")))
-    depth = entry["depth"] if entry else None
-    if depth is not None:
-        state.piece_events_by_depth[depth].append(dur)
+    level = entry.get("level") if entry else None
+    if level is not None:
+        state.piece_events_by_level[level].append(dur)
 
     if state.tree_by_key:
         i0 = int(m.group("i0"))
-        tree_node = state.tree_by_key.get((i0, depth)) if depth is not None else None
+        tree_node = state.tree_by_key.get((i0, int(m.group("i_max"))))
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
             mark_node_done(tree_node)
@@ -840,8 +885,9 @@ def handle_phase_line(state, content):
     """split_piece, split_span_res_join and split_big_res_join log phase lines
     (evaluating/loading/multiplying/.../written/locking/locked, plus "resumed"
     for a term a previous run already committed) and, for joins
-    only, a "mul P1xP2" header, all in the same [idx][pid] | i0 i_max depth shape
-    as node_process, so RE_NODE_PROCESS parses them too. Track the latest term/micro-phase on the
+    only, a "mul P1xP2" header. RE_NODE_PROCESS parses them too, but their
+    middle column is a span or a remainder, not i_max, so the node is taken
+    from the pid's "begin" entry rather than looked up by key. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
     "locking"/"locked" additionally maintain the set of pids currently
     blocked waiting on the exclusive disk lock, and "locked" counts the
@@ -881,9 +927,7 @@ def handle_phase_line(state, content):
 
     if not state.tree_by_key:
         return
-    i0 = int(m.group("i0"))
-    depth = int(m.group("depth"))
-    tree_node = state.tree_by_key.get((i0, depth))
+    tree_node = entry.get("node") if entry is not None else None
     if tree_node is None:
         return
     term = action.removeprefix("mul ")
@@ -908,7 +952,7 @@ def handle_task_start(state, content):
     # about it, and shares this handler.
     if m.group("action").strip() == "task start":
         state.halt = None
-    entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "depth": None, "i0": None})
+    entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "level": None, "i0": None, "node": None})
 
     mem = m.group("mem")
     if mem is not None:
@@ -926,8 +970,8 @@ def handle_task_start(state, content):
         if m.group("action").strip() != "task donate":
             entry["threads_live"] = int(thr)
 
-    if (thr is not None or mem is not None) and state.tree_by_key and entry.get("i0") is not None:
-        attach_task_plan(state, pid, state.tree_by_key.get((entry["i0"], entry["depth"])))
+    if (thr is not None or mem is not None) and state.tree_by_key:
+        attach_task_plan(state, pid, entry.get("node"))
 
 
 def handle_task_end(state, content):
@@ -962,7 +1006,7 @@ def handle_halt(state, content):
         m.group("reason"),
         int(i0) if i0 else None,
         int(m.group("i_max")) if i0 else None,
-        int(m.group("depth")) if i0 else None,
+        int(m.group("level")) if i0 else None,
         int(m.group("mem")) if i0 else None,
     )
 
@@ -1093,8 +1137,18 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
-def depth_avg(events_by_depth, depth, fallback):
-    events = events_by_depth.get(depth) if depth is not None else None
+# Every chain fold multiplies two size-limb floats, so a fold costs the same
+# whatever it spans. They share one bucket; keying them by their chunk count
+# would put a single sample in each.
+CHAIN_BUCKET = "C"
+
+
+def dur_bucket(node):
+    return CHAIN_BUCKET if node.kind == "CHAIN" else node.level
+
+
+def level_avg(events_by_level, level, fallback):
+    events = events_by_level.get(level) if level is not None else None
     if events:
         return sum(events) / len(events)
     return fallback
@@ -1165,7 +1219,7 @@ def active_mem_estimate(node):
 # Everything render_tree needs that is the same for every node in the walk.
 TreeView = collections.namedtuple(
     "TreeView",
-    "lines now avg_piece_dur avg_join_dur piece_events_by_depth join_events_by_depth"
+    "lines now avg_piece_dur avg_join_dur piece_events_by_level join_events_by_level"
     " pid_rss disk_lock_enabled starved chunk_span index_max size",
 )
 
@@ -1206,12 +1260,12 @@ def node_detail(node, view, status):
     detail += f" {fmt_duration(node_elapsed)}"
     if node.in_progress:
         is_leaf = node.leaves_total == 1
-        events_by_depth = view.piece_events_by_depth if is_leaf else view.join_events_by_depth
+        events_by_level = view.piece_events_by_level if is_leaf else view.join_events_by_level
         fallback = view.avg_piece_dur if is_leaf else view.avg_join_dur
-        avg = depth_avg(events_by_depth, node.depth, fallback)
+        avg = level_avg(events_by_level, dur_bucket(node), fallback)
         if avg is not None:
             remaining = avg - node_elapsed
-            # Signed against the depth's average: unsigned is time
+            # Signed against the level's average: unsigned is time
             # left, "+" is time overrun, and the overrun keeps growing
             # on screen. A phrase like "any moment" reads calmest
             # exactly when a task is worst overdue.
@@ -1259,34 +1313,49 @@ def node_detail(node, view, status):
     return detail
 
 
-def node_label(node, depth_base=0, span_w=0, i0_w=0):
-    """A node's own [depth, span, i0]. depth_base renumbers the depth so a
-    subtree can count from its own root rather than from the tree's."""
-    span = f"{node.n2}" if node.kind == "SPAN" else ("B" if node.kind == "BIG" else "C")
-    return f"[{node.depth - depth_base}, {span:>{span_w}}, {node.i0:>{i0_w},}]"
+def node_label(node, span_w=0, i0_w=0):
+    """A node's own [level, size, i0]. The level already counts from the chunk
+    its chain fuses, so there is nothing to rebase. In pieces the size is a
+    plain count and needs no "B" for a node whose extent is not a power of two;
+    in indices it is that extent's log2, which such a node has none of."""
+    if PIECE_UNITS:
+        size = f"{node_extent(node) // PIECES_PER_LEAF}"
+        i0 = f"{(node.i0 - 1) // PIECES_PER_LEAF:,}"
+    else:
+        size = f"{node.n2}" if node.kind == "SPAN" else ("B" if node.kind == "BIG" else "C")
+        i0 = f"{node.i0:,}"
+    return f"[{node.level}, {size:>{span_w}}, {i0:>{i0_w}}]"
 
 
-def chain_tag(node, chunk):
-    """A done chain node names the chunks it has absorbed rather than itself.
-    The tag spans chunk boundaries, counted from 0: the first chunk reads
-    [C, 0, 1] and k chunks folded together read [C, 0, k]."""
-    i_max = node.i0 + node_extent(node) - 1
-    return f"[C, {(node.i0 - 1) // chunk}, {i_max // chunk}]"
+def chain_label(node, chunk):
+    """A ladder rung is named by the chunk boundaries it spans, counted from 0:
+    one whole chunk reads [C, k-1, k] and the k chunks fused into a single
+    number read [C, 0, k]. The run's partial last chunk reads [T, pieces]: it
+    is the one rung whose size is not implied by the boundaries it sits on."""
+    extent = node_extent(node)
+    if extent < chunk:
+        return f"[T, {extent // PIECES_PER_LEAF:,}]"
+    lo = (node.i0 - 1) // chunk
+    return f"[C, {lo}, {(node.i0 + extent - 1) // chunk}]"
 
 
 def node_extent(node):
     return (1 << node.n2) if node.kind == "SPAN" else node.n2
 
 
-def chain_rungs(root):
+def chain_rungs(root, chunk):
     """The root chain flattened: (chunk, join) per rung in ascending index
-    order. The first rung is the accumulator's base and has no join."""
+    order. The first rung is the accumulator's base and has no join. A base
+    spanning two chunks is one node, not a chain, so it is split into the two
+    chunks it halves into, with the base itself as the join that fuses them."""
     spine = []
     n = root
     while n.kind == "CHAIN":
         spine.append(n)
         n = n.children[0]
-    return [(n, None)] + [(c.children[1], c) for c in reversed(spine)]
+    base = ([(n, None)] if node_extent(n) == chunk
+            else [(n.children[0], None), (n.children[1], n)])
+    return base + [(c.children[1], c) for c in reversed(spine)]
 
 
 def chain_bound(value, chunk, index_max):
@@ -1302,11 +1371,11 @@ def chain_bound(value, chunk, index_max):
 def render_chain_ladder(root, view):
     """The root chain as a flat ladder, one rung per chunk in index order,
     every folded rung merged into a single accumulator row - so the rows always
-    tile [1, imax] exactly and the fold is visible as arithmetic. A rung shows
-    its chunk until that chunk is done, then the join that folds it in: the two
-    never run at once, since a join waits on its own chunk."""
+    tile [1, imax] exactly and the fold is visible as arithmetic. A rung is
+    named by its place in the chunk sequence; the node itself, under its usual
+    [level, span, i0], hangs below as the rung's only child."""
     chunk = 1 << view.chunk_span
-    rungs = chain_rungs(root)
+    rungs = chain_rungs(root, chunk)
 
     # The run itself, named by the three fields the cache path is keyed by.
     # The root chain is also the last rung's join, so it reads here and the
@@ -1318,56 +1387,63 @@ def render_chain_ladder(root, view):
         + node_detail(root, view, status)
     )
 
+    # The final fold is the root's own task, so like any other rung running its
+    # join it has nothing below it: the rungs it consumes are already inside it.
+    if root.in_progress:
+        return
+
     # The last join to have landed. Everything at or below it is one number.
     folded = 0
     for i, (_, join) in enumerate(rungs):
         if join is not None and join.own_done:
             folded = i
 
-    # (node the row reads its state from, node it takes its label from, chunk
-    # to expand). A rung keeps its chunk's label even while its join is the
-    # live task: the label is what says which rung this is, and the join's own
-    # i_0 is the accumulator's, not the rung's.
+    # (node the row reads its state from, its label, node to expand under it).
+    # A join is already named for the accumulator it is building, so it takes
+    # its rung's slot and the chunk it folds in is not expanded a second time.
+    def is_fuse(join):
+        return join is not None and join is not root and join.in_progress
+
     rows = []
+    fuse_at = None
     if folded:
         acc = rungs[folded][1]
-        rows.append((acc, acc, None))
+        rows.append((acc, chain_label(acc, chunk), None))
     for chunk_node, join in rungs[folded + 1 if folded else 0:]:
-        if join is not None and join is not root and join.in_progress:
-            rows.append((join, chunk_node, None))
+        if is_fuse(join):
+            fuse_at = len(rows)
+            rows.append((join, chain_label(join, chunk), None))
         else:
-            rows.append((chunk_node, chunk_node, chunk_node))
+            rows.append((chunk_node, chain_label(chunk_node, chunk), chunk_node))
 
-    def is_folded(n):
-        return n.kind == "CHAIN" and n.own_done
+    # A fuse's left operand is the row above it, already inside the number that
+    # fuse is building, so that row drops out until the fold lands.
+    if fuse_at:
+        del rows[fuse_at - 1]
 
-    span_w = max(
-        (len(node_label(n, n.depth).split(", ")[1]) for _, n, _ in rows if not is_folded(n)),
-        default=0,
-    )
+    label_w = max(len(label) for _, label, _ in rows)
 
-    for row_i, (node, label_node, chunk_node) in enumerate(rows):
+    for row_i, (node, label, chunk_node) in enumerate(rows):
         mark, state, status, tint = node_state(node, view)
-        label = (chain_tag(label_node, chunk) if is_folded(label_node)
-                 else node_label(label_node, label_node.depth, span_w))
         # The rungs hang off the root row on the tree's own connectors, so an
         # expanded rung's subtree does not break the ladder in two.
         is_last = row_i == len(rows) - 1
         connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
+        # Padded only when something follows, so an unadorned row carries no
+        # trailing blanks.
+        detail = node_detail(node, view, status)
         view.lines.append(
-            f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}{node_detail(node, view, status)}"
+            f"{connector}{tint}{mark}{OFF} {tint}{label:<{label_w if detail else 0}}{OFF}"
+            + detail
         )
-        if chunk_node is None or state in ("done", "pending"):
-            continue
-        if chunk_node.children and all(c.own_done for c in chunk_node.children):
+        # A rung running its own join is that node, so nothing hangs below it.
+        if chunk_node is None or chunk_node.in_progress or state in ("done", "pending"):
             continue
         child_prefix = "   " if is_last else "\u2502  "
-        for i, child in enumerate(chunk_node.children):
-            render_tree(child, view, child_prefix, i == len(chunk_node.children) - 1,
-                        is_root=False, depth_base=chunk_node.depth)
+        render_tree(chunk_node, view, child_prefix, True, is_root=False)
 
 
-def render_tree(node, view, prefix="", is_last=True, is_root=True, depth_base=0):
+def render_tree(node, view, prefix="", is_last=True, is_root=True):
     # Only the root can be a chain: node_expand never puts one anywhere else.
     if is_root and node.kind == "CHAIN":
         render_chain_ladder(node, view)
@@ -1375,7 +1451,7 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True, depth_base=0)
 
     mark, state, status, tint = node_state(node, view)
     connector = "" if is_root else ("\u2514\u2500 " if is_last else "\u251c\u2500 ")
-    label = f"{tint}{node_label(node, depth_base)}{OFF}" + node_detail(node, view, status)
+    label = f"{tint}{node_label(node)}{OFF}" + node_detail(node, view, status)
     view.lines.append(f"{prefix}{connector}{tint}{mark}{OFF} {label}")
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
@@ -1383,7 +1459,7 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True, depth_base=0)
 
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
     for i, child in enumerate(node.children):
-        render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False, depth_base=depth_base)
+        render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False)
 
 
 def render_status_screen(state):
@@ -1724,11 +1800,11 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         rows.append(row if rows else corner(row))
     if state.halt is not None:
         # Which gate closed, and for "leaf"/"barrier" the task that is holding
-        # the walk open: its booking, then its depth and start index.
-        reason, halt_i0, _, halt_depth, halt_mem = state.halt
+        # the walk open: its booking, then its level and start index.
+        reason, halt_i0, _, halt_level, halt_mem = state.halt
         row = "halt:".ljust(LABEL_W) + f"{ALERT_ON}{reason}{ALERT_OFF}"
         if halt_i0 is not None:
-            row += f" {fmt_bytes(halt_mem)} @ [{halt_depth}] {halt_i0:,}"
+            row += f" {fmt_bytes(halt_mem)} @ [{halt_level}] {halt_i0:,}"
         rows.append(row)
     mem_budget = state.mem_solo or state.mem_max or state.mem_launch
     if est is not None and mem_budget:
@@ -1784,9 +1860,17 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
 
 
 def _disk_rows(state, bar_w):
-    rows = ["cache:".ljust(LABEL_W)
-            + f"numbers {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'numbers')))}"
-            + f"   pieces {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'pieces')))}"]
+    row = ("cache:".ljust(LABEL_W)
+           + f"numbers {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'numbers')))}"
+           + f"   pieces {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'pieces')))}")
+    # The third thing occupying cache/: unlinked, so the two readings above are
+    # blind to it. Workers hold the mappings while they run, the root process
+    # once they are gone.
+    pids = list(state.active.keys()) or ([state.root_pid] if state.root_pid else [])
+    mmapped = get_mmap_bytes(pids) if pids else None
+    if mmapped is not None:
+        row += f"   mmap {fmt_bytes(mmapped)}"
+    rows = [row]
     if not (state.lock_requests and state.disk_lock_enabled is not False):
         return rows
     if state.lock_tokens_seen:
@@ -1969,7 +2053,7 @@ def render(state):
         if state.tree_root is not None:
             render_tree(state.tree_root, TreeView(
                 lines, now, avg_piece_dur, avg_join_dur,
-                state.piece_events_by_depth, state.join_events_by_depth, pid_rss,
+                state.piece_events_by_level, state.join_events_by_level, pid_rss,
                 state.disk_lock_enabled is not False, starved,
                 state.tree_chunk_span, state.index_max,
                 state.config.get("size", state.explicit_size),
@@ -2125,6 +2209,8 @@ def parse_scroll_actions(raw):
             actions.append(("top",))
         elif ch == "G":
             actions.append(("bottom",))
+        elif ch == "p":
+            actions.append(("units",))
         elif ch == "q" or b == 0x03:  # q or Ctrl-C (ISIG is off in cbreak+no-echo mode)
             actions.append(("quit",))
         i += 1
@@ -2160,10 +2246,10 @@ def draw(state, scroll_offset=0, actions=()):
     if max_offset > 0:
         footer = (
             f" lines {scroll_offset + 1}-{min(scroll_offset + body_rows, len(all_lines))}/{len(all_lines)}"
-            "   ↑/↓ j/k scroll   PgUp/PgDn page   g/G top/bottom   q quit "
+            "   ↑/↓ j/k scroll   PgUp/PgDn page   g/G top/bottom   p units   q quit "
         )
     else:
-        footer = " q quit "
+        footer = " p units   q quit "
     content.append(_fit_visible(footer, cols))
 
     # Every line is already padded to exactly `cols` and there are always
@@ -2186,6 +2272,7 @@ draw.last_dims = None
 
 
 def main():
+    global PIECE_UNITS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
     parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
@@ -2230,6 +2317,8 @@ def main():
             actions = parse_scroll_actions(read_pending_input(stdin_fd)) if is_tty else []
             if any(action[0] == "quit" for action in actions):
                 raise KeyboardInterrupt
+            if any(action[0] == "units" for action in actions):
+                PIECE_UNITS = not PIECE_UNITS
 
             now = time.time()
             if actions or now - last_render >= 1.0:
