@@ -219,16 +219,6 @@ def get_index_max(size, piece_size=None):
     return index_max + (1 << piece_size) - aux
 
 
-# Mirrors TREE_CHAIN_BITS in lib/tree/code.c. Only a fallback: the run logs the
-# chunk span it actually used.
-TREE_CHAIN_BITS = 3
-
-
-def tree_chunk_span(index_max):
-    width = index_max.bit_length()
-    return width - min(TREE_CHAIN_BITS, width - TREE_PIECE_SIZE)
-
-
 def leaves_covered(i0, i_max):
     return (i_max - i0 + 1) // PIECES_PER_LEAF
 
@@ -334,11 +324,13 @@ def build_tree(index_max, chunk_span):
 def apply_index_max(state, index_max):
     state.total_pieces = index_max // PIECES_PER_LEAF
     state.index_max = index_max
-    # The logged span wins, but "run size" can arrive first (or, with --size,
-    # before any of it): fall back to what the run would have computed.
-    state.tree_chunk_span = (
-        state.chunk_span if state.chunk_span is not None else tree_chunk_span(index_max)
-    )
+    # Only the log knows the span (TREE_CHAIN_BITS is not mirrored here), and
+    # "run size" can arrive first (or, with --size, before any of it): the
+    # totals are set now, the tree waits for the "chunk span" line.
+    state.tree_chunk_span = state.chunk_span
+    if state.tree_chunk_span is None:
+        state.tree_root, state.tree_by_key = None, None
+        return
     state.tree_root, state.tree_by_key = build_tree(index_max, state.tree_chunk_span)
     if state.tree_root is None:
         state.tree_skipped_reason = (

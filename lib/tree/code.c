@@ -18,7 +18,7 @@
 
 // Top bits of index_max that become the chain: the range is cut into chunks of
 // B(chunk_span), folded in one at a time instead of halved.
-#define TREE_CHAIN_BITS 3
+#define TREE_CHAIN_BITS 4
 
 // index into node.ops, matching split_sig_join's P, Q, R ordering
 #define NODE_OP_P 0
