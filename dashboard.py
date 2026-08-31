@@ -242,7 +242,7 @@ RAM_ALARM = 0.95
 
 class TreeNode:
     __slots__ = (
-        "i0", "level", "kind", "n2", "leaves_total", "leaves_done",
+        "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro",
     )
@@ -254,6 +254,7 @@ class TreeNode:
         self.n2 = n2  # remainder (BIG, CHAIN) or span (SPAN)
         self.leaves_total = (1 << (n2 - TREE_PIECE_SIZE)) if kind == "SPAN" else (n2 // PIECES_PER_LEAF)
         self.leaves_done = 0
+        self.units_done = 0  # pieces and joins finished in this subtree, one each
         self.own_done = False
         self.in_progress = False
         self.task_idx = None
@@ -350,6 +351,16 @@ def mark_leaves_done(node, leaves):
     n = node
     while n is not None:
         n.leaves_done = min(n.leaves_done + leaves, n.leaves_total)
+        n = n.parent
+
+
+def mark_units_done(node, units):
+    """Units are pieces and joins counted one each, as in the overall bar's
+    split_units. A subtree is binary, so it holds 2 * leaves_total - 1 of them;
+    the clamp keeps a replayed or interleaved record from overshooting."""
+    n = node
+    while n is not None:
+        n.units_done = min(n.units_done + units, 2 * n.leaves_total - 1)
         n = n.parent
 
 
@@ -845,6 +856,7 @@ def handle_node_process(state, content):
         state.joins_done += covered - 1
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
+            mark_units_done(tree_node, 2 * covered - 1)
             mark_node_done(tree_node)
     elif action == "joining":
         mem = m.group("mem")
@@ -859,6 +871,7 @@ def handle_node_process(state, content):
             bucket = dur_bucket(tree_node) if tree_node is not None else level
             state.join_events_by_level[bucket].append(dur)
         if tree_node is not None:
+            mark_units_done(tree_node, 1)
             mark_node_done(tree_node)
 
 
@@ -880,6 +893,7 @@ def handle_piece(state, content):
         tree_node = state.tree_by_key.get((i0, int(m.group("i_max"))))
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
+            mark_units_done(tree_node, 1)
             mark_node_done(tree_node)
 
 
@@ -1063,6 +1077,7 @@ def handle_phase(state, content):
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
+            mark_units_done(state.tree_root, 2 * state.tree_root.leaves_total - 1)
             mark_node_done(state.tree_root)
     elif action == "display begin":
         set_phase(state, "displaying", ts)
@@ -1264,9 +1279,16 @@ def node_state(node, view):
 
 
 def node_detail(node, view, status):
-    """The reading beside a node's label: task id, elapsed, ETA, memory,
-    threads, term and micro-phase. Empty unless the node is the live task."""
+    """The reading beside a node's label: for the live task, its task id,
+    elapsed, ETA, memory, threads, term and micro-phase; for a node with work
+    running below it, how far along that work is."""
     if status is None:
+        # What has to finish before this node can start. Its subtree is binary,
+        # so 2 * leaves - 2 units sit below it, counted as the overall bar
+        # counts them. Shown only once some of it has landed.
+        below = 2 * node.leaves_total - 2
+        if node.active_count > 0 and node.units_done and below:
+            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / below)}%{OFF}"
         return ""
     detail = f" [{status}]"
     if node.start_time is None:
