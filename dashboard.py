@@ -1822,14 +1822,6 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         reading = f"{fmt_bytes(est)} / {RSS_ON}{fmt_bytes(real)}{OFF}"
         row = "workers:".ljust(LABEL_W) + reading
         rows.append(row if rows else corner(row))
-    if state.halt is not None:
-        # Which gate closed, and for "leaf"/"barrier" the task that is holding
-        # the walk open: its booking, then its level and start index.
-        reason, halt_i0, _, halt_level, halt_mem = state.halt
-        row = "halt:".ljust(LABEL_W) + f"{ALERT_ON}{reason}{ALERT_OFF}"
-        if halt_i0 is not None:
-            row += f" {fmt_bytes(halt_mem)} @ [{halt_level}] {halt_i0:,}"
-        rows.append(row)
     mem_budget = state.mem_solo or state.mem_max or state.mem_launch
     if est is not None and mem_budget:
         # The bar ends at the budget and stretches only far enough to keep an
