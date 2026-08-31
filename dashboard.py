@@ -1281,8 +1281,12 @@ def node_state(node, view):
 def node_detail(node, view, status):
     """The reading beside a node's label: for the live task, its task id,
     elapsed, ETA, memory, threads, term and micro-phase; for a node with work
-    running below it, how far along that work is."""
+    running below it, how far along that work is; 100% once it is done."""
     if status is None:
+        # A finished node takes the tint of its own row rather than the reading
+        # grey, so a done subtree stays uniformly dim.
+        if node.own_done:
+            return f" {NODE_DONE}100%{OFF}"
         # What has to finish before this node can start. Its subtree is binary,
         # so 2 * leaves - 2 units sit below it, counted as the overall bar
         # counts them. Shown only once some of it has landed.
