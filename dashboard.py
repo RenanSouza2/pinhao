@@ -681,7 +681,8 @@ class State:
         self.active_max = 0
         self.threads_seen = False  # a "task start"/"task donate" line carried THR/SUM (older builds don't log it)
         self.threads_reported = None  # scheduler's own "active threads" total, used until THR arrives
-        self.thread_time = 0.0  # thread-seconds, in log time, for the utilization average
+        self.thread_time = 0.0  # working thread-seconds, in log time, for the utilization average
+        self.booked_time = 0.0  # booked thread-seconds over the same span
         self.thread_span = 0.0  # seconds those thread-seconds cover
         self.thread_last_ts = None  # log timestamp the two above are folded up to
         self.phase = "splitting"
@@ -776,6 +777,7 @@ def thread_tick(state, ts):
     if ts > state.thread_last_ts:
         dt = ts - state.thread_last_ts
         state.thread_time += (working_threads(state) or 0) * dt
+        state.booked_time += (booked_capped(state) or 0) * dt
         state.thread_span += dt
         state.thread_last_ts = ts
 
@@ -1191,20 +1193,33 @@ def working_threads(state):
     return min(runnable, budget) if budget else runnable
 
 
-def thread_util(state, now):
-    """Time-weighted average of threads actually computing over the run so far
-    - booked threads less those parked on the lock or on I/O. The stretch
+def booked_capped(state):
+    """booked_threads() held to n_process, capped like working_threads():
+    threads booked past the ceiling contend for the same cores rather than
+    adding any."""
+    booked = booked_threads(state)
+    if booked is None:
+        return None
+    budget = thread_budget(state)
+    return min(booked, budget) if budget else booked
+
+
+def thread_avgs(state, now):
+    """Time-weighted averages over the run so far, as (working, booked):
+    threads the scheduler has committed, and of those the ones actually
+    computing - booked less those parked on the lock or on I/O. The stretch
     since the last logged line is extrapolated from wall clock at the current
-    thread total - without it a single long join, which logs nothing for
-    minutes, would leave the average frozen at whatever preceded it."""
-    acc, span = state.thread_time, state.thread_span
+    thread totals - without it a single long join, which logs nothing for
+    minutes, would leave the averages frozen at whatever preceded them."""
+    work, book, span = state.thread_time, state.booked_time, state.thread_span
     if state.last_line_time is not None and not state.done:
         tail = max(0.0, now - state.last_line_time)
-        acc += (working_threads(state) or 0) * tail
+        work += (working_threads(state) or 0) * tail
+        book += (booked_capped(state) or 0) * tail
         span += tail
     if span <= 0:
-        return 0.0
-    return acc / span
+        return 0.0, 0.0
+    return work / span, book / span
 
 
 def active_mem_estimate(node):
@@ -1315,28 +1330,33 @@ def node_detail(node, view, status):
 
 def node_label(node, span_w=0, i0_w=0):
     """A node's own [level, size, i0]. The level already counts from the chunk
-    its chain fuses, so there is nothing to rebase. In pieces the size is a
-    plain count and needs no "B" for a node whose extent is not a power of two;
-    in indices it is that extent's log2, which such a node has none of."""
-    if PIECE_UNITS:
+    its chain fuses, so there is nothing to rebase. A SPAN is sized by its span
+    in either view - that is what the log lines and cache filenames name it by.
+    Only BIG and CHAIN follow the unit toggle: in pieces their size is a plain
+    count, and in indices they have no log2 to show and fall back to a letter."""
+    if node.kind == "SPAN":
+        size = f"{node.n2}"
+    elif PIECE_UNITS:
         size = f"{node_extent(node) // PIECES_PER_LEAF}"
-        i0 = f"{(node.i0 - 1) // PIECES_PER_LEAF:,}"
     else:
-        size = f"{node.n2}" if node.kind == "SPAN" else ("B" if node.kind == "BIG" else "C")
-        i0 = f"{node.i0:,}"
+        size = "B" if node.kind == "BIG" else "C"
+    i0 = f"{(node.i0 - 1) // PIECES_PER_LEAF:,}" if PIECE_UNITS else f"{node.i0:,}"
     return f"[{node.level}, {size:>{span_w}}, {i0:>{i0_w}}]"
 
 
 def chain_label(node, chunk):
     """A ladder rung is named by the chunk boundaries it spans, counted from 0:
-    one whole chunk reads [C, k-1, k] and the k chunks fused into a single
-    number read [C, 0, k]. The run's partial last chunk reads [T, pieces]: it
-    is the one rung whose size is not implied by the boundaries it sits on."""
+    one whole chunk is named by the boundary it ends at, [C, k], and the k
+    chunks fused into a single number read [C, 0, k] -- so a fold's result is
+    named for the rung it just took in. The run's partial last chunk reads
+    [T, pieces]: it is the one rung whose size is not implied by the
+    boundaries it sits on."""
     extent = node_extent(node)
     if extent < chunk:
         return f"[T, {extent // PIECES_PER_LEAF:,}]"
     lo = (node.i0 - 1) // chunk
-    return f"[C, {lo}, {(node.i0 + extent - 1) // chunk}]"
+    hi = (node.i0 + extent - 1) // chunk
+    return f"[C, {hi}]" if hi - lo == 1 else f"[C, {lo}, {hi}]"
 
 
 def node_extent(node):
@@ -1732,10 +1752,14 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
             BAR_FULL + BAR_HELD + BAR_NONE, mark, colour=(tint, tint, BAR_ON),
         ))
 
-    if state.thread_span > 0:
-        util = thread_util(state, now)
-        pct = f" ({100.0 * util / budget:.0f}%)" if budget else ""
-        rows.append(" " * LABEL_W + f"util: {fmt_num(util)} / {budget or '?'} avg{pct}")
+    if state.thread_span > 0 and budget:
+        # Two indices whose product is the run's thread utilization: the share
+        # of the budget booked, and the share of that booking computing rather
+        # than parked.
+        work_avg, book_avg = thread_avgs(state, now)
+        alloc = 100.0 * book_avg / budget
+        used = 100.0 * work_avg / book_avg if book_avg else 0.0
+        rows.append(" " * LABEL_W + f"alloc {alloc:.0f}% x used {used:.0f}% = {alloc * used / 100.0:.0f}%")
     return rows
 
 

@@ -169,13 +169,17 @@ The run log carries the same number in its third column — a node's `level`,
 or a chain's chunk count — so a log line and a filename name the node the same
 way. `i_0` and `i_max`, the first two columns, identify a node on their own;
 nothing keys off an absolute tree depth. `dashboard.py` labels nodes
-`[level, pieces, first piece]`, both counts in pieces from 0, so a node whose
-extent is not a power of two reads as a plain count; `p` toggles to
-`[level, span, i_0]` in raw indices, which is the form the log lines and the
-cache filenames carry. Each rung of the chain ladder is named by its place in
-the chunk sequence instead: `[C, k-1, k]` for a single chunk, `[C, 0, k]` for
-the *k* chunks that are one number, and `[T, pieces]` for the run's partial
-last chunk. An expanded rung carries the node itself as its only child.
+`[level, size, first piece]`, the first piece counted in pieces from 0. A
+span's size is always its `span`, the form the log lines and the cache
+filenames carry; a big or chain node has no such exponent, so its size is a
+count of pieces and a node whose extent is not a power of two reads as a plain
+count. `p` toggles to raw indices, where a span reads `[level, span, i_0]` and
+those piece counts give way to a `B` or `C` kind letter. Each rung of the
+chain ladder is named by its place in the chunk sequence instead: `[C, k]` for
+the single chunk that ends at boundary *k*, `[C, 0, k]` for the *k* chunks
+that are one number — so a fold is named for the rung it just took in — and
+`[T, pieces]` for the run's partial last chunk. An expanded rung carries the
+node itself as its only child.
 
 ### Note on Disk Cache
 
