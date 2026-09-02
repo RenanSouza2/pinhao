@@ -82,8 +82,8 @@ ALERT_OFF = "\x1b[22;39m"
 # on, the measurement is the check on it, so only one of the pair reads loud.
 RSS_ON = "\x1b[38;2;124;128;140m"
 
-# Cyan (#4396A2) on a task holding more than one thread slot. Flat across every
-# width: the badge says a task is wide, the number beside it says how wide.
+# Cyan (#4396A2) on a task's thread count. Flat across every width: the number
+# carries how wide the task is, the colour only says which reading it is.
 # The only cyan on the dashboard, and cool on purpose - every warm hue here
 # already means something is wrong (coral alert, wine lock, amber I/O), so a
 # warm badge would read as a condition rather than as a count.
@@ -244,7 +244,7 @@ class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
-        "mem_estimate", "term", "micro",
+        "mem_estimate", "term", "micro", "micro_start",
     )
 
     def __init__(self, i0, level, kind, n2, parent):
@@ -268,6 +268,7 @@ class TreeNode:
         self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
         self.term = None  # e.g. "P1xP2", from a join's "mul ..." header line; leaves have none
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
+        self.micro_start = None  # log timestamp the current micro-phase was entered at
 
 
 def _build_span(i0, span, level, parent, by_key):
@@ -390,6 +391,7 @@ def mark_node_done(node):
     node.start_time = None
     node.term = None
     node.micro = None
+    node.micro_start = None
     if was_active:
         mark_active(node, -1)
 
@@ -406,18 +408,18 @@ def pi_process_running():
         return False
 
 
-def _parse_etime(text):
-    """Seconds from a ps elapsed-time field: plain seconds (procps etimes) or
-    [[dd-]hh:]mm:ss (BSD etime)."""
+def _parse_ps_clock(text):
+    """Seconds from a ps time field: plain seconds (procps etimes),
+    [[dd-]hh:]mm:ss (BSD etime) or mm:ss.cc (the TIME column on macOS)."""
     days, sep, clock = text.partition("-")
     if not sep:
         days, clock = "0", text
     parts = clock.split(":")
     if len(parts) > 3:
         raise ValueError(text)
-    secs = 0
+    secs = 0.0
     for part in parts:
-        secs = secs * 60 + int(part)
+        secs = secs * 60 + float(part)
     return int(days) * 86400 + secs
 
 
@@ -445,7 +447,7 @@ def _ps_etimes(pids):
             if len(parts) != 2:
                 continue
             try:
-                rows.append((int(parts[0]), _parse_etime(parts[1])))
+                rows.append((int(parts[0]), _parse_ps_clock(parts[1])))
             except ValueError:
                 continue
         _PS_ETIME_KEYWORD = keyword
@@ -569,14 +571,16 @@ def get_system_ram():
     return _get_system_ram_macos()
 
 
-def get_pid_rss(pids):
-    """pid -> RSS bytes, for the given live pids (missing/dead pids are omitted)."""
+def get_pid_stats(pids):
+    """pid -> (RSS bytes, cumulative CPU seconds), for the given live pids
+    (missing/dead pids are omitted). Both readings come off one ps call: the
+    dashboard wants them over the same pid set on the same frame."""
     pids = list(pids)
     if not pids:
         return {}
     try:
         out = subprocess.run(
-            ["ps", "-o", "pid=,rss=", "-p", ",".join(str(p) for p in pids)],
+            ["ps", "-o", "pid=,rss=,time=", "-p", ",".join(str(p) for p in pids)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
@@ -586,10 +590,47 @@ def get_pid_rss(pids):
     result = {}
     for line in out.stdout.splitlines():
         parts = line.split()
-        if len(parts) == 2:
-            pid, rss = parts
-            result[int(pid)] = int(rss) * 1024
+        if len(parts) != 3:
+            continue
+        try:
+            result[int(parts[0])] = (int(parts[1]) * 1024, _parse_ps_clock(parts[2]))
+        except ValueError:
+            continue
     return result
+
+
+# ps reports cumulative CPU time to the second, so a delta taken across one
+# frame is almost all quantisation. Deltas are taken against the oldest sample
+# still inside CPU_WINDOW, and a pid younger than CPU_MIN_SPAN gets no reading
+# at all rather than a rounded one.
+CPU_WINDOW = 3.0
+CPU_MIN_SPAN = 1.5
+
+
+class CpuSampler:
+    """Cores in use per pid, differenced from cumulative CPU time."""
+
+    def __init__(self):
+        self.samples = collections.deque()  # (wall clock, {pid: cpu seconds})
+
+    def update(self, now, cpu_times):
+        self.samples.append((now, cpu_times))
+        # Drop a sample only while the one behind it still spans the window,
+        # so the oldest kept is the closest to a full window without going
+        # under it.
+        while len(self.samples) > 2 and self.samples[1][0] <= now - CPU_WINDOW:
+            self.samples.popleft()
+        cores = {}
+        for pid, cpu in cpu_times.items():
+            for base_t, base in self.samples:
+                span = now - base_t
+                if pid in base and span >= CPU_MIN_SPAN:
+                    cores[pid] = max(0.0, (cpu - base[pid]) / span)
+                    break
+        return cores
+
+
+_CPU_SAMPLER = CpuSampler()
 
 
 def get_mmap_bytes(pids):
@@ -950,6 +991,10 @@ def handle_phase_line(state, content):
     if term != action:
         tree_node.term = term
     else:
+        # Only a change of phase restarts the clock: a phase logged twice
+        # running is still the same phase.
+        if action != tree_node.micro:
+            tree_node.micro_start = float(m.group("ts"))
         tree_node.micro = action
     if action == "multiplying":
         attach_task_plan(state, pid, tree_node)
@@ -1192,6 +1237,19 @@ def blocked_threads(state):
     return waiting, io
 
 
+def expected_threads(node):
+    """Threads a task's phase says should be busy: none while it waits on the
+    disk lock, one while it is in a read or a write, its whole booking while it
+    computes. blocked_threads()' rule, taken one task at a time."""
+    if node.threads is None:
+        return None
+    if node.micro == "locking":
+        return 0
+    if node.micro is not None and (node.micro.startswith("loading") or node.micro == "writing"):
+        return 1
+    return node.threads
+
+
 def working_threads(state):
     """Active threads minus the ones parked on the lock or on I/O, capped at
     n_process: the scheduler can book past its own ceiling (a node overshooting
@@ -1250,7 +1308,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now avg_piece_dur avg_join_dur piece_events_by_level join_events_by_level"
-    " pid_rss disk_lock_enabled starved chunk_span index_max size",
+    " pid_rss pid_cpu disk_lock_enabled starved chunk_span index_max size",
 )
 
 
@@ -1280,16 +1338,16 @@ def node_state(node, view):
 
 def node_detail(node, view, status):
     """The reading beside a node's label: for the live task, its task id,
-    elapsed, ETA, memory, threads, term and micro-phase; for a node with work
-    running below it, how far along that work is; 100% once it is done."""
+    elapsed, ETA, memory, threads, cores, term and micro-phase; for any other
+    node, how far along the work below it is; 100% once it is done."""
     if status is None:
         if node.own_done:
             return f" {RSS_ON}100%{OFF}"
         # What has to finish before this node can start. Its subtree is binary,
         # so 2 * leaves - 2 units sit below it, counted as the overall bar
-        # counts them. Shown only once some of it has landed.
+        # counts them.
         below = 2 * node.leaves_total - 2
-        if node.active_count > 0 and node.units_done and below:
+        if below:
             return f" {RSS_ON}{fmt_num(100.0 * node.units_done / below)}%{OFF}"
         return ""
     detail = f" [{status}]"
@@ -1320,23 +1378,34 @@ def node_detail(node, view, status):
             # Estimate first, measured second - the order is what says
             # which is which, so it never varies.
             detail += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
-        # Single-threaded tasks get no badge at all: its presence is
-        # what flags a task holding more than one thread slot. "x" is
+        # Carried by every running task, single-threaded ones included: the
+        # cores measured beside it are read against this booking, so a row
+        # without it leaves the measurement with nothing to mean. "x" is
         # already the multiply in the term below, so the badge takes
         # the multiplication sign to keep the two apart.
         if node.threads is not None:
             live = node.threads_live
             if live is None:
                 live = node.threads
+            detail += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
             # Threads donated to a running task but not yet picked up,
             # in the RSS grey: like a measured RSS beside its estimate,
             # this is the softer half of the pair - the scheduler has
             # booked them, the worker is not on them yet.
             pending = max(0, node.threads - live)
-            if node.threads > 1 or pending:
-                detail += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
-                if pending:
-                    detail += f" {RSS_ON}(\u00d7{pending}){OFF}"
+            if pending:
+                detail += f" {RSS_ON}(\u00d7{pending}){OFF}"
+        # Cores measured over the cores the micro-phase at the end of the row
+        # expects to be busy. Tinted by the shortfall between the two: a task
+        # parked on the lock is meant to be using nothing and one in a read is
+        # meant to be using one, so only a task idle while it claims to be
+        # computing goes hot.
+        cores = view.pid_cpu.get(node.pid) if node.pid is not None else None
+        if cores is not None:
+            expected = expected_threads(node)
+            shortfall = 1.0 - cores / expected if expected else 0.0
+            reading = f"{cores:.1f}c" if expected is None else f"{cores:.1f}c / {expected}"
+            detail += f" | {severity_colour(shortfall, alarm=0.5)}{reading}{OFF}"
         if node.term:
             op1, _, op2 = node.term.partition("x")
             detail += f" | {op1} x {op2}"
@@ -1349,6 +1418,10 @@ def node_detail(node, view, status):
             elif micro.startswith("loading") or micro == "writing":
                 micro = f"{IO_ATTN_ON}{micro}{OFF}"
             detail += f" | {micro}"
+            # Time in this phase, in the RSS grey: the phase name is the
+            # reading, how long it has been stuck in it is the check on it.
+            if node.micro_start is not None:
+                detail += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
     return detail
 
 
@@ -1713,7 +1786,7 @@ def _completion_rows(state, bar_w):
     return rows
 
 
-def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
+def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked, cpu=None):
     rows = []
     n_workers = state.n_process_logged or state.n_process or state.active_max
     blocked_total = sum(blocked_threads(state))
@@ -1744,6 +1817,11 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
         if budget and threads_booked is not None and threads_booked > budget:
             threads_row += f" (+{threads_booked - budget} over)"
         blocked_half = f"blocked: {blocked_total}" if blocked_total else ""
+        # Measured, so it takes the RSS grey and sits second - booked first,
+        # measured after, the order a task's own row uses.
+        if cpu is not None:
+            measured = f"{RSS_ON}cpu {cpu:.1f}{OFF}"
+            blocked_half = f"{blocked_half}  {measured}" if blocked_half else measured
         rows.append(pair(threads_row, blocked_half))
 
     if budget and threads_now is not None:
@@ -1759,8 +1837,13 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
             max(0, budget - threads_now - pending),
         )
         mark = budget if (threads_booked or 0) > budget else None
-        # The marker adds a cell, so give the segments one less and the bar
-        # keeps the width it has when nothing is overbooked.
+        # Measured cores laid over the booking as a half cell, as the ram bar
+        # lays measured RSS over its estimate. The tick can land either side
+        # of the working/parked boundary; which side says whether the phase
+        # model over- or under-counted.
+        ticks = ((cpu, BAR_MEASURED, OFF),) if cpu is not None else ()
+        # Marker and tick each add a cell, so give the segments one less for
+        # each and the bar keeps the width it has when neither is drawn.
         # Inverted severity: a full bar is the good end, so the ramp reads
         # 1 - working/budget. Alarm at 0.5 puts half the threads idle already
         # at the hottest tone - on a run this size, half the machine doing
@@ -1772,8 +1855,9 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked):
         # them a second colour would state the same fact twice.
         tint = severity_colour(1.0 - counts[0] / budget, alarm=0.5)
         rows.append(" " * LABEL_W + render_bar(
-            bar_w - 1 if mark else bar_w, counts,
+            bar_w - (1 if mark else 0) - len(ticks), counts,
             BAR_FULL + BAR_HELD + BAR_NONE, mark, colour=(tint, tint, BAR_ON),
+            ticks=ticks,
         ))
 
     if state.thread_span > 0 and budget:
@@ -1990,14 +2074,17 @@ def render(state):
     lines.append("")
 
     ram_used, ram_total = get_system_ram()
-    pid_rss = get_pid_rss(state.active.keys())
-    if not pid_rss and state.phase in ("dividing", "displaying"):
+    pid_stats = get_pid_stats(state.active.keys())
+    if not pid_stats and state.phase in ("dividing", "displaying"):
         # No fork()ed workers left to read RSS from (see active_threads) - the
         # root process is the one actually holding the memory these phases use.
         if state.root_pid is None:
             state.root_pid = get_root_pid()
         if state.root_pid is not None:
-            pid_rss = get_pid_rss((state.root_pid,))
+            pid_stats = get_pid_stats((state.root_pid,))
+    pid_rss = {pid: rss for pid, (rss, _) in pid_stats.items()}
+    pid_cpu = _CPU_SAMPLER.update(now, {pid: cpu for pid, (_, cpu) in pid_stats.items()})
+    cpu_total = sum(pid_cpu.values()) if pid_cpu else None
 
     # Geometry first: completion, threads, ram and disk each need a column
     # width to size their own bar to before anything is rendered.
@@ -2048,7 +2135,7 @@ def render(state):
     threads_booked = booked_threads(state)
 
     completion_lines = _completion_rows(state, done_bar_w)
-    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked)
+    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked, cpu_total)
     ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, ram_used, ram_total, pid_rss, est, real, over_launch)
     disk_lines = _disk_rows(state, disk_bar_w)
 
@@ -2093,7 +2180,7 @@ def render(state):
         if state.tree_root is not None:
             render_tree(state.tree_root, TreeView(
                 lines, now, avg_piece_dur, avg_join_dur,
-                state.piece_events_by_level, state.join_events_by_level, pid_rss,
+                state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
                 state.disk_lock_enabled is not False, starved,
                 state.tree_chunk_span, state.index_max,
                 state.config.get("size", state.explicit_size),
