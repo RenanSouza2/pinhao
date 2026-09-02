@@ -1384,23 +1384,23 @@ def node_detail(node, view, status):
             # Estimate first, measured second - the order is what says
             # which is which, so it never varies.
             detail += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
-        # Carried by every running task, single-threaded ones included: the
-        # cores measured beside it are read against this booking, so a row
-        # without it leaves the measurement with nothing to mean. "x" is
+        # Single-threaded tasks get no badge at all: its presence is
+        # what flags a task holding more than one thread slot. "x" is
         # already the multiply in the term below, so the badge takes
         # the multiplication sign to keep the two apart.
         if node.threads is not None:
             live = node.threads_live
             if live is None:
                 live = node.threads
-            detail += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
             # Threads donated to a running task but not yet picked up,
             # in the RSS grey: like a measured RSS beside its estimate,
             # this is the softer half of the pair - the scheduler has
             # booked them, the worker is not on them yet.
             pending = max(0, node.threads - live)
-            if pending:
-                detail += f" {RSS_ON}(\u00d7{pending}){OFF}"
+            if node.threads > 1 or pending:
+                detail += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
+                if pending:
+                    detail += f" {RSS_ON}(\u00d7{pending}){OFF}"
         # Cores measured over the cores the micro-phase at the end of the row
         # expects to be busy. Tinted by the shortfall between the two: a task
         # parked on the lock is meant to be using nothing and one in a read is

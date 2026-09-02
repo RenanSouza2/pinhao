@@ -55,12 +55,12 @@ static void split_sig_join(
     sig_num_t res_2[3]
 )
 {
-    sig_num_t sig_r_1 = sig_num_mul(res_1[2], sig_num_copy(res_2[1]));
-    sig_num_t sig_r_2 = sig_num_mul(res_2[2], sig_num_copy(res_1[0]));
+    sig_num_t sig_r_part = sig_num_mul(res_2[2], sig_num_copy(res_1[0]));
+    sig_num_t sig_r_rest = sig_num_mul(res_1[2], sig_num_copy(res_2[1]));
 
     sig_num_t out_0 = sig_num_mul(res_1[0], res_2[0]);
     sig_num_t out_1 = sig_num_mul(res_1[1], res_2[1]);
-    sig_num_t out_2 = sig_num_add(sig_r_1, sig_r_2);
+    sig_num_t out_2 = sig_num_add(sig_r_part, sig_r_rest);
 
     out[0] = out_0;
     out[1] = out_1;
@@ -322,29 +322,27 @@ static uint64_t union_res_op_size(
 
 
 
-// The P1xR2 product, freed as soon as it is checkpointed under cache/tmp and
-// read back only for the final add, so it never stays live across R1xQ2.
-// Removed once the join's R is committed: transient, never part of a node's
-// stored result.
-static void sig_rh_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
+// R's first addend (P1xR2), checkpointed under cache/tmp so it is not live
+// across R1xQ2. Deleted once R is committed: never part of a node's result.
+static void sig_r_part_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
     sig_res_path_dir(path, "tmp", i_0, span);
 }
 
-static void sig_rh_save(sig_num_t sig, uint64_t i_0, uint64_t span)
+static void sig_r_part_save(sig_num_t sig, uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
-    sig_rh_path_set(path, i_0, span);
+    sig_r_part_path_set(path, i_0, span);
 
     file_t fp = file_write_open(path, 1);
     file_write_sig_num(&fp, sig);
     file_write_close(&fp);
 }
 
-static bool sig_rh_is_stored(uint64_t i_0, uint64_t span)
+static bool sig_r_part_is_stored(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
-    sig_rh_path_set(path, i_0, span);
+    sig_r_part_path_set(path, i_0, span);
 
     FILE *fp = file_read_open(path);
     if(fp == NULL)
@@ -356,10 +354,10 @@ static bool sig_rh_is_stored(uint64_t i_0, uint64_t span)
     return true;
 }
 
-static sig_num_t sig_rh_load(uint64_t i_0, uint64_t span)
+static sig_num_t sig_r_part_load(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
-    sig_rh_path_set(path, i_0, span);
+    sig_r_part_path_set(path, i_0, span);
 
     FILE *fp = file_read_open(path);
     assert(fp);
@@ -369,14 +367,14 @@ static sig_num_t sig_rh_load(uint64_t i_0, uint64_t span)
     return sig;
 }
 
-static void sig_rh_delete(uint64_t i_0, uint64_t span)
+static void sig_r_part_delete(uint64_t i_0, uint64_t span)
 {
     char path[PATH_MAX_LEN];
-    sig_rh_path_set(path, i_0, span);
+    sig_r_part_path_set(path, i_0, span);
     remove(path);
 }
 
-static void union_rh_path_set(
+static void union_r_part_path_set(
     char path[PATH_MAX_LEN],
     uint64_t size,
     uint64_t i_0,
@@ -387,20 +385,20 @@ static void union_rh_path_set(
     union_res_path_dir(path, "tmp", size, i_0, remainder, level);
 }
 
-static void union_rh_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
+static void union_r_part_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, level);
+    union_r_part_path_set(path, size, i_0, remainder, level);
 
     file_t fp = file_write_open(path, 1);
     file_write_union_num(&fp, u);
     file_write_close(&fp);
 }
 
-static bool union_rh_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
+static bool union_r_part_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, level);
+    union_r_part_path_set(path, size, i_0, remainder, level);
 
     FILE *fp = file_read_open(path);
     if(fp == NULL)
@@ -412,10 +410,10 @@ static bool union_rh_is_stored(uint64_t size, uint64_t i_0, uint64_t remainder, 
     return true;
 }
 
-static union_num_t union_rh_load(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
+static union_num_t union_r_part_load(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, level);
+    union_r_part_path_set(path, size, i_0, remainder, level);
 
     FILE *fp = file_read_open(path);
     assert(fp);
@@ -425,10 +423,10 @@ static union_num_t union_rh_load(uint64_t size, uint64_t i_0, uint64_t remainder
     return u;
 }
 
-static void union_rh_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
+static void union_r_part_delete(uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
 {
     char path[PATH_MAX_LEN];
-    union_rh_path_set(path, size, i_0, remainder, level);
+    union_r_part_path_set(path, size, i_0, remainder, level);
     remove(path);
 }
 
@@ -618,6 +616,11 @@ bool disk_lock_enabled(void)
 #define LOG_MUL(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      LOG_PHASE("multiplying", "multiplied", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 #define LOG_ADD(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      LOG_PHASE("adding", "added", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 
+// One name for one value: the term header of the third multiplication and the
+// operand label the "R" term reads it back under. Five characters, so it still
+// fits LOG_LOAD_LABELED's nine-wide label column.
+#define TERM_P1XR2 "P1xR2"
+
 // The "locked" line carries HIT or MISS: whether the lock was free when asked
 // for. Not derivable from the timing, which rounds a short wait to 0.0.
 #define LOG_LOCK(INDEX, PID, I_0, SPAN_ARG, DEPTH)                                                                   \
@@ -750,9 +753,9 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
         if(fp.count < 3)
         {
-            LOG_HEADER("P1xR2", index, pid, i_0, span, level);
+            LOG_HEADER(TERM_P1XR2, index, pid, i_0, span, level);
 
-            if(sig_rh_is_stored(i_0, span))
+            if(sig_r_part_is_stored(i_0, span))
             {
                 LOG_RESUMED(index, pid, i_0, span, level);
             }
@@ -769,15 +772,15 @@ void split_span_res_join(split_task_p t, uint64_t span)
                 );
                 LOCK_RELEASE(lock_held);
 
-                sig_num_t sig_r;
+                sig_num_t sig_r_part;
                 LOG_MUL(index, pid, i_0, span, level,
-                    sig_r = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
+                    sig_r_part = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
                 );
 
                 LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
-                    sig_rh_save(sig_r, i_0, span);
+                    sig_r_part_save(sig_r_part, i_0, span);
                 );
-                sig_num_free(sig_r);
+                sig_num_free(sig_r_part);
             }
 
             LOG_HEADER("R1xQ2", index, pid, i_0, span, level);
@@ -793,23 +796,23 @@ void split_span_res_join(split_task_p t, uint64_t span)
             );
             LOCK_RELEASE(lock_held);
 
-            sig_num_t sig_r_2;
+            sig_num_t sig_r_rest;
             LOG_MUL(index, pid, i_0, span, level,
-                sig_r_2 = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
+                sig_r_rest = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
             );
 
             LOG_HEADER("R", index, pid, i_0, span, level);
 
-            sig_num_t sig_r_1;
+            sig_num_t sig_r_part;
             LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
-            LOG_LOAD("Rh", index, pid, i_0, span, level,
-                sig_r_1 = sig_rh_load(i_0, span);
+            LOG_LOAD(TERM_P1XR2, index, pid, i_0, span, level,
+                sig_r_part = sig_r_part_load(i_0, span);
             );
             LOCK_RELEASE(lock_held);
 
             sig_num_t sig_r;
             LOG_ADD(index, pid, i_0, span, level,
-                sig_r = sig_num_add(sig_r_1, sig_r_2);
+                sig_r = sig_num_add(sig_r_part, sig_r_rest);
             );
             LOG_WRITE(lock_held, index, pid, i_0, span, level,
                 file_write_sig_num(&fp, sig_r);
@@ -823,7 +826,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
         // R is committed, so the checkpoint is dead weight -- dropped before
         // MAGIC_FILE, so the node is never complete while it survives.
-        sig_rh_delete(i_0, span);
+        sig_r_part_delete(i_0, span);
         file_write_close(&fp);
 
         sig_res_delete(i_0, span - 1);
@@ -868,9 +871,9 @@ void split_span_res_join(split_task_p t, uint64_t span)
 
     if(fp.count < 3)
     {
-        LOG_HEADER("P1xR2", index, pid, i_0, span, level);
+        LOG_HEADER(TERM_P1XR2, index, pid, i_0, span, level);
 
-        if(union_rh_is_stored(size, i_0, remainder, level))
+        if(union_r_part_is_stored(size, i_0, remainder, level))
         {
             LOG_RESUMED(index, pid, i_0, span, level);
         }
@@ -887,15 +890,15 @@ void split_span_res_join(split_task_p t, uint64_t span)
             );
             LOCK_RELEASE(lock_held);
 
-            union_num_t u_r;
+            union_num_t u_r_part;
             LOG_MUL(index, pid, i_0, span, level,
-                u_r = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+                u_r_part = union_num_mul_threads(u_1, u_2, split_task_threads(t));
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
-                union_rh_save(u_r, size, i_0, remainder, level);
+                union_r_part_save(u_r_part, size, i_0, remainder, level);
             );
-            union_num_free(u_r);
+            union_num_free(u_r_part);
         }
 
         LOG_HEADER("R1xQ2", index, pid, i_0, span, level);
@@ -911,23 +914,23 @@ void split_span_res_join(split_task_p t, uint64_t span)
         );
         LOCK_RELEASE(lock_held);
 
-        union_num_t u_r_2;
+        union_num_t u_r_rest;
         LOG_MUL(index, pid, i_0, span, level,
-            u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+            u_r_rest = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
         );
 
         LOG_HEADER("R", index, pid, i_0, span, level);
 
-        union_num_t u_r_1;
+        union_num_t u_r_part;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, span, level);
-        LOG_LOAD("Rh", index, pid, i_0, span, level,
-            u_r_1 = union_rh_load(size, i_0, remainder, level);
+        LOG_LOAD(TERM_P1XR2, index, pid, i_0, span, level,
+            u_r_part = union_r_part_load(size, i_0, remainder, level);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
         LOG_ADD(index, pid, i_0, span, level,
-            u = union_num_add(u_r_1, u_r_2);
+            u = union_num_add(u_r_part, u_r_rest);
         );
         LOG_WRITE(lock_held, index, pid, i_0, span, level,
             file_write_union_num(&fp, u);
@@ -939,7 +942,7 @@ void split_span_res_join(split_task_p t, uint64_t span)
         split_task_threads_final(t);
     }
 
-    union_rh_delete(size, i_0, remainder, level);
+    union_r_part_delete(size, i_0, remainder, level);
     file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span - 1, level_child(level, remainder));
@@ -1102,9 +1105,9 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
 
     if(fp.count < 3)
     {
-        LOG_HEADER("P1xR2", index, pid, i_0, remainder, level);
+        LOG_HEADER(TERM_P1XR2, index, pid, i_0, remainder, level);
 
-        if(union_rh_is_stored(size, i_0, remainder, level))
+        if(union_r_part_is_stored(size, i_0, remainder, level))
         {
             LOG_RESUMED(index, pid, i_0, remainder, level);
         }
@@ -1121,15 +1124,15 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
             );
             LOCK_RELEASE(lock_held);
 
-            union_num_t u_r;
+            union_num_t u_r_part;
             LOG_MUL(index, pid, i_0, remainder, level,
-                u_r = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+                u_r_part = union_num_mul_threads(u_1, u_2, split_task_threads(t));
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
-                union_rh_save(u_r, size, i_0, remainder, level);
+                union_r_part_save(u_r_part, size, i_0, remainder, level);
             );
-            union_num_free(u_r);
+            union_num_free(u_r_part);
         }
 
         LOG_HEADER("R1xQ2", index, pid, i_0, remainder, level);
@@ -1145,23 +1148,23 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         );
         LOCK_RELEASE(lock_held);
 
-        union_num_t u_r_2;
+        union_num_t u_r_rest;
         LOG_MUL(index, pid, i_0, remainder, level,
-            u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+            u_r_rest = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
         );
 
         LOG_HEADER("R", index, pid, i_0, remainder, level);
 
-        union_num_t u_r_1;
+        union_num_t u_r_part;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
-        LOG_LOAD("Rh", index, pid, i_0, remainder, level,
-            u_r_1 = union_rh_load(size, i_0, remainder, level);
+        LOG_LOAD(TERM_P1XR2, index, pid, i_0, remainder, level,
+            u_r_part = union_r_part_load(size, i_0, remainder, level);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
         LOG_ADD(index, pid, i_0, remainder, level,
-            u = union_num_add(u_r_1, u_r_2);
+            u = union_num_add(u_r_part, u_r_rest);
         );
         LOG_WRITE(lock_held, index, pid, i_0, remainder, level,
             file_write_union_num(&fp, u);
@@ -1173,7 +1176,7 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         split_task_threads_final(t);
     }
 
-    union_rh_delete(size, i_0, remainder, level);
+    union_r_part_delete(size, i_0, remainder, level);
     file_write_close(&fp);
 
     split_span_res_delete(size, i_0, span, level_child(level, remainder));
@@ -1236,9 +1239,9 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
 
     if(fp.count < 3)
     {
-        LOG_HEADER("P1xR2", index, pid, i_0, remainder, level);
+        LOG_HEADER(TERM_P1XR2, index, pid, i_0, remainder, level);
 
-        if(union_rh_is_stored(size, i_0, remainder, level))
+        if(union_r_part_is_stored(size, i_0, remainder, level))
         {
             LOG_RESUMED(index, pid, i_0, remainder, level);
         }
@@ -1255,15 +1258,15 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
             );
             LOCK_RELEASE(lock_held);
 
-            union_num_t u_r;
+            union_num_t u_r_part;
             LOG_MUL(index, pid, i_0, remainder, level,
-                u_r = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+                u_r_part = union_num_mul_threads(u_1, u_2, split_task_threads(t));
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
-                union_rh_save(u_r, size, i_0, remainder, level);
+                union_r_part_save(u_r_part, size, i_0, remainder, level);
             );
-            union_num_free(u_r);
+            union_num_free(u_r_part);
         }
 
         LOG_HEADER("R1xQ2", index, pid, i_0, remainder, level);
@@ -1279,23 +1282,23 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         );
         LOCK_RELEASE(lock_held);
 
-        union_num_t u_r_2;
+        union_num_t u_r_rest;
         LOG_MUL(index, pid, i_0, remainder, level,
-            u_r_2 = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+            u_r_rest = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
         );
 
         LOG_HEADER("R", index, pid, i_0, remainder, level);
 
-        union_num_t u_r_1;
+        union_num_t u_r_part;
         LOCK_ACQUIRE(lock_held, index, pid, i_0, remainder, level);
-        LOG_LOAD("Rh", index, pid, i_0, remainder, level,
-            u_r_1 = union_rh_load(size, i_0, remainder, level);
+        LOG_LOAD(TERM_P1XR2, index, pid, i_0, remainder, level,
+            u_r_part = union_r_part_load(size, i_0, remainder, level);
         );
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
         LOG_ADD(index, pid, i_0, remainder, level,
-            u = union_num_add(u_r_1, u_r_2);
+            u = union_num_add(u_r_part, u_r_rest);
         );
         LOG_WRITE(lock_held, index, pid, i_0, remainder, level,
             file_write_union_num(&fp, u);
@@ -1307,7 +1310,7 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         split_task_threads_final(t);
     }
 
-    union_rh_delete(size, i_0, remainder, level);
+    union_r_part_delete(size, i_0, remainder, level);
     file_write_close(&fp);
 
     split_big_res_delete(size, i_0, remainder_1, level_child(level, remainder));
