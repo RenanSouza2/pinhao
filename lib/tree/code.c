@@ -556,12 +556,6 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
         total += (double)num_mul_estimate_memory(terms[i][0], terms[i][1], threshold, threads);
     }
 
-    // P1xR2's product stays live across R1xQ2, so it counts for one term
-    total += (double)num_estimate_ram_bytes(
-        n->ops[0][NODE_OP_P] + n->ops[1][NODE_OP_R],
-        threshold
-    );
-
     // P, Q and R run within a few percent of each other, so the four terms are
     // weighted equally rather than by a duration that would not tell them apart
     return (uint64_t)(total / 4.0);

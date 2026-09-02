@@ -266,7 +266,7 @@ class TreeNode:
         self.parent = parent
         self.children = []
         self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
-        self.term = None  # e.g. "P1xP2", from a join's "mul ..." header line; leaves have none
+        self.term = None  # e.g. "P1xP2" or "R", from a join's "mul ..." header line; leaves have none
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
         self.micro_start = None  # log timestamp the current micro-phase was entered at
 
@@ -1216,10 +1216,16 @@ def level_avg(events_by_level, level, fallback):
     return fallback
 
 
+def is_single_thread_phase(micro):
+    """Phases that run on one thread whatever the task's booking: the reads and
+    the write, and the add that folds P1xR2 into R1xQ2."""
+    return micro is not None and (micro.startswith("loading") or micro in ("writing", "adding"))
+
+
 def blocked_threads(state):
     """Threads a worker holds but isn't computing on, split by why. A worker
-    waiting on the disk lock has all of them idle; one in a read or write has
-    all but the thread in the syscall. Anything else counts as working.
+    waiting on the disk lock has all of them idle; one in a single-threaded
+    phase has all but that one thread. Anything else counts as working.
 
     Read off each worker's latest phase line, kept per pid so it survives a run
     whose tree is too large to display (see TREE_NODE_CAP)."""
@@ -1232,20 +1238,20 @@ def blocked_threads(state):
             continue
         if micro == "locking":
             waiting += threads
-        elif micro.startswith("loading") or micro == "writing":
+        elif is_single_thread_phase(micro):
             io += threads - 1
     return waiting, io
 
 
 def expected_threads(node):
     """Threads a task's phase says should be busy: none while it waits on the
-    disk lock, one while it is in a read or a write, its whole booking while it
-    computes. blocked_threads()' rule, taken one task at a time."""
+    disk lock, one while it is in a single-threaded phase, its whole booking
+    while it multiplies. blocked_threads()' rule, taken one task at a time."""
     if node.threads is None:
         return None
     if node.micro == "locking":
         return 0
-    if node.micro is not None and (node.micro.startswith("loading") or node.micro == "writing"):
+    if is_single_thread_phase(node.micro):
         return 1
     return node.threads
 
@@ -1407,8 +1413,10 @@ def node_detail(node, view, status):
             reading = f"{cores:.1f}c" if expected is None else f"{cores:.1f}c / {expected}"
             detail += f" | {severity_colour(shortfall, alarm=0.5)}{reading}{OFF}"
         if node.term:
-            op1, _, op2 = node.term.partition("x")
-            detail += f" | {op1} x {op2}"
+            # The join's last term is the add, named "R" with no operand pair:
+            # printed as it stands rather than split around an "x" it has none of.
+            op1, sep, op2 = node.term.partition("x")
+            detail += f" | {op1} x {op2}" if sep else f" | {op1}"
         if node.micro:
             micro = node.micro
             if micro == "locking" and view.disk_lock_enabled:
