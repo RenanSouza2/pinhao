@@ -1586,20 +1586,15 @@ def render_chain_ladder(root, view):
     if fuse_at:
         del rows[fuse_at - 1]
 
-    label_w = max(len(label) for _, label, _ in rows)
-
     for row_i, (node, label, chunk_node) in enumerate(rows):
         mark, state, status, tint = node_state(node, view)
         # The rungs hang off the root row on the tree's own connectors, so an
         # expanded rung's subtree does not break the ladder in two.
         is_last = row_i == len(rows) - 1
         connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
-        # Padded only when something follows, so an unadorned row carries no
-        # trailing blanks.
-        detail = node_detail(node, view, status)
         view.lines.append(
-            f"{connector}{tint}{mark}{OFF} {tint}{label:<{label_w if detail else 0}}{OFF}"
-            + detail
+            f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}"
+            + node_detail(node, view, status)
         )
         # A rung running its own join is that node, so nothing hangs below it.
         if chunk_node is None or chunk_node.in_progress or state in ("done", "pending"):
