@@ -1,10 +1,10 @@
 # Pi Threads
 
-A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 10,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
+A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 40,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
 
 ## Features
 
-- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 10B+ digits.
+- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 40B+ digits.
 - **Out-of-core Processing:** Intelligently saves intermediate states and large numbers to disk to overcome RAM limitations, using a configurable cache threshold.
 - **Multi-Process Parallelization:** Uses `fork` to parallelize chunks of the binary splitting tree, speeding up computation across multiple cores.
 - **Custom Big-Number Library:** Relies on the `araucaria` submodule to handle big integer and big float arithmetic, binary splitting types (P, Q, R), and disk serialization.
