@@ -212,11 +212,9 @@ There are two independent caching layers, and only one of them is optional:
   ```
   Once set, any `num` allocation whose backing size (in bytes) exceeds
   `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
-  `disk_path` instead of the heap. Configure this in `src/main.c` (see the
-  commented-out example near the top of `main()`, whose `disk_path` is a
-  machine-specific placeholder — point it at a directory that exists, such
-  as the tracked `./cache/tmp`) only if a single large-scale run is expected
-  to exceed available RAM. It's not required just to run the program.
+  `disk_path` instead of the heap. `src/main.c` sets this near the top of
+  `main()`, pointed at the tracked `./cache/tmp` with a threshold of
+  `mem_max / 4`. Drop the call to keep every `num` on the heap.
 
 ### Cross-Process Disk Lock
 
@@ -232,6 +230,20 @@ When defined, cache reads and writes take an exclusive `flock` on
 `./cache/disk.lock`, serializing disk access across all forked workers.
 Comment the define out on an NVMe or SSD, where parallel I/O is the faster
 choice. The run log reports which mode is active on its `disk lock` line.
+
+### Keeping Exact Pieces
+
+An exact `pieces/p_*.bin` triple carries no `size`, so it stays valid across
+runs of any precision. `config.h` gates whether a join deletes the pieces it
+consumed:
+
+```c
+#define KEEP_PIECES
+```
+
+When defined, a join leaves its children in `pieces/` for the next run to
+reuse. Comment it out to reclaim the disk instead — the run then keeps only
+what it is still working on.
 
 ## Project Structure
 
@@ -249,8 +261,8 @@ choice. The run log reports which mode is active on its `disk lock` line.
   - `araucaria`: The custom arbitrary-precision arithmetic library (big
     integers, fixed/floating-point, disk-backed numbers).
 - `makefiles/`: Shared compiler flags, environments, and linker setup.
-- `config.h`: Build-time switches for the program itself (currently
-  `LOCK_DISK_IO`).
+- `config.h`: Build-time switches for the program itself — `LOCK_DISK_IO`
+  and `KEEP_PIECES`.
 - `cache/`: Default location for out-of-core file persistence — `pieces/`,
   `numbers/` and `res/` hold the binary-splitting checkpoints, `tmp/` holds
   half-finished joins and is also the `disk_path` for `araucaria`'s

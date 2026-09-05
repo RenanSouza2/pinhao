@@ -48,7 +48,7 @@ int main(void)
     };
     araucaria_disk_config_set(&config);
 
-    pi(16'000'000, 16, mem_launch, mem_max);
+    pi(256'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;

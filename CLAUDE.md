@@ -151,6 +151,13 @@ what the dashboard's parser matches on. Renaming a label, reordering a
 column, or adding a field breaks the dashboard silently — nothing fails to
 build — so update `dashboard.py` in the same change.
 
+`tprintf` prefixes every line with `__func__`, and `dashboard.py` routes on
+that name through its `DISPATCH` table: a line whose emitting function has no
+entry there is dropped without a trace. Renaming a C function that logs, or
+adding a new one, needs a `DISPATCH` entry in the same change — matching the
+format string is not enough. For a line emitted from a `LOG_*` macro the name
+is the function that expands it, not the macro.
+
 ## Cache directory
 
 `cache/` holds generated out-of-core `.bin` data files from real runs.
@@ -158,6 +165,10 @@ Treat it as build/run output — don't hand-edit or rely on its contents
 being meaningful across runs. `cache/disk.lock` is generated too: it's the
 lockfile backing the cross-process I/O serialization gated by `LOCK_DISK_IO`
 in `config.h`.
+
+`KEEP_PIECES` in `config.h` is why `pieces/` grows across runs: with it
+defined a join leaves the exact triples it consumed on disk for the next run,
+instead of deleting them.
 
 It's fine to clean generated files out of `cache/*/` between runs, but always
 keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,

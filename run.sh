@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-# --keep appends this run to the existing log instead of wiping it; --force
-# appends even when the config changed. Consumed here, never forwarded:
-# main() takes no argv.
+# --keep appends to the existing log instead of wiping it; --force appends
+# even when the config changed. Consumed here: main() takes no argv.
 keep=""
 force=""
 args=()
@@ -15,9 +14,8 @@ for arg in "$@"; do
     esac
 done
 
-# Every config pi() runs under is a literal in main(), so a checksum of that
-# file is what "same config" means to --keep. cksum, not md5sum: macOS has no
-# md5sum.
+# "Same config" for --keep means an unchanged src/main.c: pi()'s parameters
+# are literals in main().
 config_id="$(cksum < src/main.c | awk '{print $1"-"$2}')"
 
 mkdir -p thread_log
@@ -34,10 +32,8 @@ else
     rm -rf thread_log/*
 fi
 
-# The run boundary dashboard.py resets its parser on. Appending leaves the
-# inode unchanged, so without this marker the new run's pieces and joins land
-# in the previous run's state. Leading newline: a record ends in a tab, not a
-# newline, so the marker would otherwise be glued onto the last one.
+# The run boundary dashboard.py resets its parser on. Leading newline: a
+# record ends in a tab, so the marker would otherwise glue onto the last one.
 printf '\n=== run %s | main.c %s ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$config_id" >> thread_log/run.log
 
 make build

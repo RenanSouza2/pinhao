@@ -1622,6 +1622,15 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
         render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False)
 
 
+def task_exit_line(state):
+    """The run's cause of death, in one line. task_check_exit TRAPs right after
+    logging it, so the process is gone within the DEAD_GRACE window and every
+    later frame is a status screen - which is where this has to keep showing."""
+    pid, how, kind, val = state.task_exit
+    return (f"{ALERT_ON}WARNING: worker {pid} {how} ({kind} {val}) "
+            f"- the run was trapped and taken down with it{ALERT_OFF}")
+
+
 def render_status_screen(state):
     lines = []
     lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
@@ -1629,6 +1638,9 @@ def render_status_screen(state):
     if not state.ever_saw_process:
         lines.append("  waiting for process...")
         lines.append("  (no pi_tree process detected - start it with ./run.sh or ./run_debug.sh)")
+    elif state.task_exit is not None:
+        lines.append("  " + task_exit_line(state))
+        lines.append("  (check thread_log/run.log for the last lines)")
     elif state.done:
         lines.append("  process finished.")
     else:
@@ -2092,11 +2104,7 @@ def render(state):
         lines.append("*** PROCESS DONE ***")
 
     if state.task_exit is not None:
-        pid, how, kind, val = state.task_exit
-        lines.append(
-            f"{ALERT_ON}WARNING: worker {pid} {how} ({kind} {val}) "
-            f"- the run was trapped and taken down with it{ALERT_OFF}"
-        )
+        lines.append(task_exit_line(state))
 
     if state.last_line_time is not None and not state.done and state.task_exit is None:
         since_last_line = now - state.last_line_time
