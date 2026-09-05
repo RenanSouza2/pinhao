@@ -1,14 +1,15 @@
 # Pi Threads
 
-A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 10,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
+A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 40,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
 
 ## Features
 
-- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 10B+ digits.
+- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 40B+ digits.
 - **Out-of-core Processing:** Intelligently saves intermediate states and large numbers to disk to overcome RAM limitations, using a configurable cache threshold.
 - **Multi-Process Parallelization:** Uses `fork` to parallelize chunks of the binary splitting tree, speeding up computation across multiple cores.
 - **Custom Big-Number Library:** Relies on the `araucaria` submodule to handle big integer and big float arithmetic, binary splitting types (P, Q, R), and disk serialization.
-- **Modern C23:** Written using modern C23 standards with rigorous compiler flags (warnings, `-fanalyzer`, and sanitizers).
+- **Memory-Budgeted Scheduling:** Worker processes are launched against explicit RAM budgets, so a large run stays inside available memory instead of thrashing.
+- **Modern C23:** Written using modern C23 standards with a rigorous compiler flag set (a large warning list under `-Werror`, plus address/undefined/leak sanitizers in debug builds).
 
 ## Prerequisites
 
@@ -39,7 +40,7 @@ The build system is managed via standard Makefiles.
   # or
   make b
   ```
-  The executable will be located at `src/main.o`.
+  The executable will be located at `src/main.out`.
 
 - **Build Debug Executable (with Address/Undefined/Leak Sanitizers):**
   ```bash
@@ -47,7 +48,7 @@ The build system is managed via standard Makefiles.
   # or
   make d
   ```
-  The executable will be located at `src/debug.o`.
+  The executable will be located at `src/debug.out`.
 
 - **Clean Project:**
   ```bash
@@ -59,7 +60,8 @@ The build system is managed via standard Makefiles.
 ## Usage
 
 By default, the scale of Pi calculation is hardcoded in `src/main.c`.
-`pi()` takes a `size` and the number of processes to fork across.
+`pi()` takes a `size`, the number of processes to fork across, and three
+memory budgets.
 
 `size` is the target mantissa size of the result, in 64-bit limbs (`araucaria`
 stores numbers as little-endian arrays of 64-bit limbs), **not** decimal
@@ -73,13 +75,46 @@ digits ≈ size × 19.27
 For example, `size = 32,000,000` limbs yields roughly 616,000,000 decimal
 digits of Pi.
 
-Modify `src/main.c` to adjust `size`, the process count, and the disk cache
-path:
+### Memory budgets
+
+Every pending task in the binary-splitting tree carries an estimated memory
+cost, priced for the number of threads that task will run with. The two memory
+arguments bound how much the forked workers may hold at once:
+
+- `mem_launch`: the throttle. Tasks keep launching while total estimated usage
+  is below it; at or above it nothing new starts until a running task ends. It
+  is the soft target a run normally sits at.
+- `mem_max`: the fit ceiling. A task launches alongside others only if it fits
+  under this. One that doesn't runs solo — it waits for the scheduler to empty
+  and then takes the whole machine, whatever it costs, since with nothing else
+  running nothing could free memory for it.
+
+A task that doesn't fit also stops the scheduler from looking for smaller work
+to launch in its place. That is deliberate: memory then drains monotonically
+until the blocked task fits, instead of smaller tasks holding the pool full
+against it.
+
+Scale these together with `size`. The values committed in `main.c` are sized
+for a full-scale run on a machine with plenty of RAM; leaving them there for a
+small test means the memory policy never binds. Scaling down has a floor,
+though: every leaf is priced at a fixed 512 MB (`TREE_LEAF_COST_BYTES`), so a
+`mem_max` near or below that makes every leaf run solo and serializes the run.
+
+`n_process` is the number of processes to fork and also the thread budget
+shared across them. `main.c` clamps it down to the number of online cores
+(`sysconf(_SC_NPROCESSORS_ONLN)`), so requesting more than the machine has is
+harmless.
+
+Modify `src/main.c` to adjust `size`, the process count, and the memory
+budgets:
 
 ```c
-// Example: calculate Pi to a size of 32,000,000 limbs (~616M digits)
-// across 16 processes
-pi(32'000'000, 16);
+// Example: calculate Pi to a size of 32,000,000 limbs (~616M digits) across
+// 16 processes, throttling new launches at ~15 GB and running any task that
+// doesn't fit under 20 GB on its own
+uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
+uint64_t mem_max    = U64(20) * 1024 * 1024 * 1024;
+pi(32'000'000, 16, mem_launch, mem_max);
 ```
 
 Then build and run with the helper scripts, which capture per-thread timing
@@ -89,11 +124,62 @@ output to `thread_log/run.log`:
 ./run_debug.sh  # debug build with sanitizers
 ```
 
+Every run opens with a `=== run <timestamp> | main.c <cksum> ===` marker, and
+wipes `thread_log/` first. Pass `--keep` to append to the existing log instead;
+`dashboard.py` resets its parser on each marker and shows the newest run:
+```bash
+./run.sh --keep
+```
+
+`--keep` is for stacking runs of one configuration, so it refuses when
+`src/main.c` — where every `pi()` argument is a literal — has changed since the
+run that wrote the log; `--force` appends anyway. The dashboard checks the same
+thing exactly, from the config lines `pi_tree` logs, and warns when a run
+disagrees with the one before it in the log.
+
 While a run is in progress (or after one finishes), `./dashboard.py` renders
 a live terminal dashboard from `thread_log/run.log`:
 ```bash
 ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 ```
+
+### Cache file names
+
+A cached result is named after the node that produced it, so a directory
+listing reads as the shape of the tree. Fields are zero-padded so `ls` sorts
+by index.
+
+- `pieces/p_<begin>_<span>_<end>.bin` — an exact P/Q/R triple over
+  `[begin, end]`. It carries no `size`: an exact triple does not depend on the
+  target precision, so it is reused across runs of different sizes.
+- `numbers/r_<begin>_<level>_<end>_<size>.bin` — a `size`-truncated P/Q/R over
+  any range, power-of-two-wide or not. `level` is the depth below the chunk a
+  chain fuses, `0` at that chunk and restarting at every fold, so two files at
+  level *k* fuse into one at *k-1* wherever they sit in the run.
+- `numbers/c_<chunks>_<end>_<size>.bin` — a chain node, named by how many
+  chunks it has fused. It carries no `begin`, because every chain node in a run
+  starts at the same index. The count runs down to 3; at two chunks the chain
+  ends as an ordinary `r_` span.
+- `tmp/<name of its node>.bin` — a half-finished join's `P1xR2` checkpoint,
+  under exactly the name of the node it belongs to, so `comm` against
+  `pieces/` or `numbers/` shows what was in flight when a run stopped.
+- `res/pi_<size>.bin` — the finished value.
+
+The run log carries the same number in its third column — a node's `level`,
+or a chain's chunk count — so a log line and a filename name the node the same
+way. `i_0` and `i_max`, the first two columns, identify a node on their own;
+nothing keys off an absolute tree depth. `dashboard.py` labels nodes
+`[level, size, first piece]`, the first piece counted in pieces from 0. A
+span's size is always its `span`, the form the log lines and the cache
+filenames carry; a big or chain node has no such exponent, so its size is a
+count of pieces and a node whose extent is not a power of two reads as a plain
+count. `p` toggles to raw indices, where a span reads `[level, span, i_0]` and
+those piece counts give way to a `B` or `C` kind letter. Each rung of the
+chain ladder is named by its place in the chunk sequence instead: `[C, k]` for
+the single chunk that ends at boundary *k*, `[C, 0, k]` for the *k* chunks
+that are one number — so a fold is named for the rung it just took in — and
+`[T, pieces]` for the run's partial last chunk. An expanded rung carries the
+node itself as its only child.
 
 ### Note on Disk Cache
 
@@ -126,10 +212,38 @@ There are two independent caching layers, and only one of them is optional:
   ```
   Once set, any `num` allocation whose backing size (in bytes) exceeds
   `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
-  `disk_path` instead of the heap. Configure this in `src/main.c` (see the
-  commented-out example near the top of `main()`) only if a single
-  large-scale run is expected to exceed available RAM — it's not required
-  just to run the program.
+  `disk_path` instead of the heap. `src/main.c` sets this near the top of
+  `main()`, pointed at the tracked `./cache/tmp` with a threshold of
+  `mem_max / 4`. Drop the call to keep every `num` on the heap.
+
+### Cross-Process Disk Lock
+
+All processes read and write the `cache/*.bin` files over the same physical
+disk, so concurrent I/O can be slower than serialized I/O on a spinning
+drive. `config.h` gates this with `LOCK_DISK_IO`:
+
+```c
+#define LOCK_DISK_IO
+```
+
+When defined, cache reads and writes take an exclusive `flock` on
+`./cache/disk.lock`, serializing disk access across all forked workers.
+Comment the define out on an NVMe or SSD, where parallel I/O is the faster
+choice. The run log reports which mode is active on its `disk lock` line.
+
+### Keeping Exact Pieces
+
+An exact `pieces/p_*.bin` triple carries no `size`, so it stays valid across
+runs of any precision. `config.h` gates whether a join deletes the pieces it
+consumed:
+
+```c
+#define KEEP_PIECES
+```
+
+When defined, a join leaves its children in `pieces/` for the next run to
+reuse. Comment it out to reclaim the disk instead — the run then keeps only
+what it is still working on.
 
 ## Project Structure
 
@@ -147,6 +261,12 @@ There are two independent caching layers, and only one of them is optional:
   - `araucaria`: The custom arbitrary-precision arithmetic library (big
     integers, fixed/floating-point, disk-backed numbers).
 - `makefiles/`: Shared compiler flags, environments, and linker setup.
-- `cache/`: Default location for out-of-core file persistence.
+- `config.h`: Build-time switches for the program itself — `LOCK_DISK_IO`
+  and `KEEP_PIECES`.
+- `cache/`: Default location for out-of-core file persistence — `pieces/`,
+  `numbers/` and `res/` hold the binary-splitting checkpoints, `tmp/` holds
+  half-finished joins and is also the `disk_path` for `araucaria`'s
+  disk-backed numbers, and `disk.lock` is the cross-process I/O lock. See
+  *Cache file names* above for the naming scheme.
 - `dashboard.py`: Live terminal dashboard that visualizes a run's progress
   from `thread_log/run.log`.

@@ -4,6 +4,18 @@ Guidance for Claude Code when working in this repo. See `README.md` for
 project overview, build commands, and directory layout — this file only
 covers what isn't obvious from the code.
 
+## Ask before acting
+
+Before starting work on a request, ask clarifying questions first. Don't
+jump straight into editing, building, or running things — state back what
+you understood the request to be, raise anything ambiguous about scope,
+approach, or trade-offs, and wait for the answer before making changes.
+
+This holds even when the request looks obvious: a short question costs far
+less than a wrong change in a hot path or a long run started on the wrong
+parameters. Once the answers are in, do the whole task without stopping to
+re-ask about things already settled.
+
 ## Cross-platform: Linux and macOS
 
 This project must build and run on both Linux and macOS. There are no
@@ -14,8 +26,10 @@ blocks. Linux adds warnings macOS doesn't (`-Wduplicated-cond`,
 `-Walloc-zero`, ...) plus `-fsanitize=leak`; macOS adds its own clang-only
 set (`-Wshadow-all`, `-Wcomma`, `-Wcovered-switch-default`, ...). Code can
 therefore compile clean on one platform and fail on the other. Avoid
-platform-specific APIs unless guarded, and keep whitespace clean — those
-whitespace warnings are Linux-only and fatal.
+platform-specific APIs unless guarded, and prefer the POSIX call that works
+on both (`src/main.c` reads the core count with
+`sysconf(_SC_NPROCESSORS_ONLN)` rather than a Linux-only query). Keep
+whitespace clean too — those whitespace warnings are Linux-only and fatal.
 
 ## Submodules (`mods/`)
 
@@ -67,15 +81,19 @@ one.
 - `size` — target mantissa size in 64-bit limbs, **not** decimal digits.
   1,000,000 finishes in under 2 minutes on 16 cores and is a good default
   for a smoke test.
-- `n_process` — processes to fork. Check `nproc` rather than trusting the
-  committed value (currently a hardcoded 16, on every platform); don't
-  request more than are actually available.
+- `n_process` — processes to fork. `main.c` already clamps this to
+  `sysconf(_SC_NPROCESSORS_ONLN)`, but still check `nproc` rather than
+  trusting the committed value (currently a hardcoded 16, on every
+  platform); don't request more than are actually available.
 - `mem_launch` / `mem_max` — the scheduler's launch band, in bytes (see
-  `get_next_node` in `lib/tree/code.c`). New tasks are admitted only while
-  estimated usage is below `mem_launch`; an admitted task may overshoot into
-  `mem_launch..mem_max`, which is never crossed. The committed values are
-  sized for a full run, so scale them down along with `size` — otherwise
-  every task launches immediately and the run says nothing about scheduling.
+  `node_can_launch` / `scheduler_has_memory` in `lib/tree/code.c`). New
+  tasks are admitted only while estimated usage is below `mem_launch`; an
+  admitted task may overshoot into `mem_launch..mem_max`, which is never
+  crossed. The committed values are sized for a full run, so scale them
+  down along with `size` — otherwise every task launches immediately and
+  the run says nothing about scheduling. Don't scale `mem_max` to within
+  reach of the fixed `TREE_LEAF_COST_BYTES` (512 MB) leaf cost, or every
+  leaf runs solo and the test serializes.
 
 Revert any temporary change to these before considering the task done,
 unless asked to keep it.
@@ -90,6 +108,27 @@ making warnings fatal in the real build (note: `.clangd` removes `-Werror`
 for editor diagnostics only — the actual Makefile build still treats
 warnings as errors). Don't introduce code that only compiles clean because
 a warning got suppressed or disabled — fix the underlying issue instead.
+
+## Comments carry the rule, not the reasoning
+
+Comments say what the code does and what rule it enforces. They are not a
+record of how that rule was arrived at. When a change involved weighing
+alternatives, turned up a caveat, or rested on a measurement, report it as
+a short bullet list in the reply at the end of the task, and put it in the
+commit message — not in the source, where it becomes noise every future
+reader has to wade through.
+
+Don't commit:
+
+- deliberation — alternatives considered and rejected, "note this is only
+  exactly true when…", caveats addressed to whoever reviews the change,
+  or an account of what an earlier version of the code did.
+- benchmark numbers and timings quoted as evidence for a choice. They go
+  stale silently, and the commit that made the change is where they
+  belong.
+
+A comment stating a non-obvious rule, invariant, unit, or ordering
+requirement is wanted. Keep those, and keep them short.
 
 ## Performance-sensitive code
 
@@ -107,28 +146,54 @@ vice versa) in these paths, flag it rather than deciding silently.
 `./dashboard.py` renders a live terminal view by parsing that log.
 
 The log format is a contract. The `tprintf` format strings and phase labels
-in `lib/big/code.c` (the `JOIN_*` macros) and `lib/tree/code.c` are exactly
+in `lib/big/code.c` (the `LOG_*` macros) and `lib/tree/code.c` are exactly
 what the dashboard's parser matches on. Renaming a label, reordering a
 column, or adding a field breaks the dashboard silently — nothing fails to
 build — so update `dashboard.py` in the same change.
+
+`tprintf` prefixes every line with `__func__`, and `dashboard.py` routes on
+that name through its `DISPATCH` table: a line whose emitting function has no
+entry there is dropped without a trace. Renaming a C function that logs, or
+adding a new one, needs a `DISPATCH` entry in the same change — matching the
+format string is not enough. For a line emitted from a `LOG_*` macro the name
+is the function that expands it, not the macro.
 
 ## Cache directory
 
 `cache/` holds generated out-of-core `.bin` data files from real runs.
 Treat it as build/run output — don't hand-edit or rely on its contents
-being meaningful across runs. It's fine to clean generated files out of
-`cache/*/` between runs, but always keep the `.gitkeep` file in each
-subdirectory (e.g. `cache/numbers/.gitkeep`) — those keep the empty dirs
-tracked in git and must not be deleted.
+being meaningful across runs. `cache/disk.lock` is generated too: it's the
+lockfile backing the cross-process I/O serialization gated by `LOCK_DISK_IO`
+in `config.h`.
 
-The commented-out `araucaria_disk_config_t` example near the top of `main()`
-names `/mnt/wsl/workspace/tmp`, which does not exist. The real scratch
-directory in this repo is `cache/tmp` (README documents it correctly) — use
-that if enabling araucaria's disk-backed numbers.
+`KEEP_PIECES` in `config.h` is why `pieces/` grows across runs: with it
+defined a join leaves the exact triples it consumed on disk for the next run,
+instead of deleting them.
+
+It's fine to clean generated files out of `cache/*/` between runs, but always
+keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,
+`tmp/`) — those keep the empty dirs tracked in git and must not be deleted.
+
+`cache/tmp` holds two unrelated things. araucaria's disk-backed numbers go
+there — the `araucaria_disk_config_t` block near the top of `main()` is
+enabled and points at `cache/tmp` — but those files are `unlink`ed the moment
+they are created (`num_create_disk`), so they never appear in a listing and
+clearing the directory never touches them. Everything visible in `cache/tmp`
+is pinhao's own: a half-finished join's `P1xR2` checkpoint, stored under
+exactly the name its node uses in `pieces/` or `numbers/`.
+
+Cache filenames are documented in README's *Cache file names*. Two rules there
+are load-bearing and easy to "tidy" wrongly: `p_` carries no `size` because an
+exact triple is reused across runs of different precisions, and `c_` carries
+no `begin` because every chain node in a run starts at the same index.
 
 ## Line endings
 
-The tree has mixed line endings and no `.gitattributes` — `src/main.c` and
-`lib/big/code.c` are CRLF, `lib/union/code.c` is LF, and so on. Preserve
-whatever a file already uses; don't let an editor or a `sed`/format pass
-normalize a whole file, or the diff stops being reviewable.
+Everything in this repo is LF. Write LF, and never emit CR — not to match a
+file that already has some, not to "preserve" what's on disk.
+
+`core.autocrlf=input` is set globally, so CR is stripped on commit and nothing
+CRLF has ever been committed. A file showing CRLF in the worktree is a local
+artifact from some program rewriting it after checkout; it is not the file's
+real state, and copying it forward only spreads it. Strip it instead:
+`sed -i 's/\r$//' <file>`.

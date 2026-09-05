@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <unistd.h>
 
 #include "../mods/clu/header.h" // IWYU pragma: keep
 #include "../mods/macros/assert.h" // IWYU pragma: keep
@@ -16,13 +17,19 @@
 [[maybe_unused]]
 static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+    long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
+    if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
+    {
+        n_process = (uint64_t)n_proc_avail;
+    }
+
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
-    tprintf("              %-20s|", "display begin");
+    tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
     TIME_SETUP
-    flt_num_display_dec(flt_pi);
+    flt_num_display_dec_threads(flt_pi, n_process);
     TIME_END(t1)
-    tprintf("              %-20s| %7.1f", "display end", dtime(t1));
+    tprintf("[%17.6f] %-20s| %7.1f", get_wall_time(), "display end", dtime(t1));
     flt_num_free(flt_pi);
 }
 
@@ -32,14 +39,15 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    // araucaria_disk_config_t config = {
-    //     .disk_path = "/mnt/wsl/workspace/tmp",
-    //     .disk_threshold_bytes = 2'048'000'000
-    // };
-    // araucaria_disk_config_set(&config);
-
     uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+
+    araucaria_disk_config_t config = {
+        .disk_path = "cache/tmp",
+        .disk_threshold_bytes = mem_max / 4
+    };
+    araucaria_disk_config_set(&config);
+
     pi(256'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
