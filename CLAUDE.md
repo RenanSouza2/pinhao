@@ -175,10 +175,10 @@ keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,
 `tmp/`) — those keep the empty dirs tracked in git and must not be deleted.
 
 `cache/tmp` holds two unrelated things. araucaria's disk-backed numbers go
-there — the `araucaria_disk_config_t` block near the top of `main()` is
-enabled and points at `cache/tmp` — but those files are `unlink`ed the moment
-they are created (`num_create_disk`), so they never appear in a listing and
-clearing the directory never touches them. Everything visible in `cache/tmp`
+there — the `araucaria_disk_config_t` block in `pi()` is enabled and points at
+`cache/tmp` — but those files are `unlink`ed the moment they are created
+(`num_create_disk`), so they never appear in a listing and clearing the
+directory never touches them. Everything visible in `cache/tmp`
 is pinhao's own: a half-finished join's `P1xR2` checkpoint, stored under
 exactly the name its node uses in `pieces/` or `numbers/`.
 

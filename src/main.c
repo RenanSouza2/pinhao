@@ -17,11 +17,21 @@
 [[maybe_unused]]
 static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
+    assert(n_process);
+
     long n_proc_avail = sysconf(_SC_NPROCESSORS_ONLN);
     if(n_proc_avail > 0 && n_process > (uint64_t)n_proc_avail)
     {
         n_process = (uint64_t)n_proc_avail;
     }
+
+    // ram_budget_bytes is per worker: divides the band by the clamped n_process
+    araucaria_disk_config_t config = {
+        .disk_path = "cache/tmp",
+        .disk_threshold_bytes = mem_max / 4,
+        .ram_budget_bytes = mem_max / n_process
+    };
+    araucaria_disk_config_set(&config);
 
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     printf("\n\n");
@@ -41,12 +51,6 @@ int main(void)
 
     uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
-
-    araucaria_disk_config_t config = {
-        .disk_path = "cache/tmp",
-        .disk_threshold_bytes = mem_max / 4
-    };
-    araucaria_disk_config_set(&config);
 
     pi(256'000'000, 16, mem_launch, mem_max);
 

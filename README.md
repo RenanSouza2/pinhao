@@ -207,14 +207,18 @@ There are two independent caching layers, and only one of them is optional:
   araucaria_disk_config_t config = {
       .disk_path            = "./cache/tmp",  // must already exist
       .disk_threshold_bytes = 8192,           // bytes; larger allocations go to disk
+      .ram_budget_bytes     = 1 << 30,        // bytes one worker keeps resident
   };
   araucaria_disk_config_set(&config);
   ```
   Once set, any `num` allocation whose backing size (in bytes) exceeds
   `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
-  `disk_path` instead of the heap. `src/main.c` sets this near the top of
-  `main()`, pointed at the tracked `./cache/tmp` with a threshold of
-  `mem_max / 4`. Drop the call to keep every `num` on the heap.
+  `disk_path` instead of the heap. `ram_budget_bytes` caps what one worker
+  holds resident over such an array, and is what `num_mul_estimate_memory`
+  charges against. `src/main.c` sets this in `pi()`, after `n_process` has
+  been clamped to the core count, pointed at the tracked `./cache/tmp` with a
+  threshold of `mem_max / 4` and a budget of `mem_max / n_process`. Drop the
+  call to keep every `num` on the heap.
 
 ### Cross-Process Disk Lock
 

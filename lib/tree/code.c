@@ -540,8 +540,6 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 
     node_op_sizes(n);
 
-    uint64_t threshold = araucaria_disk_config_get_threshold_bytes();
-
     // split_span_res_join's four terms, in order: P1xP2, Q1xQ2, P1xR2, R1xQ2
     const uint64_t terms[4][2] = {
         { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_P] },
@@ -553,7 +551,7 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
     double total = 0.0;
     for(uint64_t i = 0; i < 4; i++)
     {
-        total += (double)num_mul_estimate_memory(terms[i][0], terms[i][1], threshold, threads);
+        total += (double)num_mul_estimate_memory(terms[i][0], terms[i][1], threads);
     }
 
     // P, Q and R run within a few percent of each other, so the four terms are
