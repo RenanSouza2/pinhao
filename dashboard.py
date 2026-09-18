@@ -1457,6 +1457,11 @@ def chain_bound(value, chunk, index_max):
     return f"{value // chunk}C"
 
 
+# Columns kept clear at the right of a tree row: a reading that ends on the
+# last column reads as though it has been cut off rather than as all there is.
+TREE_RIGHT_MARGIN = 2
+
+
 def append_node_row(view, row, tail, cont_prefix):
     """A node's row, with its "|" readings beside it while they fit and on a
     continuation row under it when they do not - so a widened terminal pulls
@@ -1467,11 +1472,14 @@ def append_node_row(view, row, tail, cont_prefix):
         view.lines.append(row)
         return
     beside = f"{row} | {tail}"
-    if visible_len(beside) <= view.width:
+    if visible_len(beside) <= view.width - TREE_RIGHT_MARGIN:
         view.lines.append(beside)
         return
     view.lines.append(row)
-    view.lines.append(f"{cont_prefix}  {tail}")
+    # Two columns to clear the mark, then one tree level further in, so the
+    # continuation reads as hanging off the node rather than as a row at the
+    # same level as its tag.
+    view.lines.append(f"{cont_prefix}  {'':<3}{tail}")
 
 
 def render_chain_ladder(root, view):
