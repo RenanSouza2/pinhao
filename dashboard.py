@@ -77,6 +77,11 @@ NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,             1.88
 ALERT_ON = "\x1b[1;38;2;224;122;95m"
 ALERT_OFF = "\x1b[22;39m"
 
+# Neutral dim (#4A4E5A, contrast 2.15) for the frame round a node's reading.
+# Chrome carries no reading of its own, so it sits down in the same faint band
+# as NODE_PENDING and NODE_DONE rather than competing with the text inside it.
+TREE_BOX_ON = "\x1b[38;2;74;78;90m"
+
 # Neutral grey (#7C808C) for a task's measured RSS, set against the estimate
 # beside it in the default foreground: the estimate is what the scheduler acts
 # on, the measurement is the check on it, so only one of the pair reads loud.
@@ -253,6 +258,7 @@ class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
         "weight", "subtree_weight", "own_units",
+        "wrap_rows", "shrink_since", "wrap_width",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro", "micro_start",
     )
@@ -267,6 +273,9 @@ class TreeNode:
         self.weight = node_weight(kind, self.leaves_total)
         self.subtree_weight = 0  # own weight plus every descendant's; set by _weigh
         self.own_units = 0  # of self.weight, how much is credited: a join earns it by quarters
+        self.wrap_rows = 0  # rows its reading is laid out over now; 0 is beside the node
+        self.shrink_since = None  # when it first fitted in fewer, for TREE_UNWRAP_HOLD
+        self.wrap_width = None  # terminal width the current layout was chosen at
         self.units_done = 0  # weight of the nodes finished in this subtree
         self.own_done = False
         self.in_progress = False
@@ -1462,6 +1471,13 @@ def chain_bound(value, chunk, index_max):
 # last column reads as though it has been cut off rather than as all there is.
 TREE_RIGHT_MARGIN = 2
 
+# How long a reading has to have fitted in fewer rows before it is allowed to
+# shrink into them. Micro-phase names swing by 11 columns and change several
+# times a second, so a reading near a row boundary would otherwise break and
+# rejoin continuously. Only shrinking waits: a reading that has outgrown its
+# layout breaks at once, or the row runs off the screen.
+TREE_UNWRAP_HOLD = 4.0
+
 # What a boxed reading costs in columns: "\u2502 " on the left, " \u2502" on the right.
 TREE_BOX_CHROME = 4
 
@@ -1483,8 +1499,10 @@ def _pack_parts(parts, indent, limit):
     return rows
 
 
-def balance_parts(parts, indent, limit):
-    """`parts` laid out over as few rows as `limit` allows, then evened out.
+def balance_parts(parts, indent, limit, target_rows=0):
+    """`parts` laid out over as few rows as `limit` allows - or over
+    `target_rows` of them where a layout is being held against shrinking - then
+    evened out.
 
     Filling each row to the brim leaves the last one nearly empty, which reads
     as a stray fragment rather than as the rest of a reading. So the row count
@@ -1492,53 +1510,69 @@ def balance_parts(parts, indent, limit):
     will go without costing another row - the narrowest packing of that height,
     which is the most even one."""
     rows = _pack_parts(parts, indent, limit)
-    if len(rows) < 2:
+    target = max(len(rows), target_rows)
+    if target < 2:
         return rows
     lo, hi = 1, limit
     while lo < hi:
         mid = (lo + hi) // 2
-        if len(_pack_parts(parts, indent, mid)) <= len(rows):
+        if len(_pack_parts(parts, indent, mid)) <= target:
             hi = mid
         else:
             lo = mid + 1
     return _pack_parts(parts, indent, lo)
 
 
-def append_node_row(view, row, parts, cont_prefix):
+def append_node_row(view, node, row, parts, cont_prefix):
     """A node's row, with its reading beside it while that fits and on
-    continuation rows under it when it does not - so a widened terminal pulls it
-    back up on the next frame. cont_prefix is the node's own child prefix, so a
-    continuation lines up inside the node and keeps the connectors of everything
-    still to come."""
+    continuation rows under it when it does not. The row count is held against
+    shrinking for TREE_UNWRAP_HOLD, so a reading whose phase name keeps changing
+    width settles instead of breaking and rejoining every frame; growth and a
+    terminal resize both take effect at once. cont_prefix is the node's own
+    child prefix, so a continuation lines up inside the node and keeps the
+    connectors of everything still to come."""
     if not parts:
+        node.wrap_rows, node.shrink_since = 0, None
         view.lines.append(row)
         return
     limit = view.width - TREE_RIGHT_MARGIN
-    beside = f"{row} {' | '.join(parts)}"
-    if visible_len(beside) <= limit:
-        view.lines.append(beside)
-        return
-    view.lines.append(row)
     # Two columns to clear the mark, then one tree level further in, so the
     # continuation reads as hanging off the node rather than as a row at the
     # same level as its tag.
     indent = f"{cont_prefix}  {'':<3}"
-    rows = balance_parts(parts, indent, limit)
+    beside = f"{row} {' | '.join(parts)}"
+    want = 0 if visible_len(beside) <= limit else len(balance_parts(parts, indent, limit))
+    if view.width != node.wrap_width or want >= node.wrap_rows:
+        node.shrink_since = None
+    elif node.shrink_since is None:
+        node.shrink_since = view.now
+        want = node.wrap_rows
+    elif view.now - node.shrink_since < TREE_UNWRAP_HOLD:
+        want = node.wrap_rows
+    else:
+        node.shrink_since = None
+    node.wrap_width = view.width
+    if want == 0:
+        node.wrap_rows = 0
+        view.lines.append(beside)
+        return
+    view.lines.append(row)
+    # A box costs TREE_BOX_CHROME columns, so its contents are packed against
+    # the narrower limit; one row is left unboxed, being unambiguous already.
+    rows = (balance_parts(parts, indent, limit, want) if want < 2
+            else balance_parts(parts, indent, limit - TREE_BOX_CHROME, want))
+    node.wrap_rows = len(rows)
     if len(rows) == 1:
-        # One row is already unambiguous; a box round it would be three rows of
-        # frame for one of reading.
         view.lines.append(indent + rows[0])
         return
-    # Re-packed against the chrome it is about to carry, so the frame lands
-    # inside the same margin every other row respects.
-    rows = balance_parts(parts, indent, limit - TREE_BOX_CHROME)
     inner = max(visible_len(r) for r in rows)
     rule = "\u2500" * (inner + 2)
-    view.lines.append(f"{indent}\u250c{rule}\u2510")
+    edge = f"{TREE_BOX_ON}\u2502{OFF}"
+    view.lines.append(f"{indent}{TREE_BOX_ON}\u250c{rule}\u2510{OFF}")
     for line in rows:
         pad = " " * (inner - visible_len(line))
-        view.lines.append(f"{indent}\u2502 {line}{pad} \u2502")
-    view.lines.append(f"{indent}\u2514{rule}\u2518")
+        view.lines.append(f"{indent}{edge} {line}{pad} {edge}")
+    view.lines.append(f"{indent}{TREE_BOX_ON}\u2514{rule}\u2518{OFF}")
 
 
 def render_chain_ladder(root, view):
@@ -1557,7 +1591,7 @@ def render_chain_ladder(root, view):
     size = f"{view.size:,}" if view.size is not None else "?"
     head, parts = node_detail(root, view, status)
     append_node_row(
-        view,
+        view, root,
         f"{tint}{mark}{OFF} {tint}[{size}, {root.i0:,}, {view.index_max:,}]{OFF}" + head,
         parts, "",
     )
@@ -1605,7 +1639,8 @@ def render_chain_ladder(root, view):
         child_prefix = "   " if is_last else "\u2502  "
         head, parts = node_detail(node, view, status)
         append_node_row(
-            view, f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}" + head, parts, child_prefix,
+            view, node, f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}" + head,
+            parts, child_prefix,
         )
         # A rung running its own join is that node, so nothing hangs below it.
         if chunk_node is None or chunk_node.in_progress or state in ("done", "pending"):
@@ -1624,7 +1659,7 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
     head, parts = node_detail(node, view, status)
     append_node_row(
-        view, f"{prefix}{connector}{tint}{mark}{OFF} {tint}{node_label(node)}{OFF}" + head,
+        view, node, f"{prefix}{connector}{tint}{mark}{OFF} {tint}{node_label(node)}{OFF}" + head,
         parts, child_prefix,
     )
 
