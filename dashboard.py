@@ -2192,6 +2192,10 @@ def render(state):
     # Geometry first: completion, threads, ram and disk each need a column
     # width to size their own bar to before anything is rendered.
     BOX_INSET = 2
+    # The tree sits one indent in from the boxes: it hangs below them rather
+    # than beside them, and a whole BOX_INSET of step says so where half of one
+    # would read as the boxes being off by a column.
+    TREE_INSET = 2 * BOX_INSET
     BOX_GAP = 2
     term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
     avail = term_w - 2 * BOX_INSET
@@ -2281,15 +2285,20 @@ def render(state):
         else:
             starved = bool(over_launch or (budget and threads_booked is not None and threads_booked >= budget))
         if state.tree_root is not None:
+            # Laid out on its own, then inset like the boxes above it: the
+            # ladder builds its own rows without a prefix, so the margin cannot
+            # come from render_tree's own indentation.
+            tree_lines = []
             render_tree(state.tree_root, TreeView(
-                lines, now,
+                tree_lines, now,
                 state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
                 state.disk_lock_enabled is not False, starved,
                 state.tree_chunk_span, state.index_max,
-                state.config.get("size", state.explicit_size), term_w,
+                state.config.get("size", state.explicit_size), term_w - TREE_INSET,
             ))
+            lines.extend(" " * TREE_INSET + row for row in tree_lines)
         elif state.tree_skipped_reason:
-            lines.append(f"tree: {state.tree_skipped_reason}")
+            lines.append(" " * TREE_INSET + f"tree: {state.tree_skipped_reason}")
 
     return "\n".join(lines)
 
