@@ -224,7 +224,7 @@ def leaves_covered(i0, i_max):
     return (i_max - i0 + 1) // PIECES_PER_LEAF
 
 
-TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
+TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
 
 # Tree labels in pieces rather than raw indices; "p" toggles. Raw indices are
 # what the log lines and cache filenames carry, so that view is the one to
