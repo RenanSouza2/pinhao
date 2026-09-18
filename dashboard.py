@@ -1462,10 +1462,8 @@ def chain_bound(value, chunk, index_max):
 # last column reads as though it has been cut off rather than as all there is.
 TREE_RIGHT_MARGIN = 2
 
-# Laid on a continuation row that has more of the same reading under it, in the
-# separator the reading is already broken on: the row ends mid-list, and the
-# mark is what says so rather than leaving the break to be inferred.
-TREE_CONTINUES = " |"
+# What a boxed reading costs in columns: "\u2502 " on the left, " \u2502" on the right.
+TREE_BOX_CHROME = 4
 
 
 def _pack_parts(parts, indent, limit):
@@ -1525,13 +1523,22 @@ def append_node_row(view, row, parts, cont_prefix):
     # continuation reads as hanging off the node rather than as a row at the
     # same level as its tag.
     indent = f"{cont_prefix}  {'':<3}"
-    # Every row but the last carries the continuation mark, so the width it
-    # takes is reserved on all of them - which row ends up last is not known
-    # until the packing is done.
-    rows = balance_parts(parts, indent, limit - len(TREE_CONTINUES))
-    for i, line in enumerate(rows):
-        mark = TREE_CONTINUES if i + 1 < len(rows) else ""
-        view.lines.append(indent + line + mark)
+    rows = balance_parts(parts, indent, limit)
+    if len(rows) == 1:
+        # One row is already unambiguous; a box round it would be three rows of
+        # frame for one of reading.
+        view.lines.append(indent + rows[0])
+        return
+    # Re-packed against the chrome it is about to carry, so the frame lands
+    # inside the same margin every other row respects.
+    rows = balance_parts(parts, indent, limit - TREE_BOX_CHROME)
+    inner = max(visible_len(r) for r in rows)
+    rule = "\u2500" * (inner + 2)
+    view.lines.append(f"{indent}\u250c{rule}\u2510")
+    for line in rows:
+        pad = " " * (inner - visible_len(line))
+        view.lines.append(f"{indent}\u2502 {line}{pad} \u2502")
+    view.lines.append(f"{indent}\u2514{rule}\u2518")
 
 
 def render_chain_ladder(root, view):
