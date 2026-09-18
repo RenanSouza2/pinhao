@@ -13,8 +13,8 @@
 #include "../../mods/macros/uint.h"
 #include "../../mods/macros/time.h"
 
-#define TREE_PIECE_SIZE 24
-#define TREE_LEAF_COST_BYTES (U64(512) * 1024 * 1024)
+#define TREE_PIECE_SIZE 22
+#define TREE_LEAF_COST_BYTES (U64(128) * 1024 * 1024)
 
 // Top bits of index_max that become the chain: the range is cut into chunks of
 // B(chunk_span), folded in one at a time instead of halved.

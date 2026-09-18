@@ -97,7 +97,7 @@ against it.
 Scale these together with `size`. The values committed in `main.c` are sized
 for a full-scale run on a machine with plenty of RAM; leaving them there for a
 small test means the memory policy never binds. Scaling down has a floor,
-though: every leaf is priced at a fixed 512 MB (`TREE_LEAF_COST_BYTES`), so a
+though: every leaf is priced at a fixed 128 MB (`TREE_LEAF_COST_BYTES`), so a
 `mem_max` near or below that makes every leaf run solo and serializes the run.
 
 `n_process` is the number of processes to fork and also the thread budget

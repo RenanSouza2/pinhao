@@ -92,7 +92,7 @@ one.
   crossed. The committed values are sized for a full run, so scale them
   down along with `size` — otherwise every task launches immediately and
   the run says nothing about scheduling. Don't scale `mem_max` to within
-  reach of the fixed `TREE_LEAF_COST_BYTES` (512 MB) leaf cost, or every
+  reach of the fixed `TREE_LEAF_COST_BYTES` (128 MB) leaf cost, or every
   leaf runs solo and the test serializes.
 
 Revert any temporary change to these before considering the task done,
