@@ -1303,26 +1303,27 @@ def node_state(node, view):
 
 
 def node_detail(node, view, status):
-    """The reading beside a node's label, as (head, tail). head stays on the
-    node's own row: for the live task its id, elapsed and ETA; for any other
-    node, how far along the work below it is, or 100% once it is done. tail is
-    the "|" sections - memory, threads, cores, term, micro-phase - which the
-    caller lays on a continuation row under the node, so a live task keeps every
-    reading without running off the screen."""
+    """The reading beside a node's label, as (head, tail). A node that is not
+    running has only a head: how far along the work below it is, or 100% once it
+    is done. A live task has only a tail, its whole reading in one piece - id,
+    elapsed, ETA, memory, threads, cores, term and micro-phase - which the caller
+    keeps beside the node while it fits and lays on continuation rows under it
+    when it does not. The tail comes back as its segments so the caller can pack
+    them into rows; the reading only ever breaks on a "|" boundary."""
     if status is None:
         if node.own_done:
-            return f" {RSS_ON}100%{OFF}", ""
+            return f" {RSS_ON}100%{OFF}", []
         # Against the whole subtree with the node's own weight included, in the
         # overall bar's units: everything below can be finished while the node
         # itself still waits for a slot, so only its own completion reads 100%.
         # A leaf is its own subtree and has nothing to report until it is done.
         if node.children:
-            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}", ""
-        return "", ""
-    detail = f" [{status}]"
+            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}", []
+        return "", []
+    detail = f"[{status}]"
     parts = []
     if node.start_time is None:
-        return detail, ""
+        return "", [detail]
     node_elapsed = view.now - node.start_time
     detail += f" {fmt_duration(node_elapsed)}"
     if node.in_progress:
@@ -1394,7 +1395,7 @@ def node_detail(node, view, status):
             if node.micro_start is not None:
                 micro += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
             parts.append(micro)
-    return detail, " | ".join(parts)
+    return "", [detail] + parts
 
 
 def node_label(node, span_w=0, i0_w=0):
@@ -1461,25 +1462,76 @@ def chain_bound(value, chunk, index_max):
 # last column reads as though it has been cut off rather than as all there is.
 TREE_RIGHT_MARGIN = 2
 
+# Laid on a continuation row that has more of the same reading under it, in the
+# separator the reading is already broken on: the row ends mid-list, and the
+# mark is what says so rather than leaving the break to be inferred.
+TREE_CONTINUES = " |"
 
-def append_node_row(view, row, tail, cont_prefix):
-    """A node's row, with its "|" readings beside it while they fit and on a
-    continuation row under it when they do not - so a widened terminal pulls
-    them back up on the next frame. cont_prefix is the node's own child prefix,
-    so a continuation lines up inside the node and keeps the connectors of
-    everything still to come."""
-    if not tail:
+
+def _pack_parts(parts, indent, limit):
+    """Segments greedily filled into rows of at most `limit` columns, breaking
+    only between them. A segment too wide to share a row gets one of its own:
+    there is nothing to gain by breaking inside it."""
+    rows, line = [], ""
+    for part in parts:
+        merged = f"{line} | {part}" if line else part
+        if line and visible_len(indent + merged) > limit:
+            rows.append(line)
+            line = part
+        else:
+            line = merged
+    if line:
+        rows.append(line)
+    return rows
+
+
+def balance_parts(parts, indent, limit):
+    """`parts` laid out over as few rows as `limit` allows, then evened out.
+
+    Filling each row to the brim leaves the last one nearly empty, which reads
+    as a stray fragment rather than as the rest of a reading. So the row count
+    is taken from a greedy pass, and the width is then squeezed as far as it
+    will go without costing another row - the narrowest packing of that height,
+    which is the most even one."""
+    rows = _pack_parts(parts, indent, limit)
+    if len(rows) < 2:
+        return rows
+    lo, hi = 1, limit
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if len(_pack_parts(parts, indent, mid)) <= len(rows):
+            hi = mid
+        else:
+            lo = mid + 1
+    return _pack_parts(parts, indent, lo)
+
+
+def append_node_row(view, row, parts, cont_prefix):
+    """A node's row, with its reading beside it while that fits and on
+    continuation rows under it when it does not - so a widened terminal pulls it
+    back up on the next frame. cont_prefix is the node's own child prefix, so a
+    continuation lines up inside the node and keeps the connectors of everything
+    still to come."""
+    if not parts:
         view.lines.append(row)
         return
-    beside = f"{row} | {tail}"
-    if visible_len(beside) <= view.width - TREE_RIGHT_MARGIN:
+    limit = view.width - TREE_RIGHT_MARGIN
+    beside = f"{row} {' | '.join(parts)}"
+    if visible_len(beside) <= limit:
         view.lines.append(beside)
         return
     view.lines.append(row)
     # Two columns to clear the mark, then one tree level further in, so the
     # continuation reads as hanging off the node rather than as a row at the
     # same level as its tag.
-    view.lines.append(f"{cont_prefix}  {'':<3}{tail}")
+    indent = f"{cont_prefix}  {'':<3}"
+    # Every row but the last carries the continuation mark, so the width it
+    # takes is reserved on all of them - which row ends up last is not known
+    # until the packing is done.
+    rows = balance_parts(parts, indent, limit - len(TREE_CONTINUES))
+    for i, line in enumerate(rows):
+        mark = TREE_CONTINUES if i + 1 < len(rows) else ""
+        view.lines.append(indent + line + mark)
 
 
 def render_chain_ladder(root, view):
@@ -1496,11 +1548,11 @@ def render_chain_ladder(root, view):
     # rung below it keeps showing its chunk rather than repeating this task.
     mark, _, status, tint = node_state(root, view)
     size = f"{view.size:,}" if view.size is not None else "?"
-    head, tail = node_detail(root, view, status)
+    head, parts = node_detail(root, view, status)
     append_node_row(
         view,
         f"{tint}{mark}{OFF} {tint}[{size}, {root.i0:,}, {view.index_max:,}]{OFF}" + head,
-        tail, "",
+        parts, "",
     )
 
     # The final fold is the root's own task, so like any other rung running its
@@ -1544,9 +1596,9 @@ def render_chain_ladder(root, view):
         is_last = row_i == len(rows) - 1
         connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
         child_prefix = "   " if is_last else "\u2502  "
-        head, tail = node_detail(node, view, status)
+        head, parts = node_detail(node, view, status)
         append_node_row(
-            view, f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}" + head, tail, child_prefix,
+            view, f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}" + head, parts, child_prefix,
         )
         # A rung running its own join is that node, so nothing hangs below it.
         if chunk_node is None or chunk_node.in_progress or state in ("done", "pending"):
@@ -1563,10 +1615,10 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
     mark, state, status, tint = node_state(node, view)
     connector = "" if is_root else ("\u2514\u2500 " if is_last else "\u251c\u2500 ")
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
-    head, tail = node_detail(node, view, status)
+    head, parts = node_detail(node, view, status)
     append_node_row(
         view, f"{prefix}{connector}{tint}{mark}{OFF} {tint}{node_label(node)}{OFF}" + head,
-        tail, child_prefix,
+        parts, child_prefix,
     )
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
