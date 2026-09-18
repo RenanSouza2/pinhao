@@ -1467,9 +1467,14 @@ def chain_bound(value, chunk, index_max):
     return f"{value // chunk}C"
 
 
-# Columns kept clear at the right of a tree row: a reading that ends on the
-# last column reads as though it has been cut off rather than as all there is.
-TREE_RIGHT_MARGIN = 2
+# Columns the frame is inset by. The boxes sit at BOX_INSET on both sides; the
+# tree steps one whole indent further in, so it reads as hanging below them
+# rather than beside them, and keeps that same margin on the right - a reading
+# that ends on the last column reads as though it has been cut off, and one
+# side clear by four against the other by two reads as a drift.
+BOX_INSET = 2
+TREE_INSET = 2 * BOX_INSET
+TREE_RIGHT_MARGIN = TREE_INSET
 
 # How long a reading has to have fitted in fewer rows before it is allowed to
 # shrink into them. Micro-phase names swing by 11 columns and change several
@@ -2191,11 +2196,6 @@ def render(state):
 
     # Geometry first: completion, threads, ram and disk each need a column
     # width to size their own bar to before anything is rendered.
-    BOX_INSET = 2
-    # The tree sits one indent in from the boxes: it hangs below them rather
-    # than beside them, and a whole BOX_INSET of step says so where half of one
-    # would read as the boxes being off by a column.
-    TREE_INSET = 2 * BOX_INSET
     BOX_GAP = 2
     term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
     avail = term_w - 2 * BOX_INSET
