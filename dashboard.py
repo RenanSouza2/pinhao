@@ -224,6 +224,24 @@ def leaves_covered(i0, i_max):
     return (i_max - i0 + 1) // PIECES_PER_LEAF
 
 
+# Bar weights: a node's share of the bar is its share of the work, not one
+# point per node. A join's cost doubles with every span above TREE_PIECE_SIZE;
+# LEAF_WEIGHT is a leaf in those same units and is calibrated for
+# TREE_PIECE_SIZE 22 - re-measure it if that changes. Chain and big nodes join a
+# prefix against a single chunk, so their cost is flat in width rather than
+# doubling with it. Every weight is scaled by JOIN_PARTS so that a quarter of a
+# join is still a whole number: span 23 is 4 and its quarter is 1.
+JOIN_PARTS = 4  # multiplications in a join: P1xP2, Q1xQ2, P1xR2, R1xQ2
+LEAF_WEIGHT = 4 * JOIN_PARTS
+CHAIN_WEIGHT = 5 * JOIN_PARTS
+
+
+def node_weight(kind, leaves):
+    if kind != "SPAN":
+        return CHAIN_WEIGHT
+    return LEAF_WEIGHT if leaves == 1 else leaves // 2 * JOIN_PARTS
+
+
 TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 
 # Tree labels in pieces rather than raw indices; "p" toggles. Raw indices are
@@ -244,6 +262,7 @@ RAM_ALARM = 0.95
 class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
+        "weight", "subtree_weight", "own_units",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro", "micro_start",
     )
@@ -255,7 +274,10 @@ class TreeNode:
         self.n2 = n2  # remainder (BIG, CHAIN) or span (SPAN)
         self.leaves_total = (1 << (n2 - TREE_PIECE_SIZE)) if kind == "SPAN" else (n2 // PIECES_PER_LEAF)
         self.leaves_done = 0
-        self.units_done = 0  # pieces and joins finished in this subtree, one each
+        self.weight = node_weight(kind, self.leaves_total)
+        self.subtree_weight = 0  # own weight plus every descendant's; set by _weigh
+        self.own_units = 0  # of self.weight, how much is credited: a join earns it by quarters
+        self.units_done = 0  # weight of the nodes finished in this subtree
         self.own_done = False
         self.in_progress = False
         self.task_idx = None
@@ -323,12 +345,18 @@ def _build_chunked(i0, remainder, chunk_span, level, parent, by_key):
     return _build_chain(i0, remainder, chunk_span, parent, by_key)
 
 
+def _weigh(node):
+    node.subtree_weight = node.weight + sum(_weigh(c) for c in node.children)
+    return node.subtree_weight
+
+
 def build_tree(index_max, chunk_span):
     total_pieces = index_max // PIECES_PER_LEAF
     if 2 * total_pieces - 1 > TREE_NODE_CAP:
         return None, None
     by_key = {}
     root = _build_chunked(1, index_max, chunk_span, 0, None, by_key)
+    _weigh(root)
     return root, by_key
 
 
@@ -357,13 +385,23 @@ def mark_leaves_done(node, leaves):
 
 
 def mark_units_done(node, units):
-    """Units are pieces and joins counted one each, as in the overall bar's
-    split_units. A subtree is binary, so it holds 2 * leaves_total - 1 of them;
-    the clamp keeps a replayed or interleaved record from overshooting."""
+    """Units are node_weight sums, as on the overall bar. The clamp keeps a
+    replayed or interleaved record from overshooting the subtree's own total."""
     n = node
     while n is not None:
-        n.units_done = min(n.units_done + units, 2 * n.leaves_total - 1)
+        n.units_done = min(n.units_done + units, n.subtree_weight)
         n = n.parent
+
+
+def mark_own_units(node, units):
+    """Credit part of a node's own weight, capped at what it is still owed: a
+    join earns its weight a quarter at a time, and a resumed or replayed record
+    must not carry it past what the node is worth."""
+    units = min(units, node.weight - node.own_units)
+    if units <= 0:
+        return
+    node.own_units += units
+    mark_units_done(node, units)
 
 
 def mark_active(node, delta):
@@ -902,7 +940,8 @@ def handle_node_process(state, content):
         state.joins_done += covered - 1
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
-            mark_units_done(tree_node, 2 * covered - 1)
+            mark_units_done(tree_node, tree_node.subtree_weight)
+            tree_node.own_units = tree_node.weight
             mark_node_done(tree_node)
     elif action == "joining":
         mem = m.group("mem")
@@ -924,7 +963,7 @@ def handle_node_process(state, content):
             bucket = dur_bucket(tree_node) if tree_node is not None else level
             state.join_events_by_level[bucket].append(dur)
         if tree_node is not None:
-            mark_units_done(tree_node, 1)
+            mark_own_units(tree_node, tree_node.weight)
             mark_node_done(tree_node)
 
 
@@ -946,7 +985,7 @@ def handle_piece(state, content):
         tree_node = state.tree_by_key.get((i0, int(m.group("i_max"))))
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
-            mark_units_done(tree_node, 1)
+            mark_own_units(tree_node, tree_node.weight)
             mark_node_done(tree_node)
 
 
@@ -1010,6 +1049,14 @@ def handle_phase_line(state, content):
     if tree_node is None:
         return
     if is_header:
+        # A term's header means the previous multiplication finished, so the
+        # join banks a quarter of its weight. The last quarter is held back for
+        # "joined": the trailing add and write are still to come, and a node
+        # must not read complete while any of its work remains.
+        if tree_node.term is not None:
+            quarter = tree_node.weight // JOIN_PARTS
+            if tree_node.own_units + 2 * quarter <= tree_node.weight:
+                mark_own_units(tree_node, quarter)
         tree_node.term = term
     else:
         # Only a change of phase restarts the clock: a phase logged twice
@@ -1154,7 +1201,8 @@ def handle_phase(state, content):
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
-            mark_units_done(state.tree_root, 2 * state.tree_root.leaves_total - 1)
+            mark_units_done(state.tree_root, state.tree_root.subtree_weight)
+            state.tree_root.own_units = state.tree_root.weight
             mark_node_done(state.tree_root)
     elif action == "display begin":
         set_phase(state, "displaying", ts)
@@ -1390,12 +1438,12 @@ def node_detail(node, view, status):
     if status is None:
         if node.own_done:
             return f" {RSS_ON}100%{OFF}"
-        # What has to finish before this node can start. Its subtree is binary,
-        # so 2 * leaves - 2 units sit below it, counted as the overall bar
-        # counts them.
-        below = 2 * node.leaves_total - 2
-        if below:
-            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / below)}%{OFF}"
+        # Against the whole subtree with the node's own weight included, in the
+        # overall bar's units: everything below can be finished while the node
+        # itself still waits for a slot, so only its own completion reads 100%.
+        # A leaf is its own subtree and has nothing to report until it is done.
+        if node.children:
+            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}"
         return ""
     detail = f" [{status}]"
     if node.start_time is None:
@@ -1650,14 +1698,14 @@ def render_status_screen(state):
 
 
 # The two steps after the split tree: one big division, then the decimal
-# display. Each is a single long step with no sub-progress to count, so each
-# counts as one unit against the total.
-POST_SPLIT_UNITS = 2
+# display. Each is a single long step with no sub-progress to count, and each
+# costs about what a leaf costs, so the bar gives each one LEAF_WEIGHT.
+POST_SPLIT_STEPS = 2
 
 
 def post_split_done(state):
     if state.done:
-        return POST_SPLIT_UNITS
+        return POST_SPLIT_STEPS
     if state.phase in ("divided", "displaying"):
         return 1
     return 0
@@ -1818,10 +1866,18 @@ def _completion_rows(state, bar_w):
         )
         return rows
     total_joins = state.total_joins
-    split_units = state.total_pieces + total_joins
-    total_units = split_units + POST_SPLIT_UNITS
-    done_units = min(state.pieces_done + state.joins_done, split_units) + post_split_done(state)
-    pct = 100.0 * done_units / total_units
+    # Weighted against the tree when there is one; without it the weights are
+    # not recoverable from the log alone, so every node falls back to one point
+    # and the post-split steps scale down with them to stay on that scale.
+    root = state.tree_root
+    if root is not None:
+        split_units, done_units, step = root.subtree_weight, root.units_done, LEAF_WEIGHT
+    else:
+        split_units = state.total_pieces + total_joins
+        done_units = min(state.pieces_done + state.joins_done, split_units)
+        step = 1
+    total_units = split_units + POST_SPLIT_STEPS * step
+    done_units += post_split_done(state) * step
     # The cursor adds a cell, so give the segments one less and the bar keeps
     # the width it has once the run finishes and the cursor goes away.
     remaining = total_units - done_units
@@ -1836,8 +1892,10 @@ def _completion_rows(state, bar_w):
         rows.append(
             "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
         )
-    rows.append("overall:".ljust(LABEL_W) + f"{done_units} / {total_units}  ({fmt_num(pct)}%)")
-    rows.append(" " * LABEL_W + bar)
+    # Weighted units are not a count of anything the reader can point at, and a
+    # percentage off them reads more exact than it is, so the bar stands alone
+    # under the label; the pieces/joins line above carries the exact tallies.
+    rows.append("overall:".ljust(LABEL_W) + bar)
     return rows
 
 
