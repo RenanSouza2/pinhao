@@ -259,6 +259,7 @@ class TreeNode:
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
         "weight", "subtree_weight", "own_units",
         "wrap_rows", "shrink_since", "wrap_width",
+        "terms_done", "term_start", "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro", "micro_start",
     )
@@ -276,6 +277,9 @@ class TreeNode:
         self.wrap_rows = 0  # rows its reading is laid out over now; 0 is beside the node
         self.shrink_since = None  # when it first fitted in fewer, for TREE_UNWRAP_HOLD
         self.wrap_width = None  # terminal width the current layout was chosen at
+        self.terms_done = 0  # multiplications finished this run, for the ETA
+        self.term_start = None  # log timestamp the current term's header carried
+        self.resumed = False  # skipped a term a previous run had committed
         self.units_done = 0  # weight of the nodes finished in this subtree
         self.own_done = False
         self.in_progress = False
@@ -428,6 +432,9 @@ def mark_node_done(node):
     node.threads_live = None
     node.start_time = None
     node.term = None
+    node.terms_done = 0
+    node.term_start = None
+    node.resumed = False
     node.micro = None
     node.micro_start = None
     if was_active:
@@ -936,16 +943,20 @@ def handle_phase_line(state, content):
         # "joined": the trailing add and write are still to come, and a node
         # must not read complete while any of its work remains.
         if tree_node.term is not None:
+            tree_node.terms_done += 1
             quarter = tree_node.weight // JOIN_PARTS
             if tree_node.own_units + 2 * quarter <= tree_node.weight:
                 mark_own_units(tree_node, quarter)
         tree_node.term = term
+        tree_node.term_start = float(m.group("ts"))
     else:
         # Only a change of phase restarts the clock: a phase logged twice
         # running is still the same phase.
         if action != tree_node.micro:
             tree_node.micro_start = float(m.group("ts"))
         tree_node.micro = action
+        if action == "resumed":
+            tree_node.resumed = True
     if action == "multiplying":
         attach_task_plan(state, pid, tree_node)
 
@@ -1311,6 +1322,13 @@ def node_state(node, view):
     return "\u00b7", "pending", None, NODE_PENDING
 
 
+# A join's four multiplications take near-fixed shares of it, so the time spent
+# in the terms that have finished divides out to a prediction of the whole. It
+# needs no history, so it is there for the first join at a level, and it is
+# measured under the load the node is actually running in. Cumulative share
+# after each term, calibrated at TREE_PIECE_SIZE 22.
+TERM_CUM_SHARE = (0.247, 0.495, 0.738, 0.950)
+
 def node_detail(node, view, status):
     """The reading beside a node's label, as (head, tail). A node that is not
     running has only a head: how far along the work below it is, or 100% once it
@@ -1338,9 +1356,19 @@ def node_detail(node, view, status):
     if node.in_progress:
         is_leaf = node.leaves_total == 1
         events_by_level = view.piece_events_by_level if is_leaf else view.join_events_by_level
-        avg = level_avg(events_by_level, dur_bucket(node))
-        if avg is not None:
-            remaining = avg - node_elapsed
+        # Its own finished terms first: they measure this node under the load
+        # it is running in, where the level average is a figure from whenever
+        # the level last ran, and they are there before anything at this level
+        # has finished. A resumed join skipped terms a previous run committed,
+        # so its elapsed time does not span the shares below.
+        est = None
+        if node.terms_done and node.term_start is not None and not node.resumed:
+            share = TERM_CUM_SHARE[min(node.terms_done, len(TERM_CUM_SHARE)) - 1]
+            est = (node.term_start - node.start_time) / share
+        if est is None:
+            est = level_avg(events_by_level, dur_bucket(node))
+        if est is not None:
+            remaining = est - node_elapsed
             # Signed against the level's average: unsigned is time
             # left, "+" is time overrun, and the overrun keeps growing
             # on screen. A phrase like "any moment" reads calmest
