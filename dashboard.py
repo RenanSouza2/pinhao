@@ -249,16 +249,6 @@ TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
 # reach for when a label has to be matched against either.
 PIECE_UNITS = True
 
-# Where system memory stops being comfortable and starts being the thing that
-# ends the run: below RAM_CALM there is room for the page cache as well as the
-# workers, by RAM_ALARM there is neither and the workers are being swapped.
-# Pulled below the ramp's own cool bias on purpose: memory is the measure that
-# ends runs, and it did so last at ~75% and climbing. These bounds put amber
-# near 78% of the machine and red at 95%.
-RAM_CALM = 0.35
-RAM_ALARM = 0.95
-
-
 class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
@@ -534,82 +524,6 @@ def get_root_pid():
     return pid
 
 
-_SYSCTL_INT_CACHE = {}
-
-
-def _sysctl_int(name):
-    """sysctl -n <name>, cached: hw.memsize doesn't change during a run."""
-    if name in _SYSCTL_INT_CACHE:
-        return _SYSCTL_INT_CACHE[name]
-    try:
-        out = subprocess.run(
-            ["sysctl", "-n", name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-        )
-        val = int(out.stdout.strip()) if out.returncode == 0 else None
-    except (OSError, ValueError):
-        val = None
-    _SYSCTL_INT_CACHE[name] = val
-    return val
-
-
-_VM_STAT_PAGE_SIZE_RE = re.compile(r"page size of (\d+) bytes")
-_VM_STAT_FIELD_RE = re.compile(r"^(?P<name>[^:]+):\s*(?P<val>\d+)\.?\s*$")
-
-_MEMINFO_FIELD_RE = re.compile(r"^(?P<name>\S+):\s*(?P<val>\d+)\s*kB\s*$")
-
-
-def _get_system_ram_linux():
-    try:
-        with open("/proc/meminfo") as f:
-            text = f.read()
-    except OSError:
-        return None, None
-
-    fields = {}
-    for line in text.splitlines():
-        m = _MEMINFO_FIELD_RE.match(line)
-        if m:
-            fields[m.group("name")] = int(m.group("val")) * 1024
-
-    total = fields.get("MemTotal")
-    if total is None:
-        return None, None
-    available = fields.get("MemAvailable")
-    used = total - available if available is not None else None
-    return used, total
-
-
-def _get_system_ram_macos():
-    total = _sysctl_int("hw.memsize")
-    try:
-        out = subprocess.run(["vm_stat"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    except OSError:
-        return None, total
-    if out.returncode != 0:
-        return None, total
-
-    text = out.stdout
-    m = _VM_STAT_PAGE_SIZE_RE.search(text)
-    page_size = int(m.group(1)) if m else 4096
-
-    fields = {}
-    for line in text.splitlines():
-        m = _VM_STAT_FIELD_RE.match(line)
-        if m:
-            fields[m.group("name").strip()] = int(m.group("val"))
-
-    wanted = ("Pages wired down", "Pages active", "Pages occupied by compressor")
-    if not all(k in fields for k in wanted):
-        return None, total
-    return sum(fields[k] for k in wanted) * page_size, total
-
-
-def get_system_ram():
-    if sys.platform.startswith("linux"):
-        return _get_system_ram_linux()
-    return _get_system_ram_macos()
-
-
 def get_pid_stats(pids):
     """pid -> (RSS bytes, cumulative CPU seconds), for the given live pids
     (missing/dead pids are omitted). Both readings come off one ps call: the
@@ -675,38 +589,6 @@ class CpuSampler:
 _CPU_SAMPLER = CpuSampler()
 
 
-def get_mmap_bytes(pids):
-    """Disk held by araucaria's disk-backed numbers, over the given pids.
-
-    num_create_disk unlinks each temp file as soon as it mmaps it, so these
-    never appear under cache/tmp and get_dir_size cannot count them -- they
-    hold space until the mapping goes. Keyed by (device, inode): a forked
-    worker inherits its parent's mappings, so one file shows up under several
-    pids and must not be counted twice.
-
-    This is the mapping length, i.e. the file's apparent size. Allocated blocks
-    would need /proc/<pid>/map_files, which wants CAP_SYS_ADMIN; the limb
-    arrays are written through in full, so the two track each other. Returns
-    None where /proc is unreadable (macOS), 0 when nothing has spilled.
-    """
-    seen = {}
-    read_any = False
-    for pid in pids:
-        try:
-            with open(f"/proc/{pid}/maps") as f:
-                read_any = True
-                for line in f:
-                    if "/bignum_" not in line:
-                        continue
-                    parts = line.split()
-                    lo, hi = (int(x, 16) for x in parts[0].split("-"))
-                    key = (parts[3], parts[4])  # device, inode
-                    seen[key] = max(seen.get(key, 0), hi - lo)
-        except OSError:
-            continue
-    return sum(seen.values()) if read_any else None
-
-
 def get_dir_size(path):
     """Sum of file sizes under path, recursing into subdirectories. Returns
     None if path doesn't exist (e.g. cache/ layout changed)."""
@@ -768,8 +650,6 @@ class State:
         self.join_events_by_level = collections.defaultdict(lambda: collections.deque(maxlen=200))
         self.lock_requests = 0  # "locked" lines seen, across all workers
         self.lock_misses = 0  # of those, the ones that found the lock already held
-        self.lock_tokens_seen = False  # a "locked" line carried HIT/MISS (older builds log neither)
-        self.locking_pids = set()  # pids currently blocked between "locking" and "locked"
         self.active = {}  # pid -> {"start", "level", "i0", "node", "threads"}
         self.active_max = 0
         self.threads_seen = False  # a "task start"/"task donate" line carried THR/SUM (older builds don't log it)
@@ -997,12 +877,11 @@ def handle_phase_line(state, content):
     middle column is a span or a remainder, not i_max, so the node is taken
     from the pid's "begin" entry rather than looked up by key. Track the latest term/micro-phase on the
     matching tree node so they can be shown beside it while it's in progress.
-    "locking"/"locked" additionally maintain the set of pids currently
-    blocked waiting on the exclusive disk lock, and "locked" counts the
-    request and, on MISS, the contention (all tracked here, ahead of the tree
-    lookup, so
-    they aren't dropped on runs whose tree is too large to display - see
-    TREE_NODE_CAP). These lines still fire even when the run's disk lock is
+    "locked" additionally counts the request and, on MISS, the contention
+    (tracked here, ahead of the tree lookup, so they aren't dropped on runs
+    whose tree is too large to display - see TREE_NODE_CAP). A build predating
+    the HIT/MISS token logs neither, which reads as no contention rather than
+    as no data. These lines still fire even when the run's disk lock is
     compiled out (LOCK_DISK_IO undefined, see lib/big/code.c) - disk_lock()
     just becomes a near-instant no-op then, so the counters below keep
     accumulating tiny numbers; the display layer is what hides them once
@@ -1032,16 +911,10 @@ def handle_phase_line(state, content):
         if action == "resumed":
             entry["resumed"] = True
 
-    if action == "locking":
-        state.locking_pids.add(pid)
-    elif action == "locked":
-        state.locking_pids.discard(pid)
+    if action == "locked":
         state.lock_requests += 1
-        token = m.group("lock")
-        if token is not None:
-            state.lock_tokens_seen = True
-            if token == "MISS":
-                state.lock_misses += 1
+        if m.group("lock") == "MISS":
+            state.lock_misses += 1
 
     if not state.tree_by_key:
         return
@@ -1109,7 +982,6 @@ def handle_task_end(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
-    state.locking_pids.discard(pid)
 
 
 def handle_task_exit(state, content):
@@ -1121,7 +993,6 @@ def handle_task_exit(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
-    state.locking_pids.discard(pid)
     state.task_exit = (pid, m.group("how"), m.group("kind"), int(m.group("val")))
 
 
@@ -1878,6 +1749,7 @@ def _completion_rows(state, bar_w):
         step = 1
     total_units = split_units + POST_SPLIT_STEPS * step
     done_units += post_split_done(state) * step
+    pct = 100.0 * done_units / total_units
     # The cursor adds a cell, so give the segments one less and the bar keeps
     # the width it has once the run finishes and the cursor goes away.
     remaining = total_units - done_units
@@ -1892,16 +1764,18 @@ def _completion_rows(state, bar_w):
         rows.append(
             "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
         )
-    # Weighted units are not a count of anything the reader can point at, and a
-    # percentage off them reads more exact than it is, so the bar stands alone
-    # under the label; the pieces/joins line above carries the exact tallies.
-    rows.append("overall:".ljust(LABEL_W) + bar)
+    # Right-aligned on the phase row rather than on one of its own: it is a
+    # reading of the run as a whole, like the phase, and weighted units are not
+    # a count of anything the reader can point at - printing them as a tally
+    # would read more exact than they are. The pieces/joins line above is where
+    # the countable figures live.
+    rows[0] = rows[0].ljust(LABEL_W + bar_w + 2 - len(f"{fmt_num(pct)}%")) + f"{fmt_num(pct)}%"
+    rows.append(" " * LABEL_W + bar)
     return rows
 
 
 def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked, cpu=None):
     rows = []
-    n_workers = state.n_process_logged or state.n_process or state.active_max
     blocked_total = sum(blocked_threads(state))
 
     # Same shape as the completion box: a label column, values aligned under it,
@@ -1916,14 +1790,11 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked, cpu=No
             return left
         return (left.ljust(PAIR_COL) if len(left) < PAIR_COL else left + "  ") + right
 
-    # Both rows carry the same "blocked: n" half, and neither carries it while
-    # nothing is blocked: a standing "0" is noise on a healthy run.
-    workers_blocked = len(state.locking_pids)
-    rows.append(pair(
-        f"workers: {len(state.active)} / {n_workers or '?'}",
-        f"blocked: {workers_blocked}" if workers_blocked else "",
-    ))
-
+    # No workers row: the scheduler keeps every process busy, so it reads
+    # "n / n" for all but a moment at each end. The threads row carries the
+    # reading that actually moves, with its own "blocked: n" half, and neither
+    # carries that half while nothing is blocked - a standing "0" is noise on a
+    # healthy run.
     pending = max(0, (threads_booked or 0) - (threads_now or 0))
     if threads_now is not None:
         threads_row = f"threads: {threads_now} / {budget or '?'}"
@@ -2009,7 +1880,7 @@ def _tier_row(state, bar_w, cols):
     return line
 
 
-def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over_launch):
+def _ram_rows(state, bar_w, row_w, pid_rss, est, real, over_launch):
     rows = []
     # The box's top right corner reads whether the scheduler can still admit
     # work: "free" while usage is under mem_launch, "full" once it is not and
@@ -2030,11 +1901,10 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         """Right-align the flag on `row`, one column off the border."""
         return row + " " * max(1, row_w - 1 - visible_len(row) - FLAG_W) + flag
 
-    if ram_total is not None:
-        row = "ram:".ljust(LABEL_W) + f"{fmt_bytes(ram_used)} / {fmt_bytes(ram_total)}"
-        if ram_used is not None:
-            row += f" ({fmt_num(100.0 * ram_used / ram_total)}%)"
-        rows.append(corner(row))
+    # No machine-wide row: what the workers hold against the budget the
+    # scheduler gates on is the reading that decides the run, and the machine's
+    # own total says nothing about it. The corner flag lands on whichever row
+    # comes first.
     if pid_rss or state.tree_root is not None:
         # Estimate then measured, in a task node's own scheme: the estimate is
         # what the scheduler acts on, so it reads loud, and the measurement
@@ -2083,49 +1953,39 @@ def _ram_rows(state, bar_w, row_w, ram_used, ram_total, pid_rss, est, real, over
         tier_row = _tier_row(state, bar_w, dict(zip(drawn_order, cols)))
         if tier_row:
             rows.append(tier_row)
-    elif ram_total is not None and ram_used is not None:
-        # No budget in the log yet, so fall back to the machine's own usage.
-        # Memory is comfortable well past half the machine; it only starts to
-        # matter once the page cache has nowhere left to go. See RAM_CALM/ALARM.
-        used = min(ram_used, ram_total)
-        rows.append(" " * LABEL_W + render_bar(
-            bar_w, (used, ram_total - used), BAR_FULL + BAR_NONE,
-            colour=severity_colour(used / ram_total, RAM_CALM, RAM_ALARM),
-        ))
     return rows
 
 
-def _disk_rows(state, bar_w):
-    row = ("cache:".ljust(LABEL_W)
-           + f"numbers {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'numbers')))}"
-           + f"   pieces {fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, 'pieces')))}")
-    # The third thing occupying cache/: unlinked, so the two readings above are
-    # blind to it. Workers hold the mappings while they run, the root process
-    # once they are gone.
-    pids = list(state.active.keys()) or ([state.root_pid] if state.root_pid else [])
-    mmapped = get_mmap_bytes(pids) if pids else None
-    if mmapped is not None:
-        row += f"   mmap {fmt_bytes(mmapped)}"
-    rows = [row]
-    if not (state.lock_requests and state.disk_lock_enabled is not False):
-        return rows
-    if state.lock_tokens_seen:
+def _disk_rows(state):
+    """The three cache directories a run fills, and what is left on the volume.
+    res/ is left out while it is empty. The tmp reading counts only linked
+    files, so it misses araucaria's disk-backed numbers, which are unlinked the
+    moment they are created."""
+    PAIR_COL = 22
+
+    def cell(label, value):
+        return f"{label}:".ljust(LABEL_W) + value
+
+    def pair(left, right):
+        return (left.ljust(PAIR_COL) if len(left) < PAIR_COL else left + "  ") + right
+
+    def size(name):
+        return fmt_bytes(get_dir_size(os.path.join(CACHE_DIR, name)))
+
+    try:
+        free = fmt_bytes(shutil.disk_usage(CACHE_DIR).free)
+    except OSError:
+        free = "?"
+    rows = [
+        pair(cell("numbers", size("numbers")), cell("pieces", size("pieces"))),
+        pair(cell("tmp", size("tmp")), cell("free", free)),
+    ]
+    # Only once the lock is both compiled in and actually contended: a run that
+    # never misses has nothing to say here, and LOCK_DISK_IO is off by default.
+    if state.disk_lock_enabled is not False and state.lock_misses:
         pct = 100.0 * state.lock_misses / state.lock_requests
-        misses = f"{state.lock_misses} misses ({pct:.0f}%)"
-    else:
-        # No "locked" line carried HIT/MISS: a log from a build predating
-        # them. Zero misses would read as no contention rather than no data.
-        misses = "misses n/a (stale build)"
-    rows.append("lock:".ljust(LABEL_W) + f"{state.lock_requests} requests, {misses}")
-    if state.lock_tokens_seen:
-        # The miss ratio is the worry, so the bar is tinted by its own value
-        # rather than by the slate every other bar uses.
-        rows.append(" " * LABEL_W + render_bar(
-            bar_w,
-            (state.lock_misses, state.lock_requests - state.lock_misses),
-            BAR_FULL + BAR_NONE,
-            colour=severity_colour(state.lock_misses / state.lock_requests),
-        ))
+        rows.append("lock:".ljust(LABEL_W)
+                    + f"{state.lock_requests} requests, {state.lock_misses} misses ({pct:.0f}%)")
     return rows
 
 
@@ -2188,7 +2048,6 @@ def render(state):
 
     lines.append("")
 
-    ram_used, ram_total = get_system_ram()
     pid_stats = get_pid_stats(state.active.keys())
     if not pid_stats and state.phase in ("dividing", "displaying"):
         # No fork()ed workers left to read RSS from (see active_threads) - the
@@ -2228,7 +2087,6 @@ def render(state):
     done_bar_w = max(10, widths[0] - 15)
     thread_bar_w = max(10, widths[1] - 15)
     ram_bar_w = max(10, widths[2] - 15)
-    disk_bar_w = max(10, widths[3] - 15)
     # The full inner width of a row in the ram box, matching render_box's own
     # arithmetic: what a right-aligned flag has to align against.
     ram_row_w = max(BOX_MIN_WIDTH, widths[2] - 2) - 1
@@ -2251,8 +2109,8 @@ def render(state):
 
     completion_lines = _completion_rows(state, done_bar_w)
     thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked, cpu_total)
-    ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, ram_used, ram_total, pid_rss, est, real, over_launch)
-    disk_lines = _disk_rows(state, disk_bar_w)
+    ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, pid_rss, est, real, over_launch)
+    disk_lines = _disk_rows(state)
 
     inset = " " * BOX_INSET
     boxes_info = (
