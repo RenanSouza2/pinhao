@@ -1272,7 +1272,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now piece_events_by_level join_events_by_level"
-    " pid_rss pid_cpu disk_lock_enabled starved chunk_span index_max size",
+    " pid_rss pid_cpu disk_lock_enabled starved chunk_span index_max size width",
 )
 
 
@@ -1303,22 +1303,26 @@ def node_state(node, view):
 
 
 def node_detail(node, view, status):
-    """The reading beside a node's label: for the live task, its task id,
-    elapsed, ETA, memory, threads, cores, term and micro-phase; for any other
-    node, how far along the work below it is; 100% once it is done."""
+    """The reading beside a node's label, as (head, tail). head stays on the
+    node's own row: for the live task its id, elapsed and ETA; for any other
+    node, how far along the work below it is, or 100% once it is done. tail is
+    the "|" sections - memory, threads, cores, term, micro-phase - which the
+    caller lays on a continuation row under the node, so a live task keeps every
+    reading without running off the screen."""
     if status is None:
         if node.own_done:
-            return f" {RSS_ON}100%{OFF}"
+            return f" {RSS_ON}100%{OFF}", ""
         # Against the whole subtree with the node's own weight included, in the
         # overall bar's units: everything below can be finished while the node
         # itself still waits for a slot, so only its own completion reads 100%.
         # A leaf is its own subtree and has nothing to report until it is done.
         if node.children:
-            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}"
-        return ""
+            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}", ""
+        return "", ""
     detail = f" [{status}]"
+    parts = []
     if node.start_time is None:
-        return detail
+        return detail, ""
     node_elapsed = view.now - node.start_time
     detail += f" {fmt_duration(node_elapsed)}"
     if node.in_progress:
@@ -1342,7 +1346,7 @@ def node_detail(node, view, status):
             cur_str = fmt_bytes(current) if current is not None else "?"
             # Estimate first, measured second - the order is what says
             # which is which, so it never varies.
-            detail += f" | {est_str} / {RSS_ON}{cur_str}{OFF}"
+            parts.append(f"{est_str} / {RSS_ON}{cur_str}{OFF}")
         # Single-threaded tasks get no badge at all: its presence is
         # what flags a task holding more than one thread slot. "x" is
         # already the multiply in the term below, so the badge takes
@@ -1357,9 +1361,10 @@ def node_detail(node, view, status):
             # booked them, the worker is not on them yet.
             pending = max(0, node.threads - live)
             if node.threads > 1 or pending:
-                detail += f" | {MULTI_THR_ON}\u00d7{live}{OFF}"
+                badge = f"{MULTI_THR_ON}\u00d7{live}{OFF}"
                 if pending:
-                    detail += f" {RSS_ON}(\u00d7{pending}){OFF}"
+                    badge += f" {RSS_ON}(\u00d7{pending}){OFF}"
+                parts.append(badge)
         # Cores measured over the cores the micro-phase at the end of the row
         # expects to be busy. Tinted by the shortfall between the two: a task
         # parked on the lock is meant to be using nothing and one in a read is
@@ -1370,12 +1375,12 @@ def node_detail(node, view, status):
             expected = expected_threads(node)
             shortfall = 1.0 - cores / expected if expected else 0.0
             reading = f"{cores:.1f}c" if expected is None else f"{cores:.1f}c / {expected}"
-            detail += f" | {severity_colour(shortfall, alarm=0.5)}{reading}{OFF}"
+            parts.append(f"{severity_colour(shortfall, alarm=0.5)}{reading}{OFF}")
         if node.term:
             # The join's last term is the add, named "R" with no operand pair:
             # printed as it stands rather than split around an "x" it has none of.
             op1, sep, op2 = node.term.partition("x")
-            detail += f" | {op1} x {op2}" if sep else f" | {op1}"
+            parts.append(f"{op1} x {op2}" if sep else op1)
         if node.micro:
             micro = node.micro
             if micro == "locking" and view.disk_lock_enabled:
@@ -1384,12 +1389,12 @@ def node_detail(node, view, status):
                 micro = f"{MUL_ON}{micro}{OFF}"
             elif micro.startswith("loading") or micro == "writing":
                 micro = f"{IO_ATTN_ON}{micro}{OFF}"
-            detail += f" | {micro}"
             # Time in this phase, in the RSS grey: the phase name is the
             # reading, how long it has been stuck in it is the check on it.
             if node.micro_start is not None:
-                detail += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
-    return detail
+                micro += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
+            parts.append(micro)
+    return detail, " | ".join(parts)
 
 
 def node_label(node, span_w=0, i0_w=0):
@@ -1452,6 +1457,23 @@ def chain_bound(value, chunk, index_max):
     return f"{value // chunk}C"
 
 
+def append_node_row(view, row, tail, cont_prefix):
+    """A node's row, with its "|" readings beside it while they fit and on a
+    continuation row under it when they do not - so a widened terminal pulls
+    them back up on the next frame. cont_prefix is the node's own child prefix,
+    so a continuation lines up inside the node and keeps the connectors of
+    everything still to come."""
+    if not tail:
+        view.lines.append(row)
+        return
+    beside = f"{row} | {tail}"
+    if visible_len(beside) <= view.width:
+        view.lines.append(beside)
+        return
+    view.lines.append(row)
+    view.lines.append(f"{cont_prefix}  {tail}")
+
+
 def render_chain_ladder(root, view):
     """The root chain as a flat ladder, one rung per chunk in index order,
     every folded rung merged into a single accumulator row - so the rows always
@@ -1466,9 +1488,11 @@ def render_chain_ladder(root, view):
     # rung below it keeps showing its chunk rather than repeating this task.
     mark, _, status, tint = node_state(root, view)
     size = f"{view.size:,}" if view.size is not None else "?"
-    view.lines.append(
-        f"{tint}{mark}{OFF} {tint}[{size}, {root.i0:,}, {view.index_max:,}]{OFF}"
-        + node_detail(root, view, status)
+    head, tail = node_detail(root, view, status)
+    append_node_row(
+        view,
+        f"{tint}{mark}{OFF} {tint}[{size}, {root.i0:,}, {view.index_max:,}]{OFF}" + head,
+        tail, "",
     )
 
     # The final fold is the root's own task, so like any other rung running its
@@ -1511,14 +1535,14 @@ def render_chain_ladder(root, view):
         # expanded rung's subtree does not break the ladder in two.
         is_last = row_i == len(rows) - 1
         connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
-        view.lines.append(
-            f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}"
-            + node_detail(node, view, status)
+        child_prefix = "   " if is_last else "\u2502  "
+        head, tail = node_detail(node, view, status)
+        append_node_row(
+            view, f"{connector}{tint}{mark}{OFF} {tint}{label}{OFF}" + head, tail, child_prefix,
         )
         # A rung running its own join is that node, so nothing hangs below it.
         if chunk_node is None or chunk_node.in_progress or state in ("done", "pending"):
             continue
-        child_prefix = "   " if is_last else "\u2502  "
         render_tree(chunk_node, view, child_prefix, True, is_root=False)
 
 
@@ -1530,13 +1554,16 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
 
     mark, state, status, tint = node_state(node, view)
     connector = "" if is_root else ("\u2514\u2500 " if is_last else "\u251c\u2500 ")
-    label = f"{tint}{node_label(node)}{OFF}" + node_detail(node, view, status)
-    view.lines.append(f"{prefix}{connector}{tint}{mark}{OFF} {label}")
+    child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
+    head, tail = node_detail(node, view, status)
+    append_node_row(
+        view, f"{prefix}{connector}{tint}{mark}{OFF} {tint}{node_label(node)}{OFF}" + head,
+        tail, child_prefix,
+    )
 
     if state in ("done", "pending") or (node.children and all(c.own_done for c in node.children)):
         return
 
-    child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
     for i, child in enumerate(node.children):
         render_tree(child, view, child_prefix, i == len(node.children) - 1, is_root=False)
 
@@ -2064,7 +2091,8 @@ def render(state):
     # width to size their own bar to before anything is rendered.
     BOX_INSET = 2
     BOX_GAP = 2
-    avail = shutil.get_terminal_size(fallback=(80, 24)).columns - 2 * BOX_INSET
+    term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
+    avail = term_w - 2 * BOX_INSET
     # A column holds its box only while it can still fit the widest row that
     # box has; below that, boxes stack full width rather than clipping their
     # own text. Four columns share the same per-box floor as two - a wider
@@ -2156,7 +2184,7 @@ def render(state):
                 state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
                 state.disk_lock_enabled is not False, starved,
                 state.tree_chunk_span, state.index_max,
-                state.config.get("size", state.explicit_size),
+                state.config.get("size", state.explicit_size), term_w,
             ))
         elif state.tree_skipped_reason:
             lines.append(f"tree: {state.tree_skipped_reason}")
