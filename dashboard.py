@@ -224,9 +224,6 @@ def leaves_covered(i0, i_max):
     return (i_max - i0 + 1) // PIECES_PER_LEAF
 
 
-<<<<<<< HEAD
-TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
-=======
 # Bar weights: a node's share of the bar is its share of the work, not one
 # point per node. A join's cost doubles with every span above TREE_PIECE_SIZE;
 # LEAF_WEIGHT is a leaf in those same units and is calibrated for
@@ -245,8 +242,7 @@ def node_weight(kind, leaves):
     return LEAF_WEIGHT if leaves == 1 else leaves // 2 * JOIN_PARTS
 
 
-TREE_NODE_CAP = 20000  # total nodes; skip the view rather than choke on it
->>>>>>> origin/v11.1
+TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
 
 # Tree labels in pieces rather than raw indices; "p" toggles. Raw indices are
 # what the log lines and cache filenames carry, so that view is the one to
