@@ -254,6 +254,12 @@ TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
 # reach for when a label has to be matched against either.
 PIECE_UNITS = True
 
+# Set while the dashboard is walking a log it opened rather than following one
+# as it is written. Everything on screen then comes from the log, so the live
+# samples are skipped: they read the machine now, which has nothing to do with
+# the moment being replayed, and ps alone costs more than a frame's budget.
+REPLAYING = False
+
 class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
@@ -2248,8 +2254,8 @@ def render(state):
 
     lines.append("")
 
-    pid_stats = get_pid_stats(state.active.keys())
-    if not pid_stats and state.phase in ("dividing", "displaying"):
+    pid_stats = {} if REPLAYING else get_pid_stats(state.active.keys())
+    if not REPLAYING and not pid_stats and state.phase in ("dividing", "displaying"):
         # No fork()ed workers left to read RSS from (see active_threads) - the
         # root process is the one actually holding the memory these phases use.
         if state.root_pid is None:
@@ -2577,11 +2583,13 @@ draw.last_dims = None
 
 
 def main():
-    global PIECE_UNITS
+    global PIECE_UNITS, REPLAYING
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
     parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
     parser.add_argument("--n-process", type=int, default=None, help="pi() n_process argument")
+    parser.add_argument("--replay", action="store_true", help="walk the log already on disk a record at a time, a frame each, before following it live; any key skips to the end")
+    parser.add_argument("--replay-fps", type=float, default=60.0, help="frames per second while replaying (default 60)")
     args = parser.parse_args()
 
     n_process = args.n_process
@@ -2592,6 +2600,9 @@ def main():
     state = make_state()
     done_announced = False
     scroll_offset = 0
+    REPLAYING = args.replay
+    replay_frame = 1.0 / args.replay_fps if args.replay_fps > 0 else 0.0
+    next_frame = time.time()
 
     stdin_fd = sys.stdin.fileno()
     is_tty = sys.stdin.isatty()
@@ -2622,6 +2633,10 @@ def main():
                 _CPU_SAMPLER.reset()
                 done_announced = False
                 continue
+            if line is None and REPLAYING:
+                # Nothing left to read: the log on disk has been walked, so the
+                # replay is over and the dashboard follows it live from here.
+                REPLAYING = False
             if line is not None:
                 feed_line(state, line)
 
@@ -2630,10 +2645,13 @@ def main():
                 raise KeyboardInterrupt
             if any(action[0] == "units" for action in actions):
                 PIECE_UNITS = not PIECE_UNITS
+            if REPLAYING and actions:
+                REPLAYING = False
 
             now = time.time()
-            if actions or now - last_render >= 1.0:
-                if not state.done:
+            # A frame per record while replaying, the 1s gate once live.
+            if REPLAYING or actions or now - last_render >= 1.0:
+                if not REPLAYING and not state.done:
                     state.process_running = pi_process_running()
                     if state.process_running:
                         state.ever_saw_process = True
@@ -2644,6 +2662,18 @@ def main():
                         state.process_gone_since = now
                 scroll_offset = draw(state, scroll_offset, actions)
                 last_render = now
+            if REPLAYING:
+                # Paced to a deadline rather than by sleeping a frame at a
+                # time: reading the record and drawing it both take time, and
+                # sleeping the whole frame on top of them drifts slower than
+                # the rate asked for. A frame that overran by more than one
+                # frame gives up its debt instead of racing to catch up.
+                next_frame += replay_frame
+                slack = next_frame - time.time()
+                if slack > 0:
+                    time.sleep(slack)
+                elif slack < -replay_frame:
+                    next_frame = time.time()
 
             if state.done and state.ever_saw_process and not done_announced:
                 scroll_offset = draw(state, scroll_offset)
