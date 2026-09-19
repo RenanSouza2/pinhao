@@ -1181,15 +1181,19 @@ def dur_bucket(node):
     return CHAIN_BUCKET if node.kind == "CHAIN" else node.level
 
 
-def level_avg(events_by_level, level):
-    """The level's own average, or None where nothing has finished at this level
+def level_estimate(events_by_level, level):
+    """The slowest this level has run, or None where nothing has finished at it
     yet. Nothing stands in for it: cost climbs with each level up, so a figure
     borrowed from another level would read as a measurement while being wrong by
     the most exactly where the wait is longest. The row keeps its elapsed time,
     and the missing ETA is itself the reading - no task at this level has
-    finished yet, so there is nothing to measure one against."""
+    finished yet, so there is nothing to measure one against.
+
+    The slowest rather than the mean, because an ETA that grows is worse to read
+    than one that was too cautious: a run slows as it goes, so a mean of what
+    has already finished sits under what is running now four times in five."""
     events = events_by_level.get(level) if level is not None else None
-    return sum(events) / len(events) if events else None
+    return max(events) if events else None
 
 
 def is_single_thread_phase(micro):
@@ -1325,9 +1329,13 @@ def node_state(node, view):
 # A join's four multiplications take near-fixed shares of it, so the time spent
 # in the terms that have finished divides out to a prediction of the whole. It
 # needs no history, so it is there for the first join at a level, and it is
-# measured under the load the node is actually running in. Cumulative share
-# after each term, calibrated at TREE_PIECE_SIZE 22.
-TERM_CUM_SHARE = (0.247, 0.495, 0.738, 0.950)
+# measured under the load the node is actually running in.
+#
+# The tenth percentile of each share, not the median: dividing by a smaller
+# share predicts a longer node, and an ETA that counts down and lands early
+# reads better than one revised upward. At the median it under-predicts half
+# the time; here it covers nine joins in ten. Calibrated at TREE_PIECE_SIZE 22.
+TERM_CUM_SHARE = (0.223, 0.464, 0.715, 0.935)
 
 def node_detail(node, view, status):
     """The reading beside a node's label, as (head, tail). A node that is not
@@ -1366,7 +1374,7 @@ def node_detail(node, view, status):
             share = TERM_CUM_SHARE[min(node.terms_done, len(TERM_CUM_SHARE)) - 1]
             est = (node.term_start - node.start_time) / share
         if est is None:
-            est = level_avg(events_by_level, dur_bucket(node))
+            est = level_estimate(events_by_level, dur_bucket(node))
         if est is not None:
             remaining = est - node_elapsed
             # Signed against the level's average: unsigned is time
