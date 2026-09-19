@@ -2385,6 +2385,18 @@ RESTARTED = object()
 RUN_MARKER = "=== run "
 
 
+def is_node_event(line):
+    """A record that starts or finishes a node - the moments the tree changes
+    shape. The rest are micro-phases, which move a field on one row; replaying
+    a frame for each of those ties the run time to how much a run logged rather
+    than to how much it did."""
+    func, sep, rest = line.partition("|")
+    if not sep or not func.strip().startswith("node_"):
+        return False
+    action = rest.split("|", 1)[0].rpartition("]")[2].strip()
+    return action.startswith(("begin", "piece", "joined", "already stored"))
+
+
 def tail(path):
     """Yield whole log records as they land, RESTARTED when the file is replaced.
 
@@ -2588,7 +2600,7 @@ def main():
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
     parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
     parser.add_argument("--n-process", type=int, default=None, help="pi() n_process argument")
-    parser.add_argument("--replay", action="store_true", help="walk the log already on disk a record at a time, a frame each, before following it live; any key skips to the end")
+    parser.add_argument("--replay", action="store_true", help="walk the log already on disk before following it live, a frame each time a node starts or finishes; any key skips to the end")
     parser.add_argument("--replay-fps", type=float, default=60.0, help="frames per second while replaying (default 60)")
     args = parser.parse_args()
 
@@ -2649,8 +2661,9 @@ def main():
                 REPLAYING = False
 
             now = time.time()
-            # A frame per record while replaying, the 1s gate once live.
-            if REPLAYING or actions or now - last_render >= 1.0:
+            # A frame per node event while replaying, the 1s gate once live.
+            replay_due = REPLAYING and line is not None and is_node_event(line)
+            if replay_due or actions or now - last_render >= 1.0:
                 if REPLAYING:
                     # The log is the only authority while replaying: it is the
                     # evidence a run exists, and whether it was still going is
@@ -2668,7 +2681,7 @@ def main():
                         state.process_gone_since = now
                 scroll_offset = draw(state, scroll_offset, actions)
                 last_render = now
-            if REPLAYING:
+            if replay_due:
                 # Paced to a deadline rather than by sleeping a frame at a
                 # time: reading the record and drawing it both take time, and
                 # sleeping the whole frame on top of them drifts slower than
