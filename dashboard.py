@@ -259,7 +259,7 @@ class TreeNode:
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
         "weight", "subtree_weight", "own_units",
         "wrap_rows", "shrink_since", "wrap_width",
-        "terms_done", "term_start", "resumed",
+        "terms_done", "term_start", "term_threads", "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro", "micro_start",
     )
@@ -279,6 +279,7 @@ class TreeNode:
         self.wrap_width = None  # terminal width the current layout was chosen at
         self.terms_done = 0  # multiplications finished this run, for the ETA
         self.term_start = None  # log timestamp the current term's header carried
+        self.term_threads = None  # threads it held then, to rescale what is left
         self.resumed = False  # skipped a term a previous run had committed
         self.units_done = 0  # weight of the nodes finished in this subtree
         self.own_done = False
@@ -434,6 +435,7 @@ def mark_node_done(node):
     node.term = None
     node.terms_done = 0
     node.term_start = None
+    node.term_threads = None
     node.resumed = False
     node.micro = None
     node.micro_start = None
@@ -949,6 +951,7 @@ def handle_phase_line(state, content):
                 mark_own_units(tree_node, quarter)
         tree_node.term = term
         tree_node.term_start = float(m.group("ts"))
+        tree_node.term_threads = held_threads(tree_node)
     else:
         # Only a change of phase restarts the clock: a phase logged twice
         # running is still the same phase.
@@ -1223,6 +1226,15 @@ def blocked_threads(state):
     return waiting, io
 
 
+def held_threads(node):
+    """Threads the node is computing on: what it has picked up where that is
+    known, the booking otherwise. A donation it has not caught yet would read as
+    speed it does not have."""
+    if node.threads_live is not None:
+        return node.threads_live
+    return node.threads
+
+
 def expected_threads(node):
     """Threads a task's phase says should be busy: none while it waits on the
     disk lock, one while it is in a single-threaded phase, the threads it has
@@ -1337,6 +1349,13 @@ def node_state(node, view):
 # the time; here it covers nine joins in ten. Calibrated at TREE_PIECE_SIZE 22.
 TERM_CUM_SHARE = (0.223, 0.464, 0.715, 0.935)
 
+# Of the work still to come, the share that is multiplication and so answers to
+# a bigger thread grant. The rest is the loads, the write, and the add that
+# folds P1xR2 into R1xQ2 - all single-threaded whatever the booking, which is
+# why the last stretch is nothing but the add and gains nothing from a
+# donation. Indexed by terms already done, as TERM_CUM_SHARE is.
+TERM_REST_PARALLEL = (0.79, 0.77, 0.75, 0.00)
+
 def node_detail(node, view, status):
     """The reading beside a node's label, as (head, tail). A node that is not
     running has only a head: how far along the work below it is, or 100% once it
@@ -1372,7 +1391,18 @@ def node_detail(node, view, status):
         est = None
         if node.terms_done and node.term_start is not None and not node.resumed:
             share = TERM_CUM_SHARE[min(node.terms_done, len(TERM_CUM_SHARE)) - 1]
-            est = (node.term_start - node.start_time) / share
+            done = node.term_start - node.start_time
+            rest = done * (1.0 - share) / share
+            # The scheduler only ever adds threads, and it adds them to the
+            # last tasks left, so what is still to run can be on several times
+            # the grant the finished terms ran under. Only the multiplication
+            # in it answers to that: the serial remainder takes as long either
+            # way, and once R1xQ2 is done there is nothing but the add left.
+            now, then = held_threads(node), node.term_threads
+            if now and then and now != then:
+                par = TERM_REST_PARALLEL[min(node.terms_done, len(TERM_REST_PARALLEL)) - 1]
+                rest *= par * then / now + (1.0 - par)
+            est = done + rest
         if est is None:
             est = level_estimate(events_by_level, dur_bucket(node))
         if est is not None:
