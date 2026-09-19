@@ -2651,7 +2651,13 @@ def main():
             now = time.time()
             # A frame per record while replaying, the 1s gate once live.
             if REPLAYING or actions or now - last_render >= 1.0:
-                if not REPLAYING and not state.done:
+                if REPLAYING:
+                    # The log is the only authority while replaying: it is the
+                    # evidence a run exists, and whether it was still going is
+                    # what its own records say, not what is on the machine now.
+                    state.ever_saw_process = True
+                    state.process_running = not state.done
+                elif not state.done:
                     state.process_running = pi_process_running()
                     if state.process_running:
                         state.ever_saw_process = True
