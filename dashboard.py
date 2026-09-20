@@ -864,7 +864,9 @@ def handle_node_process(state, content):
         if dur is not None:
             dur = float(dur)
             state.join_events.append(dur)
-            bucket = dur_bucket(tree_node) if tree_node is not None else level
+            # Without a tree the kind is unknown, so the span's own width
+            # stands in; a chain lands in a bucket of its own there.
+            bucket = dur_bucket(tree_node) if tree_node is not None else leaves_covered(i0, i_max)
             state.join_events_by_level[bucket].append(dur)
         if tree_node is not None:
             mark_own_units(tree_node, tree_node.weight)
@@ -879,14 +881,12 @@ def handle_piece(state, content):
     state.pieces_done += 1
     state.piece_events.append(dur)
 
-    entry = state.active.get(int(m.group("pid")))
-    level = entry.get("level") if entry else None
-    if level is not None:
-        state.piece_events_by_level[level].append(dur)
+    i0, i_max = int(m.group("i0")), int(m.group("i_max"))
+    # Every piece is one leaf, so they all file together however deep they sit.
+    state.piece_events_by_level[leaves_covered(i0, i_max)].append(dur)
 
     if state.tree_by_key:
-        i0 = int(m.group("i0"))
-        tree_node = state.tree_by_key.get((i0, int(m.group("i_max"))))
+        tree_node = state.tree_by_key.get((i0, i_max))
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
             mark_own_units(tree_node, tree_node.weight)
@@ -1187,7 +1187,18 @@ CHAIN_BUCKET = "C"
 
 
 def dur_bucket(node):
-    return CHAIN_BUCKET if node.kind == "CHAIN" else node.level
+    """What a node's duration is filed under, and looked up by: how much it
+    covers, not where it sits. A level pools whatever happens to sit at that
+    depth - level 1 of this run held nodes of 1, 2, 4 and 8 leaves, an eightfold
+    spread averaged into one figure - while splitting identical work, the leaves
+    being scattered over four levels. Cost follows the size of the numbers, so
+    the leaf count is the thing to group by.
+
+    Chain nodes stay pooled: each is a different width, so keyed by size every
+    one of them would be the first of its kind and have nothing to measure
+    against, and their cost is near flat in width anyway - a chain node joins a
+    prefix against a single chunk."""
+    return CHAIN_BUCKET if node.kind == "CHAIN" else node.leaves_total
 
 
 def level_estimate(events_by_level, level):
