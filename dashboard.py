@@ -1203,6 +1203,14 @@ def dur_bucket(node):
     return CHAIN_BUCKET if node.kind == "CHAIN" else node.leaves_total
 
 
+# What the slowest of a bucket is stretched by. Nodes of one size run to much
+# the same length - the slowest leaf of a run beats the middling one by about a
+# tenth - so the slowest on its own is barely ahead of what comes next, and an
+# ETA built on it lands late as often as early. A twentieth on top covers most
+# of a run without padding the reading into uselessness.
+LEVEL_MARGIN = 1.05
+
+
 def level_estimate(events_by_level, level, threads=None):
     """The slowest this level has run, or None where nothing has finished at it
     yet. Nothing stands in for it: cost climbs with each level up, so a figure
@@ -1222,7 +1230,7 @@ def level_estimate(events_by_level, level, threads=None):
     bucket stands in rather than leaving the row with no reading at all."""
     def slowest(events):
         same = [d for d, t in events if t == threads] if threads is not None else []
-        return max(same) if same else max(d for d, _ in events)
+        return (max(same) if same else max(d for d, _ in events)) * LEVEL_MARGIN
 
     events = events_by_level.get(level) if level is not None else None
     if events:
@@ -1392,7 +1400,7 @@ def node_state(node, view):
 # share predicts a longer node, and an ETA that counts down and lands early
 # reads better than one revised upward. At the median it under-predicts half
 # the time; here it covers nine joins in ten. Calibrated at TREE_PIECE_SIZE 22.
-TERM_CUM_SHARE = (0.223, 0.464, 0.715, 0.935)
+TERM_CUM_SHARE = (0.223, 0.464, 0.715, 0.900)
 
 # Of the work still to come, the share that is multiplication and so answers to
 # a bigger thread grant. The rest is the loads, the write, and the add that
