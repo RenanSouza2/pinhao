@@ -867,7 +867,7 @@ def handle_node_process(state, content):
             # Without a tree the kind is unknown, so the span's own width
             # stands in; a chain lands in a bucket of its own there.
             bucket = dur_bucket(tree_node) if tree_node is not None else leaves_covered(i0, i_max)
-            state.join_events_by_level[bucket].append(dur)
+            state.join_events_by_level[bucket].append((dur, entry_threads(entry) if entry else None))
         if tree_node is not None:
             mark_own_units(tree_node, tree_node.weight)
             mark_node_done(tree_node)
@@ -883,7 +883,9 @@ def handle_piece(state, content):
 
     i0, i_max = int(m.group("i0")), int(m.group("i_max"))
     # Every piece is one leaf, so they all file together however deep they sit.
-    state.piece_events_by_level[leaves_covered(i0, i_max)].append(dur)
+    entry = state.active.get(int(m.group("pid")))
+    state.piece_events_by_level[leaves_covered(i0, i_max)].append(
+        (dur, entry_threads(entry) if entry else None))
 
     if state.tree_by_key:
         tree_node = state.tree_by_key.get((i0, i_max))
@@ -1201,7 +1203,7 @@ def dur_bucket(node):
     return CHAIN_BUCKET if node.kind == "CHAIN" else node.leaves_total
 
 
-def level_estimate(events_by_level, level):
+def level_estimate(events_by_level, level, threads=None):
     """The slowest this level has run, or None where nothing has finished at it
     yet. Nothing stands in for it: cost climbs with each level up, so a figure
     borrowed from another level would read as a measurement while being wrong by
@@ -1211,9 +1213,18 @@ def level_estimate(events_by_level, level):
 
     The slowest rather than the mean, because an ETA that grows is worse to read
     than one that was too cautious: a run slows as it goes, so a mean of what
-    has already finished sits under what is running now four times in five."""
+    has already finished sits under what is running now four times in five.
+
+    Samples carry the thread grant they ran under, and a node is measured
+    against the ones that held what it holds: the same work on four threads and
+    on one are different durations, and the grant is the only part of that the
+    log states outright. Where nothing has run at this grant yet, the whole
+    bucket stands in rather than leaving the row with no reading at all."""
     events = events_by_level.get(level) if level is not None else None
-    return max(events) if events else None
+    if not events:
+        return None
+    same = [d for d, t in events if t == threads] if threads is not None else []
+    return max(same) if same else max(d for d, _ in events)
 
 
 def is_single_thread_phase(micro):
@@ -1421,7 +1432,7 @@ def node_detail(node, view, status):
                 rest *= par * then / now + (1.0 - par)
             est = done + rest
         if est is None:
-            est = level_estimate(events_by_level, dur_bucket(node))
+            est = level_estimate(events_by_level, dur_bucket(node), held_threads(node))
         if est is not None:
             remaining = est - node_elapsed
             # Signed against the level's average: unsigned is time
