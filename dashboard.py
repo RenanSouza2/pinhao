@@ -1220,11 +1220,28 @@ def level_estimate(events_by_level, level, threads=None):
     on one are different durations, and the grant is the only part of that the
     log states outright. Where nothing has run at this grant yet, the whole
     bucket stands in rather than leaving the row with no reading at all."""
+    def slowest(events):
+        same = [d for d, t in events if t == threads] if threads is not None else []
+        return max(same) if same else max(d for d, _ in events)
+
     events = events_by_level.get(level) if level is not None else None
-    if not events:
+    if events:
+        return slowest(events)
+    # Nothing of this size has finished yet - the first join at a new size,
+    # which is also the longest wait on screen. Scale the largest size below it
+    # by the ratio between them: cost runs near linear in size (17.0, 19.0 then
+    # 20.4 seconds a leaf at 2, 4 and 8 leaves here), and the slowest of that
+    # smaller bucket already carries the slack the rest of the curve needs.
+    # Only within one kind of work - pieces and joins keep separate books, and
+    # a chain's bucket is not a size at all.
+    if not isinstance(level, int):
         return None
-    same = [d for d, t in events if t == threads] if threads is not None else []
-    return max(same) if same else max(d for d, _ in events)
+    below = [n for n, v in events_by_level.items()
+             if isinstance(n, int) and 0 < n < level and v]
+    if not below:
+        return None
+    nearest = max(below)
+    return slowest(events_by_level[nearest]) * level / nearest
 
 
 def is_single_thread_phase(micro):
