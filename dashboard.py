@@ -2636,13 +2636,13 @@ def draw(state, scroll_offset=0, actions=()):
     if REPLAYING:
         # The replay's own bar, not the run's: the run's progress is in the
         # completion box and is about the pi being computed, this is about how
-        # much of the log has been walked.
-        label = f" replay {fmt_num(100.0 * REPLAY_PROGRESS)}% "
-        tail_txt = "  any key skips "
-        bar_w = max(4, cols - visible_len(label) - len(tail_txt) - 2)
-        footer = label + render_bar(
-            bar_w, (REPLAY_PROGRESS, 1.0 - REPLAY_PROGRESS), BAR_FULL + BAR_NONE,
-        ) + tail_txt
+        # much of the log has been walked. Bare, and in the green the running
+        # node and its computing phases already carry - a replay is the whole
+        # screen moving, so the one line saying so needs no words on it.
+        footer = render_bar(
+            max(4, cols - 2), (REPLAY_PROGRESS, 1.0 - REPLAY_PROGRESS),
+            BAR_FULL + BAR_NONE, colour=MUL_ON,
+        )
     elif max_offset > 0:
         footer = (
             f" lines {scroll_offset + 1}-{min(scroll_offset + body_rows, len(all_lines))}/{len(all_lines)}"
