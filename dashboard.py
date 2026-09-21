@@ -2176,7 +2176,20 @@ def _completion_rows(state, bar_w):
     if not state.done and state.log_start and state.log_time and done_units:
         frac = done_units / total_units
         if frac >= 0.05:
-            run_elapsed = state.log_time - state.log_start
+            # The log's clock only moves when a line lands, and a run is quiet
+            # for minutes at a time inside a long multiplication - two fifths
+            # of one 16M run sat in gaps over five seconds, the longest 1:24 -
+            # so reading it straight leaves the time left standing still.
+            #
+            # The log's clock carried forward by however long the dashboard has
+            # been waiting for the next line: it ticks through a quiet stretch,
+            # and it stays anchored to the log rather than to today, so a log
+            # opened long after its run still reads as that run. Replaying,
+            # only the log knows the time at all.
+            clock = state.log_time
+            if not DISPLAY.replaying and state.last_line_time is not None:
+                clock += max(0.0, time.time() - state.last_line_time)
+            run_elapsed = clock - state.log_start
             # Taken once per step of the bar and held, so the reading counts
             # down with the clock in between. Recomputing it every frame would
             # divide a growing elapsed by a standing fraction, and the time
@@ -2725,9 +2738,9 @@ def read_pending_input(fd):
 
 def parse_scroll_actions(raw):
     """Turn raw stdin bytes into a list of scroll actions: ("delta", +-1),
-    ("page", +-1), ("top",), ("bottom",) or ("quit",). Arrow/PgUp/PgDn/Home/End
-    keys arrive as multi-byte "\\x1b[..." escape sequences; j/k/g/G/q are
-    plain single bytes."""
+    ("page", +-1), ("top",), ("bottom",), ("skip",) or ("quit",).
+    Arrow/PgUp/PgDn/Home/End keys arrive as multi-byte "\\x1b[..." escape
+    sequences; j/k/g/G/p/q and Return are plain single bytes."""
     actions = []
     i, n = 0, len(raw)
     while i < n:
@@ -2772,6 +2785,8 @@ def parse_scroll_actions(raw):
             actions.append(("bottom",))
         elif ch == "p":
             actions.append(("units",))
+        elif b in (0x0D, 0x0A):  # Return, however the terminal sends it
+            actions.append(("skip",))
         elif ch == "q" or b == 0x03:  # q or Ctrl-C (ISIG is off in cbreak+no-echo mode)
             actions.append(("quit",))
         i += 1
@@ -2866,8 +2881,8 @@ def parse_args():
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
     parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
     parser.add_argument("--n-process", type=int, default=None, help="pi() n_process argument")
-    parser.add_argument("--replay", action="store_true", help="walk the log already on disk before following it live, a frame each time a node starts or finishes; any key skips to the end")
-    parser.add_argument("--replay-fps", type=float, default=60.0, help="frames per second while replaying (default 60)")
+    parser.add_argument("--no-replay", action="store_true", help="jump straight to the end of the log instead of walking it first")
+    parser.add_argument("--replay-fps", type=float, default=60.0, help="frames per second while walking the log (default 60)")
     return parser.parse_args()
 
 
@@ -2904,7 +2919,7 @@ def main():
     state = make_state()
     done_announced = False
     scroll_offset = 0
-    DISPLAY.replaying = args.replay
+    DISPLAY.replaying = not args.no_replay
     # Records already on disk when the dashboard opened: the replay's extent.
     try:
         replay_total = sum(1 for _ in open(args.log_path, errors="replace")) if DISPLAY.replaying else 0
@@ -2948,7 +2963,10 @@ def main():
                 raise KeyboardInterrupt
             if any(action[0] == "units" for action in actions):
                 DISPLAY.pieces = not DISPLAY.pieces
-            if DISPLAY.replaying and actions:
+            if DISPLAY.replaying and any(a[0] == "skip" for a in actions):
+                # Skipping stops the animation, not the reading: every record
+                # still goes through feed_line, so the tree that lands is the
+                # one the whole log describes.
                 DISPLAY.replaying = False
 
             now = time.time()
