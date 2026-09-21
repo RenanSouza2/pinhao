@@ -1617,10 +1617,13 @@ TREE_RIGHT_MARGIN = TREE_INSET
 # layout breaks at once, or the row runs off the screen.
 TREE_UNWRAP_HOLD = 4.0
 
-# Laid where the tree runs past the top or the bottom of what is on screen.
-# One glyph at the tree's own margin, in the frame dim: it is chrome, and a row
-# spent saying there is more would be a row of the tree not shown.
-TREE_MORE = "\u22ee"
+# The scroll track down the right of the tree, and the thumb riding it. A mark
+# above and below would have cost two rows of tree to say the tree goes on; a
+# column says it instead, and says how far through it the window sits. The
+# thumb takes the measured grey against the frame dim of the track, so the pair
+# read as one piece of chrome.
+TREE_TRACK = "\u2502"
+TREE_THUMB = "\u2588"
 
 # What a boxed reading costs in columns: "\u2502 " on the left, " \u2502" on the right.
 TREE_BOX_CHROME = 4
@@ -2633,9 +2636,7 @@ def draw(state, scroll_offset=0, actions=()):
         pinned = 0
     head, body = all_lines[:pinned], all_lines[pinned:]
     body_rows = max(1, rows - 1 - len(head))
-    # One row goes to the "more above" mark as soon as anything is scrolled
-    # past, so the last line is still reachable with the mark on screen.
-    max_offset = max(0, len(body) - max(1, body_rows - 1))
+    max_offset = max(0, len(body) - body_rows)
 
     for action in actions:
         kind = action[0]
@@ -2649,20 +2650,19 @@ def draw(state, scroll_offset=0, actions=()):
             scroll_offset = max_offset
     scroll_offset = max(0, min(scroll_offset, max_offset))
 
-    above = scroll_offset > 0
-    room = body_rows - (1 if above else 0)
-    below = scroll_offset + room < len(body)
-    if below:
-        room -= 1
-    visible = body[scroll_offset:scroll_offset + room]
-    mark = " " * TREE_INSET + TREE_BOX_ON + TREE_MORE + OFF
-
+    visible = body[scroll_offset:scroll_offset + body_rows]
     content = [_fit_visible(line, cols) for line in head]
-    if above:
-        content.append(_fit_visible(mark, cols))
-    content += [_fit_visible(line, cols) for line in visible]
-    if below:
-        content.append(_fit_visible(mark, cols))
+    if max_offset:
+        # Thumb sized by how much of the tree is on screen and placed by how
+        # far down it, so it reaches the foot exactly when the last line does.
+        thumb = max(1, round(body_rows * body_rows / len(body)))
+        pos = round(scroll_offset * (body_rows - thumb) / max_offset)
+        for i, line in enumerate(visible):
+            glyph = (f"{RSS_ON}{TREE_THUMB}" if pos <= i < pos + thumb
+                     else f"{TREE_BOX_ON}{TREE_TRACK}")
+            content.append(_fit_visible(line, cols - 2) + " " + glyph + OFF)
+    else:
+        content += [_fit_visible(line, cols) for line in visible]
     content += [" " * cols] * (rows - 1 - len(content))
 
     if REPLAYING:
