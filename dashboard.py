@@ -2258,12 +2258,14 @@ def _disk_rows(state):
 
 
 def render(state):
+    """The frame, as (text, pinned) - pinned being how many leading lines stay
+    put while the rest scrolls under them."""
     process_gone_recently = (
         state.process_gone_since is not None
         and time.time() - state.process_gone_since < DEAD_GRACE_SECONDS
     )
     if not state.ever_saw_process or (not state.process_running and not state.done and not process_gone_recently):
-        return render_status_screen(state)
+        return render_status_screen(state), 0
 
     lines = []
     lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
@@ -2401,6 +2403,11 @@ def render(state):
             for title, rows, _ in present:
                 lines.extend(inset + row for row in render_box(title, rows, avail))
 
+    # Everything to here is the frame's fixed head - the boxes are a reading of
+    # the whole run and go on meaning that wherever the tree is scrolled to, so
+    # scrolling moves the tree under them rather than carrying them off screen.
+    pinned = len(lines)
+
     # Only while the tree is being walked: past that every node is done and the
     # view says nothing the completion box doesn't.
     if state.phase == "splitting":
@@ -2439,7 +2446,7 @@ def render(state):
         elif state.tree_skipped_reason:
             lines.append(" " * TREE_INSET + f"tree: {state.tree_skipped_reason}")
 
-    return "\n".join(lines)
+    return "\n".join(lines), pinned
 
 
 RESTARTED = object()
@@ -2613,9 +2620,15 @@ def draw(state, scroll_offset=0, actions=()):
     footer whenever the content taller than the terminal. Returns the
     clamped scroll_offset so the caller can carry it into the next frame."""
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    all_lines = render(state).split("\n")
-    body_rows = max(1, rows - 1)
-    max_offset = max(0, len(all_lines) - body_rows)
+    text, pinned = render(state)
+    all_lines = text.split("\n")
+    # A head taller than the screen would leave nothing to scroll, so past that
+    # the whole frame scrolls as one rather than pinning itself out of view.
+    if pinned > rows - 4:
+        pinned = 0
+    head, body = all_lines[:pinned], all_lines[pinned:]
+    body_rows = max(1, rows - 1 - len(head))
+    max_offset = max(0, len(body) - body_rows)
 
     for action in actions:
         kind = action[0]
@@ -2629,9 +2642,10 @@ def draw(state, scroll_offset=0, actions=()):
             scroll_offset = max_offset
     scroll_offset = max(0, min(scroll_offset, max_offset))
 
-    visible = all_lines[scroll_offset:scroll_offset + body_rows]
-    content = [_fit_visible(line, cols) for line in visible]
-    content += [" " * cols] * (body_rows - len(content))
+    visible = body[scroll_offset:scroll_offset + body_rows]
+    content = [_fit_visible(line, cols) for line in head]
+    content += [_fit_visible(line, cols) for line in visible]
+    content += [" " * cols] * (rows - 1 - len(content))
 
     if REPLAYING:
         # The replay's own bar, not the run's: the run's progress is in the
@@ -2639,13 +2653,15 @@ def draw(state, scroll_offset=0, actions=()):
         # much of the log has been walked. Bare, and in the green the running
         # node and its computing phases already carry - a replay is the whole
         # screen moving, so the one line saying so needs no words on it.
+        # render_bar frames itself in brackets; the footer wants only the bar,
+        # so the frame is taken back off.
         footer = render_bar(
-            max(4, cols - 2), (REPLAY_PROGRESS, 1.0 - REPLAY_PROGRESS),
+            cols, (REPLAY_PROGRESS, 1.0 - REPLAY_PROGRESS),
             BAR_FULL + BAR_NONE, colour=MUL_ON,
-        )
+        ).removeprefix("[").removesuffix("]")
     elif max_offset > 0:
         footer = (
-            f" lines {scroll_offset + 1}-{min(scroll_offset + body_rows, len(all_lines))}/{len(all_lines)}"
+            f" tree {scroll_offset + 1}-{min(scroll_offset + body_rows, len(body))}/{len(body)}"
             "   ↑/↓ j/k scroll   PgUp/PgDn page   g/G top/bottom   p units   q quit "
         )
     else:
