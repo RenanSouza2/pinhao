@@ -262,14 +262,18 @@ class Display:
     and found together rather than reached for by name from anywhere.
 
     pieces     tree labels counted in pieces rather than raw indices ("p")
-    replaying  walking a log already written, so the log's clock drives the
-               frame and the machine's own readings are left alone
-    progress   how far through that log, 0.0 to 1.0, for the footer's bar"""
+    walking    still reading the log that was on disk when the dashboard
+               opened, whether or not it is being animated
+    replaying  animating that walk, so the log's clock drives the frame and
+               the machine's own readings are left alone. Return turns this
+               off; walking stays on until the backlog runs out
+    progress   how far through the backlog, 0.0 to 1.0, for the footer's bar"""
 
-    __slots__ = ("pieces", "replaying", "progress")
+    __slots__ = ("pieces", "walking", "replaying", "progress")
 
     def __init__(self):
         self.pieces = True
+        self.walking = False
         self.replaying = False
         self.progress = 0.0
 
@@ -1732,6 +1736,11 @@ TREE_UNWRAP_HOLD = 4.0
 # column says it instead, and says how far through it the window sits. The
 # thumb takes the measured grey against the frame dim of the track, so the pair
 # read as one piece of chrome.
+# How often the footer's bar is redrawn while the log is being read at full
+# speed, the animation having been skipped. Short enough that the bar fills
+# rather than jumping, long enough that drawing it is not the slow part.
+WALK_FRAME = 0.05
+
 TREE_TRACK = "\u2502"
 TREE_THUMB = "\u2588"
 
@@ -2836,8 +2845,8 @@ def draw(state, scroll_offset=0, actions=()):
         content += [_fit_visible(line, cols) for line in visible]
     content += [" " * cols] * (rows - 1 - len(content))
 
-    if DISPLAY.replaying:
-        # The replay's own bar, not the run's: the run's progress is in the
+    if DISPLAY.walking:
+        # The walk's own bar, not the run's: the run's progress is in the
         # completion box and is about the pi being computed, this is about how
         # much of the log has been walked. Bare, and in the green the running
         # node and its computing phases already carry - a replay is the whole
@@ -2922,9 +2931,10 @@ def main():
     DISPLAY.replaying = not args.no_replay
     # Records already on disk when the dashboard opened: the replay's extent.
     try:
-        replay_total = sum(1 for _ in open(args.log_path, errors="replace")) if DISPLAY.replaying else 0
+        replay_total = sum(1 for _ in open(args.log_path, errors="replace"))
     except OSError:
         replay_total = 0
+    DISPLAY.walking = replay_total > 0
     replay_seen = 0
     replay_frame = 1.0 / args.replay_fps if args.replay_fps > 0 else 0.0
     next_frame = time.time()
@@ -2948,13 +2958,18 @@ def main():
                 _CPU_SAMPLER.reset()
                 done_announced = False
                 continue
-            if line is None and DISPLAY.replaying:
+            if line is None and DISPLAY.walking:
                 # Nothing left to read: the log on disk has been walked, so the
-                # replay is over and the dashboard follows it live from here.
+                # bar goes and the dashboard follows the log live from here.
+                DISPLAY.walking = False
                 DISPLAY.replaying = False
+                DISPLAY.progress = 1.0
             if line is not None:
                 feed_line(state, line)
-                if DISPLAY.replaying and replay_total:
+                if DISPLAY.walking:
+                    # Counted whether or not the walk is being animated:
+                    # skipping still has a backlog to get through, and on a
+                    # large log that is seconds of reading worth watching.
                     replay_seen += 1
                     DISPLAY.progress = min(1.0, replay_seen / replay_total)
 
@@ -2971,8 +2986,12 @@ def main():
 
             now = time.time()
             # A frame per node event while replaying, the 1s gate once live.
+            # In between - a walk that has been skipped - the loop is reading
+            # flat out and only the bar is moving, so it is drawn often enough
+            # to fill visibly rather than in one jump at the end.
             replay_due = DISPLAY.replaying and line is not None and is_node_event(line)
-            if replay_due or actions or now - last_render >= 1.0:
+            gate = WALK_FRAME if (DISPLAY.walking and not DISPLAY.replaying) else 1.0
+            if replay_due or actions or now - last_render >= gate:
                 if DISPLAY.replaying:
                     # The log is the only authority while replaying: it is the
                     # evidence a run exists, and whether it was still going is
