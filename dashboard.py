@@ -6,11 +6,14 @@ Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 
 import argparse
 import collections
+import ctypes
+import ctypes.util
 import os
 import re
 import select
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import termios
@@ -553,40 +556,111 @@ def get_root_pid():
     return pid
 
 
-def get_pid_stats(pids):
-    """pid -> (RSS bytes, cumulative CPU seconds), for the given live pids
-    (missing/dead pids are omitted). Both readings come off one ps call: the
-    dashboard wants them over the same pid set on the same frame."""
-    pids = list(pids)
-    if not pids:
-        return {}
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "pid=,rss=,time=", "-p", ",".join(str(p) for p in pids)],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-    except OSError:
-        return {}
-    if out.returncode != 0:
-        return {}
-    result = {}
-    for line in out.stdout.splitlines():
-        parts = line.split()
-        if len(parts) != 3:
-            continue
-        try:
-            result[int(parts[0])] = (int(parts[1]) * 1024, _parse_ps_clock(parts[2]))
-        except ValueError:
-            continue
-    return result
-
-
-# ps reports cumulative CPU time to the second, so a delta taken across one
-# frame is almost all quantisation. Deltas are taken against the oldest sample
-# still inside CPU_WINDOW, and a pid younger than CPU_MIN_SPAN gets no reading
-# at all rather than a rounded one.
+# Deltas are taken against the oldest sample still inside CPU_WINDOW, and a pid
+# younger than CPU_MIN_SPAN gets no reading at all rather than one differenced
+# over too short a span to mean anything.
 CPU_WINDOW = 3.0
 CPU_MIN_SPAN = 1.5
+
+
+# rusage_info_v2: 16 bytes of uuid, then ten uint64 (v0), six more (v1), and
+# the two disk counters (v2). Only the offsets that are read here are named.
+_RUSAGE_INFO_V2 = 2
+_RUSAGE_TIME_OFFSET = 16    # user_time then system_time, nanoseconds
+_RUSAGE_RSS_OFFSET = 64     # resident_size
+_RUSAGE_DISKIO_OFFSET = 144  # bytes read then bytes written
+_libproc = None
+
+
+def _pid_counters_macos(pid):
+    global _libproc
+    if _libproc is None:
+        try:
+            _libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
+            _libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            _libproc.proc_pid_rusage.restype = ctypes.c_int
+        except OSError:
+            _libproc = False
+    if not _libproc:
+        return None
+    buf = ctypes.create_string_buffer(1024)  # room for any flavor the kernel writes
+    if _libproc.proc_pid_rusage(pid, _RUSAGE_INFO_V2, ctypes.byref(buf)) != 0:
+        return None
+    user, system = struct.unpack_from("<QQ", buf.raw, _RUSAGE_TIME_OFFSET)
+    rss, = struct.unpack_from("<Q", buf.raw, _RUSAGE_RSS_OFFSET)
+    read, written = struct.unpack_from("<QQ", buf.raw, _RUSAGE_DISKIO_OFFSET)
+    return rss, (user + system) / 1e9, read, written
+
+
+def _pid_counters_linux(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            # comm can hold spaces and parens, so the fields are counted from
+            # the last ")" - utime and stime are the 14th and 15th overall.
+            fields = f.read().rpartition(")")[2].split()
+        cpu = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+        with open(f"/proc/{pid}/statm") as f:
+            rss = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        read = written = 0
+        with open(f"/proc/{pid}/io") as f:
+            for line in f:
+                name, _, val = line.partition(":")
+                if name == "read_bytes":
+                    read = int(val)
+                elif name == "write_bytes":
+                    written = int(val)
+        return rss, cpu, read, written
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def get_pid_counters(pids):
+    """pid -> (RSS bytes, cumulative CPU seconds, bytes read, bytes written)
+    for the given live pids; missing or dead pids are omitted.
+
+    Asked of the kernel, which keeps all four for every process, rather than
+    of ps - one syscall a pid against one process spawn, and ps could not have
+    answered for the disk counters at all. The CPU time comes back in
+    nanoseconds here where ps rounded it to the second.
+
+    Returns {} where the platform keeps no such record."""
+    reader = _pid_counters_linux if sys.platform.startswith("linux") else _pid_counters_macos
+    out = {}
+    for pid in pids:
+        got = reader(pid)
+        if got is not None:
+            out[pid] = got
+    return out
+
+
+class IoSampler:
+    """Bytes a second per pid, differenced from the cumulative counters."""
+
+    def __init__(self):
+        self.prev = {}  # pid -> (wall clock, read, written)
+
+    def reset(self):
+        self.prev.clear()
+
+    def update(self, now, counts):
+        rates = {}
+        for pid, (rd, wr) in counts.items():
+            was = self.prev.get(pid)
+            if was is not None:
+                span = now - was[0]
+                if span >= CPU_MIN_SPAN:
+                    rates[pid] = (max(0.0, (rd - was[1]) / span),
+                                  max(0.0, (wr - was[2]) / span))
+                    self.prev[pid] = (now, rd, wr)
+            else:
+                self.prev[pid] = (now, rd, wr)
+        for pid in list(self.prev):
+            if pid not in counts:
+                del self.prev[pid]
+        return rates
+
+
+_IO_SAMPLER = IoSampler()
 
 
 class CpuSampler:
@@ -659,6 +733,7 @@ class State:
         self.start_time = None
         self.last_line_time = None
         self.log_time = None  # newest log timestamp seen, the clock a replay runs on
+        self.log_start = None  # first log timestamp seen, the run's own zero
         self.lines_seen = 0
         self.cursor_lines = 0   # lines_seen when the cursor last stepped
         self.cursor_phase = 0   # index into CURSOR_PULSE
@@ -1173,6 +1248,8 @@ def feed_line(state, line):
         ts = float(m.group("ts"))
         # Only ever forward: workers stamp a line before writing it, so lines
         # interleave and an older stamp would walk the clock backwards.
+        if state.log_start is None:
+            state.log_start = ts
         if state.log_time is None or ts > state.log_time:
             state.log_time = ts
         thread_tick(state, ts)
@@ -1261,6 +1338,12 @@ def level_estimate(events_by_level, level, threads=None):
         return None
     nearest = max(below)
     return slowest(events_by_level[nearest]) * level / nearest
+
+
+def is_io_phase(micro):
+    """Phases that move bytes to or from disk, as against the ones that only
+    wait or compute."""
+    return micro is not None and (micro.startswith("loading") or micro == "writing")
 
 
 def is_single_thread_phase(micro):
@@ -1372,7 +1455,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now piece_events_by_level join_events_by_level"
-    " pid_rss pid_cpu disk_lock_enabled starved chunk_span index_max size width",
+    " pid_rss pid_cpu pid_io disk_lock_enabled starved chunk_span index_max size width",
 )
 
 
@@ -1401,6 +1484,13 @@ def node_state(node, view):
         return "\u00b7", "in_progress", None, NODE_PENDING
     return "\u00b7", "pending", None, NODE_PENDING
 
+
+# What the whole run's estimate is stretched by. The work left does not take
+# as long per unit as the work done: the tree drains to a chain that fuses one
+# chunk at a time, with nothing to run beside it, so a straight reading of
+# elapsed over fraction-done comes in under the truth - at 16M it covered 1% of
+# frames, at a tenth over it covers 82%.
+RUN_MARGIN = 1.10
 
 # A join's four multiplications take near-fixed shares of it, so the time spent
 # in the terms that have finished divides out to a prediction of the whole. It
@@ -1537,6 +1627,14 @@ def node_detail(node, view, status):
             # reading, how long it has been stuck in it is the check on it.
             if node.micro_start is not None:
                 micro += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
+            # What the phase is moving, while it is one that moves anything.
+            # Read and write are reported apart, so the one the phase is in is
+            # the one shown - a load that is also writing is not a thing.
+            rate = view.pid_io.get(node.pid) if node.pid is not None else None
+            if rate is not None and is_io_phase(node.micro):
+                moved = rate[1] if node.micro == "writing" else rate[0]
+                if moved > 0:
+                    micro += f" {IO_ATTN_ON}{fmt_bytes(moved)}/s{OFF}"
             parts.append(micro)
     return "", [detail] + parts
 
@@ -2005,7 +2103,10 @@ def _completion_rows(state, bar_w):
     rows = []
     phase_line = "phase:".ljust(LABEL_W) + state.phase
     if not state.done and state.phase != "splitting" and state.phase_start_time:
-        phase_line += f"   {fmt_duration(time.time() - state.phase_start_time)} elapsed"
+        # The log's clock while replaying: phase_start_time is a log stamp, and
+        # wall clock against it measures the gap to today, not the phase.
+        clock = state.log_time if (REPLAYING and state.log_time) else time.time()
+        phase_line += f"   {fmt_duration(clock - state.phase_start_time)} elapsed"
     rows.append(phase_line)
     if not state.total_pieces:
         rows.append(
@@ -2045,7 +2146,25 @@ def _completion_rows(state, bar_w):
     # a count of anything the reader can point at - printing them as a tally
     # would read more exact than they are. The pieces/joins line above is where
     # the countable figures live.
-    rows[0] = rows[0].ljust(LABEL_W + bar_w + 2 - len(f"{fmt_num(pct)}%")) + f"{fmt_num(pct)}%"
+    # Time left for the whole run, from how long the weight already done took.
+    # Held back until a twentieth is in: before that the fraction is too coarse
+    # to divide by and the reading swings by hours between frames.
+    left = ""
+    if not state.done and state.log_start and state.log_time and done_units:
+        frac = done_units / total_units
+        if frac >= 0.05:
+            run_elapsed = state.log_time - state.log_start
+            remaining = run_elapsed / frac * RUN_MARGIN - run_elapsed
+            if remaining > 0:
+                left = f"   {fmt_duration(remaining)} left"
+    pct_str = f"{fmt_num(pct)}%"
+    width = LABEL_W + bar_w + 2
+    # The percentage is right-aligned on the bar's own edge, so anything that
+    # would push the row past it is dropped rather than carried over - and of
+    # the two the time left is the one the bar below does not already say.
+    if len(rows[0]) + len(left) + len(pct_str) <= width:
+        rows[0] += left
+    rows[0] = rows[0].ljust(width - len(pct_str)) + pct_str
     rows.append(" " * LABEL_W + bar)
     return rows
 
@@ -2326,16 +2445,17 @@ def render(state):
 
     lines.append("")
 
-    pid_stats = {} if REPLAYING else get_pid_stats(state.active.keys())
-    if not REPLAYING and not pid_stats and state.phase in ("dividing", "displaying"):
+    counters = {} if REPLAYING else get_pid_counters(state.active.keys())
+    if not REPLAYING and not counters and state.phase in ("dividing", "displaying"):
         # No fork()ed workers left to read RSS from (see active_threads) - the
         # root process is the one actually holding the memory these phases use.
         if state.root_pid is None:
             state.root_pid = get_root_pid()
         if state.root_pid is not None:
-            pid_stats = get_pid_stats((state.root_pid,))
-    pid_rss = {pid: rss for pid, (rss, _) in pid_stats.items()}
-    pid_cpu = _CPU_SAMPLER.update(now, {pid: cpu for pid, (_, cpu) in pid_stats.items()})
+            counters = get_pid_counters((state.root_pid,))
+    pid_rss = {pid: c[0] for pid, c in counters.items()}
+    pid_cpu = _CPU_SAMPLER.update(now, {pid: c[1] for pid, c in counters.items()})
+    pid_io = _IO_SAMPLER.update(now, {pid: (c[2], c[3]) for pid, c in counters.items()})
     cpu_total = sum(pid_cpu.values()) if pid_cpu else None
 
     # Geometry first: completion, threads, ram and disk each need a column
@@ -2446,7 +2566,7 @@ def render(state):
             render_tree(state.tree_root, TreeView(
                 tree_lines, tree_now,
                 state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
-                state.disk_lock_enabled is not False, starved,
+                pid_io, state.disk_lock_enabled is not False, starved,
                 state.tree_chunk_span, state.index_max,
                 state.config.get("size", state.explicit_size), term_w - TREE_INSET,
             ))
