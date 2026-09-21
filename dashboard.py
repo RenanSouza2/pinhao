@@ -634,29 +634,32 @@ def get_pid_counters(pids):
 
 
 class IoSampler:
-    """Bytes a second per pid, differenced from the cumulative counters."""
+    """Bytes a second per pid, differenced from the cumulative counters.
+
+    Shaped like CpuSampler: a window of samples, each reading differenced
+    against the oldest still spanning it. Resetting the baseline on every
+    reading instead would leave the next CPU_MIN_SPAN with nothing to measure,
+    and the figure would come and go from the row every few frames."""
 
     def __init__(self):
-        self.prev = {}  # pid -> (wall clock, read, written)
+        self.samples = collections.deque()  # (wall clock, {pid: (read, written)})
 
     def reset(self):
-        self.prev.clear()
+        self.samples.clear()
 
     def update(self, now, counts):
+        self.samples.append((now, counts))
+        while len(self.samples) > 2 and self.samples[1][0] <= now - CPU_WINDOW:
+            self.samples.popleft()
         rates = {}
-        for pid, (rd, wr) in counts.items():
-            was = self.prev.get(pid)
-            if was is not None:
-                span = now - was[0]
-                if span >= CPU_MIN_SPAN:
-                    rates[pid] = (max(0.0, (rd - was[1]) / span),
-                                  max(0.0, (wr - was[2]) / span))
-                    self.prev[pid] = (now, rd, wr)
-            else:
-                self.prev[pid] = (now, rd, wr)
-        for pid in list(self.prev):
-            if pid not in counts:
-                del self.prev[pid]
+        for pid, (read, written) in counts.items():
+            for base_t, base in self.samples:
+                span = now - base_t
+                if pid in base and span >= CPU_MIN_SPAN:
+                    was = base[pid]
+                    rates[pid] = (max(0.0, (read - was[0]) / span),
+                                  max(0.0, (written - was[1]) / span))
+                    break
         return rates
 
 
@@ -734,6 +737,8 @@ class State:
         self.last_line_time = None
         self.log_time = None  # newest log timestamp seen, the clock a replay runs on
         self.log_start = None  # first log timestamp seen, the run's own zero
+        self.run_estimate = None  # predicted total run time, held between readings
+        self.run_estimate_at = None  # the done_units it was taken at
         self.lines_seen = 0
         self.cursor_lines = 0   # lines_seen when the cursor last stepped
         self.cursor_phase = 0   # index into CURSOR_PULSE
@@ -2154,7 +2159,16 @@ def _completion_rows(state, bar_w):
         frac = done_units / total_units
         if frac >= 0.05:
             run_elapsed = state.log_time - state.log_start
-            remaining = run_elapsed / frac * RUN_MARGIN - run_elapsed
+            # Taken once per step of the bar and held, so the reading counts
+            # down with the clock in between. Recomputing it every frame would
+            # divide a growing elapsed by a standing fraction, and the time
+            # left would climb until the next node landed.
+            if (state.run_estimate_at != done_units
+                    or state.run_estimate is None
+                    or state.run_estimate <= run_elapsed):
+                state.run_estimate = run_elapsed / frac * RUN_MARGIN
+                state.run_estimate_at = done_units
+            remaining = state.run_estimate - run_elapsed
             if remaining > 0:
                 left = f"   {fmt_duration(remaining)} left"
     pct_str = f"{fmt_num(pct)}%"
