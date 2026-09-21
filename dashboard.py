@@ -1617,6 +1617,11 @@ TREE_RIGHT_MARGIN = TREE_INSET
 # layout breaks at once, or the row runs off the screen.
 TREE_UNWRAP_HOLD = 4.0
 
+# Laid where the tree runs past the top or the bottom of what is on screen.
+# One glyph at the tree's own margin, in the frame dim: it is chrome, and a row
+# spent saying there is more would be a row of the tree not shown.
+TREE_MORE = "\u22ee"
+
 # What a boxed reading costs in columns: "\u2502 " on the left, " \u2502" on the right.
 TREE_BOX_CHROME = 4
 
@@ -2628,7 +2633,9 @@ def draw(state, scroll_offset=0, actions=()):
         pinned = 0
     head, body = all_lines[:pinned], all_lines[pinned:]
     body_rows = max(1, rows - 1 - len(head))
-    max_offset = max(0, len(body) - body_rows)
+    # One row goes to the "more above" mark as soon as anything is scrolled
+    # past, so the last line is still reachable with the mark on screen.
+    max_offset = max(0, len(body) - max(1, body_rows - 1))
 
     for action in actions:
         kind = action[0]
@@ -2642,9 +2649,20 @@ def draw(state, scroll_offset=0, actions=()):
             scroll_offset = max_offset
     scroll_offset = max(0, min(scroll_offset, max_offset))
 
-    visible = body[scroll_offset:scroll_offset + body_rows]
+    above = scroll_offset > 0
+    room = body_rows - (1 if above else 0)
+    below = scroll_offset + room < len(body)
+    if below:
+        room -= 1
+    visible = body[scroll_offset:scroll_offset + room]
+    mark = " " * TREE_INSET + TREE_BOX_ON + TREE_MORE + OFF
+
     content = [_fit_visible(line, cols) for line in head]
+    if above:
+        content.append(_fit_visible(mark, cols))
     content += [_fit_visible(line, cols) for line in visible]
+    if below:
+        content.append(_fit_visible(mark, cols))
     content += [" " * cols] * (rows - 1 - len(content))
 
     if REPLAYING:
