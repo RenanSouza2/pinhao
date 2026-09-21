@@ -286,7 +286,7 @@ class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
         "weight", "subtree_weight", "own_units",
-        "wrap_rows", "shrink_since", "wrap_width",
+        "wrap_rows", "shrink_since", "wrap_width", "unwrap_hold",
         "terms_done", "term_start", "term_threads", "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "term", "micro", "micro_start",
@@ -303,7 +303,8 @@ class TreeNode:
         self.subtree_weight = 0  # own weight plus every descendant's; set by _weigh
         self.own_units = 0  # of self.weight, how much is credited: a join earns it by quarters
         self.wrap_rows = 0  # rows its reading is laid out over now; 0 is beside the node
-        self.shrink_since = None  # when it first fitted in fewer, for TREE_UNWRAP_HOLD
+        self.shrink_since = None  # when it first fitted in fewer, for unwrap_hold
+        self.unwrap_hold = TREE_UNWRAP_HOLD  # how long it must fit before shrinking
         self.wrap_width = None  # terminal width the current layout was chosen at
         self.terms_done = 0  # multiplications finished this run, for the ETA
         self.term_start = None  # log timestamp the current term's header carried
@@ -1739,6 +1740,13 @@ TREE_RIGHT_MARGIN = TREE_INSET
 # layout breaks at once, or the row runs off the screen.
 TREE_UNWRAP_HOLD = 4.0
 
+# The hold doubles each time a node gives rows back, up to this. A node that
+# shrinks once has fitted for a while and gets the short wait; one that keeps
+# shrinking and splitting again has shown it will split again, so each rejoin
+# costs it twice the wait of the last. Per node, so it starts over with the
+# next task.
+TREE_UNWRAP_HOLD_MAX = 64.0
+
 # The scroll track down the right of the tree, and the thumb riding it. A mark
 # above and below would have cost two rows of tree to say the tree goes on; a
 # column says it instead, and says how far through it the window sits. The
@@ -1800,9 +1808,10 @@ def balance_parts(parts, indent, limit, target_rows=0):
 def append_node_row(view, node, row, parts, cont_prefix):
     """A node's row, with its reading beside it while that fits and on
     continuation rows under it when it does not. The row count is held against
-    shrinking for TREE_UNWRAP_HOLD, so a reading whose phase name keeps changing
-    width settles instead of breaking and rejoining every frame; growth and a
-    terminal resize both take effect at once. cont_prefix is the node's own
+    shrinking for the node's unwrap_hold, which doubles each time it does
+    shrink, so a reading that keeps splitting again is left split for longer
+    each time; growth and a terminal resize both take effect at once.
+    cont_prefix is the node's own
     child prefix, so a continuation lines up inside the node and keeps the
     connectors of everything still to come."""
     if not parts:
@@ -1821,10 +1830,11 @@ def append_node_row(view, node, row, parts, cont_prefix):
     elif node.shrink_since is None:
         node.shrink_since = view.now
         want = node.wrap_rows
-    elif view.now - node.shrink_since < TREE_UNWRAP_HOLD:
+    elif view.now - node.shrink_since < node.unwrap_hold:
         want = node.wrap_rows
     else:
         node.shrink_since = None
+        node.unwrap_hold = min(node.unwrap_hold * 2, TREE_UNWRAP_HOLD_MAX)
     node.wrap_width = view.width
     if want == 0:
         node.wrap_rows = 0
