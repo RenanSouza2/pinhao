@@ -260,6 +260,11 @@ PIECE_UNITS = True
 # the moment being replayed, and ps alone costs more than a frame's budget.
 REPLAYING = False
 
+# How far through the log on disk a replay has read, 0.0 to 1.0. The footer
+# carries it: a replay is the one thing on screen whose own progress is not
+# in the log, so nothing else can show how much of it is left.
+REPLAY_PROGRESS = 0.0
+
 class TreeNode:
     __slots__ = (
         "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
@@ -653,6 +658,7 @@ class State:
     def __init__(self, total_pieces=None, n_process=None, explicit_size=None):
         self.start_time = None
         self.last_line_time = None
+        self.log_time = None  # newest log timestamp seen, the clock a replay runs on
         self.lines_seen = 0
         self.cursor_lines = 0   # lines_seen when the cursor last stepped
         self.cursor_phase = 0   # index into CURSOR_PULSE
@@ -1164,7 +1170,12 @@ def feed_line(state, line):
     state.touch()
     m = RE_TS.match(content)
     if m:
-        thread_tick(state, float(m.group("ts")))
+        ts = float(m.group("ts"))
+        # Only ever forward: workers stamp a line before writing it, so lines
+        # interleave and an older stamp would walk the clock backwards.
+        if state.log_time is None or ts > state.log_time:
+            state.log_time = ts
+        thread_tick(state, ts)
     handler(state, content)
 
 
@@ -1458,6 +1469,10 @@ def node_detail(node, view, status):
             est = done + rest
         if est is None:
             est = level_estimate(events_by_level, dur_bucket(node), held_threads(node))
+        if REPLAYING:
+            # Nothing is pending in a replay: the row shows how long the node
+            # had been going, and what it went on to take is already history.
+            est = None
         if est is not None:
             remaining = est - node_elapsed
             # Signed against the level's average: unsigned is time
@@ -2408,8 +2423,13 @@ def render(state):
             # ladder builds its own rows without a prefix, so the margin cannot
             # come from render_tree's own indentation.
             tree_lines = []
+            # A replayed node started at a log timestamp, so measuring it
+            # against wall clock reads the gap between the run and today - an
+            # hour-old log showed nodes running for an hour. The log's own
+            # clock gives the duration the node had actually been going.
+            tree_now = state.log_time if (REPLAYING and state.log_time) else now
             render_tree(state.tree_root, TreeView(
-                tree_lines, now,
+                tree_lines, tree_now,
                 state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
                 state.disk_lock_enabled is not False, starved,
                 state.tree_chunk_span, state.index_max,
@@ -2613,7 +2633,17 @@ def draw(state, scroll_offset=0, actions=()):
     content = [_fit_visible(line, cols) for line in visible]
     content += [" " * cols] * (body_rows - len(content))
 
-    if max_offset > 0:
+    if REPLAYING:
+        # The replay's own bar, not the run's: the run's progress is in the
+        # completion box and is about the pi being computed, this is about how
+        # much of the log has been walked.
+        label = f" replay {fmt_num(100.0 * REPLAY_PROGRESS)}% "
+        tail_txt = "  any key skips "
+        bar_w = max(4, cols - visible_len(label) - len(tail_txt) - 2)
+        footer = label + render_bar(
+            bar_w, (REPLAY_PROGRESS, 1.0 - REPLAY_PROGRESS), BAR_FULL + BAR_NONE,
+        ) + tail_txt
+    elif max_offset > 0:
         footer = (
             f" lines {scroll_offset + 1}-{min(scroll_offset + body_rows, len(all_lines))}/{len(all_lines)}"
             "   ↑/↓ j/k scroll   PgUp/PgDn page   g/G top/bottom   p units   q quit "
@@ -2642,7 +2672,7 @@ draw.last_dims = None
 
 
 def main():
-    global PIECE_UNITS, REPLAYING
+    global PIECE_UNITS, REPLAYING, REPLAY_PROGRESS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
     parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
@@ -2660,6 +2690,12 @@ def main():
     done_announced = False
     scroll_offset = 0
     REPLAYING = args.replay
+    # Records already on disk when the dashboard opened: the replay's extent.
+    try:
+        replay_total = sum(1 for _ in open(args.log_path, errors="replace")) if REPLAYING else 0
+    except OSError:
+        replay_total = 0
+    replay_seen = 0
     replay_frame = 1.0 / args.replay_fps if args.replay_fps > 0 else 0.0
     next_frame = time.time()
 
@@ -2698,6 +2734,9 @@ def main():
                 REPLAYING = False
             if line is not None:
                 feed_line(state, line)
+                if REPLAYING and replay_total:
+                    replay_seen += 1
+                    REPLAY_PROGRESS = min(1.0, replay_seen / replay_total)
 
             actions = parse_scroll_actions(read_pending_input(stdin_fd)) if is_tty else []
             if any(action[0] == "quit" for action in actions):
