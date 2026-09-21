@@ -1265,11 +1265,19 @@ DEAD_GRACE_SECONDS = 3.0
 
 
 def fmt_duration(seconds):
+    """mm:ss, h:mm:ss past an hour, and a day prefix past a day. Days are split
+    off rather than rolled into the hours because a run measured in days reads
+    as 79:05:09 otherwise, which has to be divided in the head before it means
+    anything. Nothing under a day changes shape - the readings watched through
+    an ordinary run are the ones already there."""
     if seconds is None or seconds != seconds or seconds == float("inf"):
         return "?"
     seconds = max(0, int(seconds))
-    h, rem = divmod(seconds, 3600)
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
     m, s = divmod(rem, 60)
+    if d:
+        return f"{d:d}d {h:d}:{m:02d}:{s:02d}"
     if h:
         return f"{h:d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
