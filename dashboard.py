@@ -6,6 +6,7 @@ Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 
 import argparse
 import collections
+import contextlib
 import ctypes
 import ctypes.util
 import os
@@ -255,18 +256,27 @@ TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
 # Tree labels in pieces rather than raw indices; "p" toggles. Raw indices are
 # what the log lines and cache filenames carry, so that view is the one to
 # reach for when a label has to be matched against either.
-PIECE_UNITS = True
+class Display:
+    """How the frame is being shown, as against what it shows. Three flags that
+    main() sets and the render path reads, in one object so they are declared
+    and found together rather than reached for by name from anywhere.
 
-# Set while the dashboard is walking a log it opened rather than following one
-# as it is written. Everything on screen then comes from the log, so the live
-# samples are skipped: they read the machine now, which has nothing to do with
-# the moment being replayed, and ps alone costs more than a frame's budget.
-REPLAYING = False
+    pieces     tree labels counted in pieces rather than raw indices ("p")
+    replaying  walking a log already written, so the log's clock drives the
+               frame and the machine's own readings are left alone
+    progress   how far through that log, 0.0 to 1.0, for the footer's bar"""
 
-# How far through the log on disk a replay has read, 0.0 to 1.0. The footer
-# carries it: a replay is the one thing on screen whose own progress is not
-# in the log, so nothing else can show how much of it is left.
-REPLAY_PROGRESS = 0.0
+    __slots__ = ("pieces", "replaying", "progress")
+
+    def __init__(self):
+        self.pieces = True
+        self.replaying = False
+        self.progress = 0.0
+
+
+DISPLAY = Display()
+
+
 
 class TreeNode:
     __slots__ = (
@@ -633,66 +643,52 @@ def get_pid_counters(pids):
     return out
 
 
-class IoSampler:
-    """Bytes a second per pid, differenced from the cumulative counters.
+class RateSampler:
+    """Per-pid rates, differenced from cumulative counters.
 
-    Shaped like CpuSampler: a window of samples, each reading differenced
-    against the oldest still spanning it. Resetting the baseline on every
-    reading instead would leave the next CPU_MIN_SPAN with nothing to measure,
-    and the figure would come and go from the row every few frames."""
+    Each reading is measured against the oldest sample still spanning
+    CPU_MIN_SPAN, so once a pid has that much history every frame has a figure
+    for it. Differencing against the frame before and starting over would leave
+    the next span with nothing to measure, and the reading would come and go
+    from the row every few frames.
 
-    def __init__(self):
-        self.samples = collections.deque()  # (wall clock, {pid: (read, written)})
+    `rate` turns (now, then, seconds) into whatever the caller wants back - a
+    number for cpu seconds, a pair for the two byte counters."""
 
-    def reset(self):
-        self.samples.clear()
-
-    def update(self, now, counts):
-        self.samples.append((now, counts))
-        while len(self.samples) > 2 and self.samples[1][0] <= now - CPU_WINDOW:
-            self.samples.popleft()
-        rates = {}
-        for pid, (read, written) in counts.items():
-            for base_t, base in self.samples:
-                span = now - base_t
-                if pid in base and span >= CPU_MIN_SPAN:
-                    was = base[pid]
-                    rates[pid] = (max(0.0, (read - was[0]) / span),
-                                  max(0.0, (written - was[1]) / span))
-                    break
-        return rates
-
-
-_IO_SAMPLER = IoSampler()
-
-
-class CpuSampler:
-    """Cores in use per pid, differenced from cumulative CPU time."""
-
-    def __init__(self):
-        self.samples = collections.deque()  # (wall clock, {pid: cpu seconds})
+    def __init__(self, rate):
+        self.rate = rate
+        self.samples = collections.deque()  # (wall clock, {pid: counter})
 
     def reset(self):
         self.samples.clear()
 
-    def update(self, now, cpu_times):
-        self.samples.append((now, cpu_times))
+    def update(self, now, counters):
+        self.samples.append((now, counters))
         # Drop a sample only while the one behind it still spans the window,
         # so the oldest kept is the closest to a full window without going
         # under it.
         while len(self.samples) > 2 and self.samples[1][0] <= now - CPU_WINDOW:
             self.samples.popleft()
-        cores = {}
-        for pid, cpu in cpu_times.items():
+        rates = {}
+        for pid, current in counters.items():
             for base_t, base in self.samples:
                 span = now - base_t
                 if pid in base and span >= CPU_MIN_SPAN:
-                    cores[pid] = max(0.0, (cpu - base[pid]) / span)
+                    rates[pid] = self.rate(current, base[pid], span)
                     break
-        return cores
+        return rates
 
 
-_CPU_SAMPLER = CpuSampler()
+def _per_second(current, base, span):
+    return max(0.0, (current - base) / span)
+
+
+def _pair_per_second(current, base, span):
+    return tuple(max(0.0, (c - b) / span) for c, b in zip(current, base))
+
+
+_CPU_SAMPLER = RateSampler(_per_second)      # cores in use, from cpu seconds
+_IO_SAMPLER = RateSampler(_pair_per_second)  # bytes a second, read and written
 
 
 def get_dir_size(path):
@@ -1515,6 +1511,83 @@ TERM_CUM_SHARE = (0.223, 0.464, 0.715, 0.900)
 # donation. Indexed by terms already done, as TERM_CUM_SHARE is.
 TERM_REST_PARALLEL = (0.79, 0.77, 0.75, 0.00)
 
+def _memory_segment(node, view):
+    """Booked against measured. Estimate first, measured second - the order is
+    what says which is which, so it never varies."""
+    current = view.pid_rss.get(node.pid) if node.pid is not None else None
+    if node.mem_estimate is None and current is None:
+        return None
+    est = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
+    cur = fmt_bytes(current) if current is not None else "?"
+    return f"{est} / {RSS_ON}{cur}{OFF}"
+
+
+def _threads_segment(node):
+    """The thread badge, which a single-threaded task does not get at all: its
+    presence is what flags a task holding more than one slot. "x" is already
+    the multiply in the term beside it, so the badge takes the multiplication
+    sign to keep the two apart. A donation booked but not yet picked up rides
+    in the RSS grey, the softer half of the pair."""
+    if node.threads is None:
+        return None
+    live = node.threads if node.threads_live is None else node.threads_live
+    pending = max(0, node.threads - live)
+    if node.threads <= 1 and not pending:
+        return None
+    badge = f"{MULTI_THR_ON}\u00d7{live}{OFF}"
+    if pending:
+        badge += f" {RSS_ON}(\u00d7{pending}){OFF}"
+    return badge
+
+
+def _cores_segment(node, view):
+    """Cores measured over the cores the micro-phase expects to be busy, tinted
+    by the shortfall: a task parked on the lock is meant to be using nothing
+    and one in a read is meant to be using one, so only a task idle while it
+    claims to be computing goes hot."""
+    cores = view.pid_cpu.get(node.pid) if node.pid is not None else None
+    if cores is None:
+        return None
+    expected = expected_threads(node)
+    shortfall = 1.0 - cores / expected if expected else 0.0
+    reading = f"{cores:.1f}c" if expected is None else f"{cores:.1f}c / {expected}"
+    return f"{severity_colour(shortfall, alarm=0.5)}{reading}{OFF}"
+
+
+def _term_segment(node):
+    """The join's last term is the add, named "R" with no operand pair: printed
+    as it stands rather than split around an "x" it has none of."""
+    if not node.term:
+        return None
+    op1, sep, op2 = node.term.partition("x")
+    return f"{op1} x {op2}" if sep else op1
+
+
+def _micro_segment(node, view):
+    """The phase, how long it has been in it, and what it is moving while it is
+    a phase that moves anything. Read and write are reported apart, so the one
+    the phase is in is the one shown."""
+    if not node.micro:
+        return None
+    micro = node.micro
+    if micro == "locking" and view.disk_lock_enabled:
+        micro = f"{LOCK_ON}{micro}{OFF}"
+    elif micro in ("multiplying", "evaluating", "adding"):
+        micro = f"{MUL_ON}{micro}{OFF}"
+    elif is_io_phase(micro):
+        micro = f"{IO_ATTN_ON}{micro}{OFF}"
+    # The phase name is the reading; how long it has been stuck in it is the
+    # check on it, so that rides in the RSS grey.
+    if node.micro_start is not None:
+        micro += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
+    rate = view.pid_io.get(node.pid) if node.pid is not None else None
+    if rate is not None and is_io_phase(node.micro):
+        moved = rate[1] if node.micro == "writing" else rate[0]
+        if moved > 0:
+            micro += f" {IO_ATTN_ON}{fmt_bytes(moved)}/s{OFF}"
+    return micro
+
+
 def node_detail(node, view, status):
     """The reading beside a node's label, as (head, tail). A node that is not
     running has only a head: how far along the work below it is, or 100% once it
@@ -1564,7 +1637,7 @@ def node_detail(node, view, status):
             est = done + rest
         if est is None:
             est = level_estimate(events_by_level, dur_bucket(node), held_threads(node))
-        if REPLAYING:
+        if DISPLAY.replaying:
             # Nothing is pending in a replay: the row shows how long the node
             # had been going, and what it went on to take is already history.
             est = None
@@ -1579,68 +1652,11 @@ def node_detail(node, view, status):
                 else "+" + fmt_duration(-remaining)
             )
             detail += f" ({eta_str})"
-        current = view.pid_rss.get(node.pid) if node.pid is not None else None
-        if node.mem_estimate is not None or current is not None:
-            est_str = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
-            cur_str = fmt_bytes(current) if current is not None else "?"
-            # Estimate first, measured second - the order is what says
-            # which is which, so it never varies.
-            parts.append(f"{est_str} / {RSS_ON}{cur_str}{OFF}")
-        # Single-threaded tasks get no badge at all: its presence is
-        # what flags a task holding more than one thread slot. "x" is
-        # already the multiply in the term below, so the badge takes
-        # the multiplication sign to keep the two apart.
-        if node.threads is not None:
-            live = node.threads_live
-            if live is None:
-                live = node.threads
-            # Threads donated to a running task but not yet picked up,
-            # in the RSS grey: like a measured RSS beside its estimate,
-            # this is the softer half of the pair - the scheduler has
-            # booked them, the worker is not on them yet.
-            pending = max(0, node.threads - live)
-            if node.threads > 1 or pending:
-                badge = f"{MULTI_THR_ON}\u00d7{live}{OFF}"
-                if pending:
-                    badge += f" {RSS_ON}(\u00d7{pending}){OFF}"
-                parts.append(badge)
-        # Cores measured over the cores the micro-phase at the end of the row
-        # expects to be busy. Tinted by the shortfall between the two: a task
-        # parked on the lock is meant to be using nothing and one in a read is
-        # meant to be using one, so only a task idle while it claims to be
-        # computing goes hot.
-        cores = view.pid_cpu.get(node.pid) if node.pid is not None else None
-        if cores is not None:
-            expected = expected_threads(node)
-            shortfall = 1.0 - cores / expected if expected else 0.0
-            reading = f"{cores:.1f}c" if expected is None else f"{cores:.1f}c / {expected}"
-            parts.append(f"{severity_colour(shortfall, alarm=0.5)}{reading}{OFF}")
-        if node.term:
-            # The join's last term is the add, named "R" with no operand pair:
-            # printed as it stands rather than split around an "x" it has none of.
-            op1, sep, op2 = node.term.partition("x")
-            parts.append(f"{op1} x {op2}" if sep else op1)
-        if node.micro:
-            micro = node.micro
-            if micro == "locking" and view.disk_lock_enabled:
-                micro = f"{LOCK_ON}{micro}{OFF}"
-            elif micro in ("multiplying", "evaluating", "adding"):
-                micro = f"{MUL_ON}{micro}{OFF}"
-            elif micro.startswith("loading") or micro == "writing":
-                micro = f"{IO_ATTN_ON}{micro}{OFF}"
-            # Time in this phase, in the RSS grey: the phase name is the
-            # reading, how long it has been stuck in it is the check on it.
-            if node.micro_start is not None:
-                micro += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
-            # What the phase is moving, while it is one that moves anything.
-            # Read and write are reported apart, so the one the phase is in is
-            # the one shown - a load that is also writing is not a thing.
-            rate = view.pid_io.get(node.pid) if node.pid is not None else None
-            if rate is not None and is_io_phase(node.micro):
-                moved = rate[1] if node.micro == "writing" else rate[0]
-                if moved > 0:
-                    micro += f" {IO_ATTN_ON}{fmt_bytes(moved)}/s{OFF}"
-            parts.append(micro)
+        for segment in (_memory_segment(node, view), _threads_segment(node),
+                        _cores_segment(node, view), _term_segment(node),
+                        _micro_segment(node, view)):
+            if segment is not None:
+                parts.append(segment)
     return "", [detail] + parts
 
 
@@ -1652,11 +1668,11 @@ def node_label(node, span_w=0, i0_w=0):
     count, and in indices they have no log2 to show and fall back to a letter."""
     if node.kind == "SPAN":
         size = f"{node.n2}"
-    elif PIECE_UNITS:
+    elif DISPLAY.pieces:
         size = f"{node_extent(node) // PIECES_PER_LEAF}"
     else:
         size = "B" if node.kind == "BIG" else "C"
-    i0 = f"{(node.i0 - 1) // PIECES_PER_LEAF:,}" if PIECE_UNITS else f"{node.i0:,}"
+    i0 = f"{(node.i0 - 1) // PIECES_PER_LEAF:,}" if DISPLAY.pieces else f"{node.i0:,}"
     return f"[{node.level}, {size:>{span_w}}, {i0:>{i0_w}}]"
 
 
@@ -1694,22 +1710,13 @@ def chain_rungs(root, chunk):
     return base + [(c.children[1], c) for c in reversed(spine)]
 
 
-def chain_bound(value, chunk, index_max):
-    """A rung boundary in chunk units. The run's own two ends are the exact
-    indices instead: they are the range the whole ladder tiles."""
-    if value == 0:
-        return "1"
-    if value == index_max:
-        return f"{index_max:,}"
-    return f"{value // chunk}C"
-
-
 # Columns the frame is inset by. The boxes sit at BOX_INSET on both sides; the
 # tree steps one whole indent further in, so it reads as hanging below them
 # rather than beside them, and keeps that same margin on the right - a reading
 # that ends on the last column reads as though it has been cut off, and one
 # side clear by four against the other by two reads as a drift.
 BOX_INSET = 2
+BOX_GAP = 2  # columns between two boxes sharing a row
 TREE_INSET = 2 * BOX_INSET
 TREE_RIGHT_MARGIN = TREE_INSET
 
@@ -2104,18 +2111,29 @@ def render_row(boxes, gap):
 LABEL_W = 9
 
 
+def labelled(label, text):
+    """A reading under the shared label column."""
+    return f"{label}:".ljust(LABEL_W) + text
+
+
+def bar_row(*args, **kwargs):
+    """A bar indented to where the readings above it start. Unlabelled by
+    convention: the rows above say what it is measuring."""
+    return " " * LABEL_W + render_bar(*args, **kwargs)
+
+
 def _completion_rows(state, bar_w):
     rows = []
-    phase_line = "phase:".ljust(LABEL_W) + state.phase
+    phase_line = labelled("phase", state.phase)
     if not state.done and state.phase != "splitting" and state.phase_start_time:
         # The log's clock while replaying: phase_start_time is a log stamp, and
         # wall clock against it measures the gap to today, not the phase.
-        clock = state.log_time if (REPLAYING and state.log_time) else time.time()
+        clock = state.log_time if (DISPLAY.replaying and state.log_time) else time.time()
         phase_line += f"   {fmt_duration(clock - state.phase_start_time)} elapsed"
     rows.append(phase_line)
     if not state.total_pieces:
         rows.append(
-            "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)"
+            labelled("pieces", f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)")
         )
         return rows
     total_joins = state.total_joins
@@ -2144,7 +2162,7 @@ def _completion_rows(state, bar_w):
     # walked; past that the phase line carries the progress.
     if state.phase == "splitting":
         rows.append(
-            "pieces:".ljust(LABEL_W) + f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}"
+            labelled("pieces", f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}")
         )
     # Right-aligned on the phase row rather than on one of its own: it is a
     # reading of the run as a whole, like the phase, and weighted units are not
@@ -2247,7 +2265,7 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked, cpu=No
         # work - and parked threads are already counted against it, so giving
         # them a second colour would state the same fact twice.
         tint = severity_colour(1.0 - counts[0] / budget, alarm=0.5)
-        rows.append(" " * LABEL_W + render_bar(
+        rows.append(bar_row(
             bar_w - (1 if mark else 0) - len(ticks), counts,
             BAR_FULL + BAR_HELD + BAR_NONE, mark, colour=(tint, tint, BAR_ON),
             ticks=ticks,
@@ -2320,7 +2338,7 @@ def _ram_rows(state, bar_w, row_w, pid_rss, est, real, over_launch):
         # beside it stays grey. Same pair, same order, same colours as the
         # label on a running node, so it reads the same wherever it appears.
         reading = f"{fmt_bytes(est)} / {RSS_ON}{fmt_bytes(real)}{OFF}"
-        row = "workers:".ljust(LABEL_W) + reading
+        row = labelled("workers", reading)
         rows.append(row if rows else corner(row))
     mem_budget = state.mem_max or state.mem_launch
     if est is not None and mem_budget:
@@ -2354,7 +2372,7 @@ def _ram_rows(state, bar_w, row_w, pid_rss, est, real, over_launch):
         if real is not None:
             ticks.append((real, BAR_MEASURED, OFF))
         cols = []
-        rows.append(" " * LABEL_W + render_bar(
+        rows.append(bar_row(
             bar_w - len(ticks), (est, scale - est), BAR_FULL + BAR_NONE,
             colour=severity_colour(est / mem_budget, calm, alarm), ticks=tuple(ticks),
             tick_cols=cols,
@@ -2372,9 +2390,6 @@ def _disk_rows(state):
     moment they are created."""
     PAIR_COL = 22
 
-    def cell(label, value):
-        return f"{label}:".ljust(LABEL_W) + value
-
     def pair(left, right):
         return (left.ljust(PAIR_COL) if len(left) < PAIR_COL else left + "  ") + right
 
@@ -2386,101 +2401,72 @@ def _disk_rows(state):
     except OSError:
         free = "?"
     rows = [
-        pair(cell("numbers", size("numbers")), cell("pieces", size("pieces"))),
-        pair(cell("tmp", size("tmp")), cell("free", free)),
+        pair(labelled("numbers", size("numbers")), labelled("pieces", size("pieces"))),
+        pair(labelled("tmp", size("tmp")), labelled("free", free)),
     ]
     # Only once the lock is both compiled in and actually contended: a run that
     # never misses has nothing to say here, and LOCK_DISK_IO is off by default.
     if state.disk_lock_enabled is not False and state.lock_misses:
         pct = 100.0 * state.lock_misses / state.lock_requests
-        rows.append("lock:".ljust(LABEL_W)
-                    + f"{state.lock_requests} requests, {state.lock_misses} misses ({pct:.0f}%)")
+        rows.append(labelled("lock", f"{state.lock_requests} requests, {state.lock_misses} misses ({pct:.0f}%)"))
     return rows
 
 
-def render(state):
-    """The frame, as (text, pinned) - pinned being how many leading lines stay
-    put while the rest scrolls under them."""
-    process_gone_recently = (
-        state.process_gone_since is not None
-        and time.time() - state.process_gone_since < DEAD_GRACE_SECONDS
-    )
-    if not state.ever_saw_process or (not state.process_running and not state.done and not process_gone_recently):
-        return render_status_screen(state), 0
-
-    lines = []
-    lines.append("=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"))
-    lines.append("")
-
-    now = time.time()
-    # Only the run timer stops at the run's own "display end" stamp, like the
-    # phase timer. The one above it is measuring the dashboard by definition,
-    # so it keeps counting for as long as the dashboard is up.
+def header_rows(state, now):
+    """The two clocks above the boxes. Only the run timer stops at the run's
+    own "display end" stamp, like the phase timer; the one above it is
+    measuring the dashboard by definition, so it keeps counting for as long as
+    the dashboard is up."""
+    rows = ["=== pi_tree dashboard ===  " + time.strftime("%H:%M:%S"), ""]
     end = state.run_end_time if state.run_end_time is not None else now
     elapsed = max(0.0, now - state.start_time) if state.start_time else 0
-    lines.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
+    rows.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
     if state.run_start_time is not None:
-        run_elapsed = max(0.0, end - state.run_start_time)
-        lines.append(f"run:     {fmt_duration(run_elapsed)} (since process start)")
+        rows.append(f"run:     {fmt_duration(max(0.0, end - state.run_start_time))} (since process start)")
+    return rows
 
-    # Only the stall threshold reads these; an ETA is measured against its own
-    # level or not shown at all.
-    piece_durs = list(state.piece_events)
-    join_durs = list(state.join_events)
 
+def banner_rows(state, now, work_durs):
+    """What is wrong, or over, above the boxes. None of these replaces the
+    dashboard: a run that has died still has a tree worth reading, and the
+    warning says so beside it rather than instead of it."""
+    rows = []
     if state.done:
-        lines.append("")
-        lines.append("*** PROCESS DONE ***")
-
+        rows.append("")
+        rows.append("*** PROCESS DONE ***")
     if state.task_exit is not None:
-        lines.append(task_exit_line(state))
-
+        rows.append(task_exit_line(state))
     if state.last_line_time is not None and not state.done and state.task_exit is None:
         since_last_line = now - state.last_line_time
         # Both kinds of work, not just pieces: a run whose pieces all came from
         # cache has no piece durations at all, and a single long join logs
         # nothing for far longer than the 60s floor.
-        work_durs = piece_durs + join_durs
         stall_threshold = max(60.0, 2 * max(work_durs)) if work_durs else 60.0
         if since_last_line > stall_threshold:
-            lines.append(
+            rows.append(
                 f"{ALERT_ON}WARNING: no log activity for {fmt_duration(since_last_line)} "
                 f"- the run may have stopped{ALERT_OFF}"
             )
-
     if state.config_diff:
         detail = ", ".join(
             f"{name} {before} -> {after}" for name, (before, after) in sorted(state.config_diff.items())
         )
-        lines.append(
+        rows.append(
             f"{ALERT_ON}WARNING: config changed from the previous run in this log "
             f"({detail}){ALERT_OFF}"
         )
+    return rows
 
-    lines.append("")
 
-    counters = {} if REPLAYING else get_pid_counters(state.active.keys())
-    if not REPLAYING and not counters and state.phase in ("dividing", "displaying"):
-        # No fork()ed workers left to read RSS from (see active_threads) - the
-        # root process is the one actually holding the memory these phases use.
-        if state.root_pid is None:
-            state.root_pid = get_root_pid()
-        if state.root_pid is not None:
-            counters = get_pid_counters((state.root_pid,))
-    pid_rss = {pid: c[0] for pid, c in counters.items()}
-    pid_cpu = _CPU_SAMPLER.update(now, {pid: c[1] for pid, c in counters.items()})
-    pid_io = _IO_SAMPLER.update(now, {pid: (c[2], c[3]) for pid, c in counters.items()})
-    cpu_total = sum(pid_cpu.values()) if pid_cpu else None
+def box_geometry(term_w):
+    """Column widths for the four boxes, the bar width inside each, and the
+    inner width of a ram row.
 
-    # Geometry first: completion, threads, ram and disk each need a column
-    # width to size their own bar to before anything is rendered.
-    BOX_GAP = 2
-    term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
+    A column holds its box only while it can still fit the widest row that box
+    has; below that, boxes stack full width rather than clipping their own
+    text. Four columns share the same per-box floor as two - a wider terminal
+    just has room to fit more of them across one row."""
     avail = term_w - 2 * BOX_INSET
-    # A column holds its box only while it can still fit the widest row that
-    # box has; below that, boxes stack full width rather than clipping their
-    # own text. Four columns share the same per-box floor as two - a wider
-    # terminal just has room to fit more of them across one row.
     COL_MIN = 50
     four_w = (avail - 3 * BOX_GAP) // 4
     four_col = four_w >= COL_MIN
@@ -2496,12 +2482,48 @@ def render(state):
         widths = [left_w, right_w, left_w, right_w]
     # inner width, less "\u2502 ", the indent, the brackets, and a trailing
     # column so a full bar doesn't butt against the right border
-    done_bar_w = max(10, widths[0] - 15)
-    thread_bar_w = max(10, widths[1] - 15)
-    ram_bar_w = max(10, widths[2] - 15)
+    bar_widths = [max(10, w - 15) for w in widths]
     # The full inner width of a row in the ram box, matching render_box's own
     # arithmetic: what a right-aligned flag has to align against.
     ram_row_w = max(BOX_MIN_WIDTH, widths[2] - 2) - 1
+    return widths, bar_widths, avail, ram_row_w, four_col, two_col
+
+
+def render(state):
+    """The frame, as (text, pinned) - pinned being how many leading lines stay
+    put while the rest scrolls under them."""
+    process_gone_recently = (
+        state.process_gone_since is not None
+        and time.time() - state.process_gone_since < DEAD_GRACE_SECONDS
+    )
+    if not state.ever_saw_process or (not state.process_running and not state.done and not process_gone_recently):
+        return render_status_screen(state), 0
+
+    now = time.time()
+    lines = header_rows(state, now)
+    # Only the stall threshold reads these; an ETA is measured against its own
+    # level or not shown at all.
+    lines.extend(banner_rows(state, now, list(state.piece_events) + list(state.join_events)))
+    lines.append("")
+
+    counters = {} if DISPLAY.replaying else get_pid_counters(state.active.keys())
+    if not DISPLAY.replaying and not counters and state.phase in ("dividing", "displaying"):
+        # No fork()ed workers left to read RSS from (see active_threads) - the
+        # root process is the one actually holding the memory these phases use.
+        if state.root_pid is None:
+            state.root_pid = get_root_pid()
+        if state.root_pid is not None:
+            counters = get_pid_counters((state.root_pid,))
+    pid_rss = {pid: c[0] for pid, c in counters.items()}
+    pid_cpu = _CPU_SAMPLER.update(now, {pid: c[1] for pid, c in counters.items()})
+    pid_io = _IO_SAMPLER.update(now, {pid: (c[2], c[3]) for pid, c in counters.items()})
+    cpu_total = sum(pid_cpu.values()) if pid_cpu else None
+
+    # Geometry first: completion, threads, ram and disk each need a column
+    # width to size their own bar to before anything is rendered.
+    term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
+    widths, bar_widths, avail, ram_row_w, four_col, two_col = box_geometry(term_w)
+    done_bar_w, thread_bar_w, ram_bar_w, _ = bar_widths
 
     # The scheduler logs its own total_mem_cost, the number it gates launches
     # on. Summing the tree's bookings only reconstructs it, so that is the
@@ -2576,7 +2598,7 @@ def render(state):
             # against wall clock reads the gap between the run and today - an
             # hour-old log showed nodes running for an hour. The log's own
             # clock gives the duration the node had actually been going.
-            tree_now = state.log_time if (REPLAYING and state.log_time) else now
+            tree_now = state.log_time if (DISPLAY.replaying and state.log_time) else now
             render_tree(state.tree_root, TreeView(
                 tree_lines, tree_now,
                 state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
@@ -2799,7 +2821,7 @@ def draw(state, scroll_offset=0, actions=()):
         content += [_fit_visible(line, cols) for line in visible]
     content += [" " * cols] * (rows - 1 - len(content))
 
-    if REPLAYING:
+    if DISPLAY.replaying:
         # The replay's own bar, not the run's: the run's progress is in the
         # completion box and is about the pi being computed, this is about how
         # much of the log has been walked. Bare, and in the green the running
@@ -2808,7 +2830,7 @@ def draw(state, scroll_offset=0, actions=()):
         # render_bar frames itself in brackets; the footer wants only the bar,
         # so the frame is taken back off.
         footer = render_bar(
-            cols, (REPLAY_PROGRESS, 1.0 - REPLAY_PROGRESS),
+            cols, (DISPLAY.progress, 1.0 - DISPLAY.progress),
             BAR_FULL + BAR_NONE, colour=MUL_ON,
         ).removeprefix("[").removesuffix("]")
     elif max_offset > 0:
@@ -2839,15 +2861,40 @@ def draw(state, scroll_offset=0, actions=()):
 draw.last_dims = None
 
 
-def main():
-    global PIECE_UNITS, REPLAYING, REPLAY_PROGRESS
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG)
     parser.add_argument("--size", type=int, default=None, help="pi() size argument, to compute total pieces as soon as the log's \"piece size\" line arrives instead of waiting on \"run size\" too")
     parser.add_argument("--n-process", type=int, default=None, help="pi() n_process argument")
     parser.add_argument("--replay", action="store_true", help="walk the log already on disk before following it live, a frame each time a node starts or finishes; any key skips to the end")
     parser.add_argument("--replay-fps", type=float, default=60.0, help="frames per second while replaying (default 60)")
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+@contextlib.contextmanager
+def raw_terminal(fd, is_tty):
+    """cbreak with echo off for the scroll keys, on the alt screen with the
+    cursor hidden and the background set once. Everything is put back however
+    the loop inside ends."""
+    old = termios.tcgetattr(fd) if is_tty else None
+    if is_tty:
+        tty.setcbreak(fd)
+        no_echo = termios.tcgetattr(fd)
+        no_echo[3] &= ~termios.ECHO  # cbreak reads at once, but don't echo the keys
+        termios.tcsetattr(fd, termios.TCSADRAIN, no_echo)
+    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[48;2;10;20;60m")
+    sys.stdout.flush()
+    try:
+        yield
+    finally:
+        sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def main():
+    args = parse_args()
 
     n_process = args.n_process
 
@@ -2857,10 +2904,10 @@ def main():
     state = make_state()
     done_announced = False
     scroll_offset = 0
-    REPLAYING = args.replay
+    DISPLAY.replaying = args.replay
     # Records already on disk when the dashboard opened: the replay's extent.
     try:
-        replay_total = sum(1 for _ in open(args.log_path, errors="replace")) if REPLAYING else 0
+        replay_total = sum(1 for _ in open(args.log_path, errors="replace")) if DISPLAY.replaying else 0
     except OSError:
         replay_total = 0
     replay_seen = 0
@@ -2869,17 +2916,7 @@ def main():
 
     stdin_fd = sys.stdin.fileno()
     is_tty = sys.stdin.isatty()
-    old_termios = None
-    if is_tty:
-        old_termios = termios.tcgetattr(stdin_fd)
-        tty.setcbreak(stdin_fd)
-        no_echo = termios.tcgetattr(stdin_fd)
-        no_echo[3] &= ~termios.ECHO  # cbreak for immediate reads, but don't echo scroll keys
-        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, no_echo)
-
-    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[48;2;10;20;60m")
-    sys.stdout.flush()
-    try:
+    with raw_terminal(stdin_fd, is_tty):
         last_render = 0.0
         for line in tail(args.log_path):
             if line is RESTARTED or (line is not None and RUN_MARKER in line):
@@ -2896,29 +2933,29 @@ def main():
                 _CPU_SAMPLER.reset()
                 done_announced = False
                 continue
-            if line is None and REPLAYING:
+            if line is None and DISPLAY.replaying:
                 # Nothing left to read: the log on disk has been walked, so the
                 # replay is over and the dashboard follows it live from here.
-                REPLAYING = False
+                DISPLAY.replaying = False
             if line is not None:
                 feed_line(state, line)
-                if REPLAYING and replay_total:
+                if DISPLAY.replaying and replay_total:
                     replay_seen += 1
-                    REPLAY_PROGRESS = min(1.0, replay_seen / replay_total)
+                    DISPLAY.progress = min(1.0, replay_seen / replay_total)
 
             actions = parse_scroll_actions(read_pending_input(stdin_fd)) if is_tty else []
             if any(action[0] == "quit" for action in actions):
                 raise KeyboardInterrupt
             if any(action[0] == "units" for action in actions):
-                PIECE_UNITS = not PIECE_UNITS
-            if REPLAYING and actions:
-                REPLAYING = False
+                DISPLAY.pieces = not DISPLAY.pieces
+            if DISPLAY.replaying and actions:
+                DISPLAY.replaying = False
 
             now = time.time()
             # A frame per node event while replaying, the 1s gate once live.
-            replay_due = REPLAYING and line is not None and is_node_event(line)
+            replay_due = DISPLAY.replaying and line is not None and is_node_event(line)
             if replay_due or actions or now - last_render >= 1.0:
-                if REPLAYING:
+                if DISPLAY.replaying:
                     # The log is the only authority while replaying: it is the
                     # evidence a run exists, and whether it was still going is
                     # what its own records say, not what is on the machine now.
@@ -2951,11 +2988,6 @@ def main():
             if state.done and state.ever_saw_process and not done_announced:
                 scroll_offset = draw(state, scroll_offset)
                 done_announced = True
-    finally:
-        sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
-        sys.stdout.flush()
-        if old_termios is not None:
-            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_termios)
 
 
 def _raise_keyboard_interrupt(signum, frame):
