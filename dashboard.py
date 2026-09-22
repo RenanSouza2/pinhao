@@ -242,13 +242,21 @@ def leaves_covered(i0, i_max):
 # join is still a whole number: span 23 is 4 and its quarter is 1.
 JOIN_PARTS = 4  # multiplications in a join: P1xP2, Q1xQ2, P1xR2, R1xQ2
 LEAF_WEIGHT = 4 * JOIN_PARTS
-CHAIN_WEIGHT = 5 * JOIN_PARTS
+
+# A chain or big node fuses a growing prefix against one chunk, so its cost is
+# affine in the leaves under it rather than flat in width, and it runs with
+# nothing beside it: weighted flat, the spine that ends the run is invisible on
+# the bar and every reading of the time left comes in short. Calibrated at
+# TREE_PIECE_SIZE 22 - re-measure both with it.
+CHAIN_BASE = 5448  # a chain node's cost before its prefix is counted
+CHAIN_PER_LEAF = 0.883
 
 
 def node_weight(kind, leaves):
-    if kind != "SPAN":
-        return CHAIN_WEIGHT
-    return LEAF_WEIGHT if leaves == 1 else leaves // 2 * JOIN_PARTS
+    if kind == "SPAN":
+        return LEAF_WEIGHT if leaves == 1 else leaves // 2 * JOIN_PARTS
+    weight = CHAIN_BASE + int(CHAIN_PER_LEAF * leaves)
+    return weight - weight % JOIN_PARTS
 
 
 TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
@@ -740,6 +748,7 @@ class State:
         self.log_start = None  # first log timestamp seen, the run's own zero
         self.run_estimate = None  # predicted total run time, held between readings
         self.run_estimate_at = None  # the done_units it was taken at
+        self.free_units = 0  # of done_units, the weight a previous run left on disk
         self.lines_seen = 0
         self.cursor_lines = 0   # lines_seen when the cursor last stepped
         self.cursor_phase = 0   # index into CURSOR_PULSE
@@ -931,7 +940,12 @@ def handle_node_process(state, content):
         state.joins_done += covered - 1
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
+            # Weight this run never pays for: taken off both ends of the time
+            # left's fraction, or the run reads as faster than it is.
+            before = state.tree_root.units_done if state.tree_root else 0
             mark_units_done(tree_node, tree_node.subtree_weight)
+            if state.tree_root is not None:
+                state.free_units += state.tree_root.units_done - before
             tree_node.own_units = tree_node.weight
             mark_node_done(tree_node)
     elif action == "joining":
@@ -2201,7 +2215,8 @@ def _completion_rows(state, bar_w):
     # to divide by and the reading swings by hours between frames.
     left = ""
     if not state.done and state.log_start and state.log_time and done_units:
-        frac = done_units / total_units
+        frac = ((done_units - state.free_units)
+                / (total_units - state.free_units))
         if frac >= 0.05:
             # The log's clock only moves when a line lands, and a run is quiet
             # for minutes at a time inside a long multiplication - two fifths
