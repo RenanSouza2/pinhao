@@ -46,31 +46,21 @@ LOCK_ON = "\x1b[38;2;114;47;55m"
 # that compute: "multiplying", "evaluating", "adding".
 MUL_ON = "\x1b[38;2;107;142;107m"
 
-# Tree node states on two axes. Hue says what kind of node it is - deep teal
-# for work behind you, violet for work still ahead, sky for work available now,
+# Tree node states. Deep teal for work behind you, violet for work still ahead,
 # muted blue for the trail down to a running worker, and MUL_ON's green on the
 # node that is running - the same green its "multiplying" phase is written in,
 # so the node and the work it is doing read as one thing. Green belongs to the
 # running node alone: a done node in the same hue read as still working.
 #
-# Brightness says how much to care, and ready deliberately outranks the trail:
-# a node waiting only on a free slot is the next thing that will happen, while
-# an ancestor of a running one is just a breadcrumb. Ready and the trail share
-# a family, so they are held far apart within it - saturated sky against a
-# desaturated periwinkle. At the other end NODE_DONE and NODE_PENDING are
-# within 0.5 of each other in contrast against the #0A143C ground, too close
-# to tell apart by weight - hue alone separates them, so neither has to get
-# loud and the boundary between the two draws the frontier of the computation.
-# Teal against violet is the widest hue gap available down at that brightness
-# once green is spoken for, and that gap is the frontier's whole legibility.
-# A ready node dims to NODE_STARVED while the scheduler has no slot to give it,
-# so the whole launch queue dims when the machine is full and brightens the
-# moment something frees up.
+# NODE_DONE and NODE_PENDING are within 0.5 of each other in contrast against
+# the #0A143C ground, too close to tell apart by weight - hue alone separates
+# them, so neither has to get loud and the boundary between the two draws the
+# frontier of the computation. Teal against violet is the widest hue gap
+# available down at that brightness once green is spoken for, and that gap is
+# the frontier's whole legibility.
 NODE_RUNNING = "\x1b[38;2;107;142;107m"  # #6B8E6B  green,    contrast  4.84
-NODE_READY = "\x1b[38;2;99;180;228m"     # #63B4E4  sky,                7.79
 NODE_ACTIVE = "\x1b[38;2;142;156;200m"   # #8E9CC8  blue,               6.57
 NODE_DONE = "\x1b[38;2;39;92;107m"       # #275C6B  teal,               2.40
-NODE_STARVED = "\x1b[38;2;154;127;192m"  # #9A7FC0  violet,             5.24
 NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,             1.88
 
 # Coral (#E07A5F) for the few states that mean something is going wrong: the
@@ -412,10 +402,53 @@ def apply_index_max(state, index_max):
         state.tree_root, state.tree_by_key = None, None
         return
     state.tree_root, state.tree_by_key = build_tree(index_max, state.tree_chunk_span)
+    state.bucket_total = collections.defaultdict(int)
+    state.bucket_done = collections.defaultdict(int)
+    state.bucket_span = collections.defaultdict(float)
     if state.tree_root is None:
         state.tree_skipped_reason = (
             f"tree too large to display ({2 * state.total_pieces - 1} nodes > {TREE_NODE_CAP})"
         )
+        return
+    state.bucket_total = bucket_weights(state.tree_root)
+    state.spine = spine_nodes(state.tree_root)
+
+
+def bucket_weights(root):
+    """The bar's weight split by dur_bucket. Taken off the tree once, since it
+    is a total for the whole run: what the time left prices its work against."""
+    totals = collections.defaultdict(int)
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        totals[dur_bucket(node)] += node.weight
+        stack.extend(node.children)
+    return totals
+
+
+def spine_nodes(root):
+    """The run's chain nodes, innermost first. Each one fuses one more chunk
+    onto the prefix below it, so consecutive pairs bound the run's repeating
+    unit: the work of one chunk and the join that folds it in."""
+    spine = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.kind == "CHAIN":
+            spine.append(node)
+        stack.extend(node.children)
+    spine.sort(key=lambda node: node.leaves_total)
+    return spine
+
+
+def drop_bucket_weights(state, node):
+    """Take a subtree a previous run left on disk out of those totals: this run
+    pays for none of it."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        state.bucket_total[dur_bucket(n)] -= n.weight
+        stack.extend(n.children)
 
 
 def mark_leaves_done(node, leaves):
@@ -443,6 +476,16 @@ def mark_own_units(node, units):
         return
     node.own_units += units
     mark_units_done(node, units)
+
+
+def credit_own_units(state, node, units):
+    """mark_own_units, with the node's bucket credited the same weight: the
+    time left prices what is left bucket by bucket, so the weight paid for and
+    the span it was paid over must be booked against the same one."""
+    before = node.own_units
+    mark_own_units(node, units)
+    if node.own_units > before:
+        state.bucket_done[dur_bucket(node)] += node.own_units - before
 
 
 def mark_active(node, delta):
@@ -749,6 +792,12 @@ class State:
         self.run_estimate = None  # predicted total run time, held between readings
         self.run_estimate_at = None  # the done_units it was taken at
         self.free_units = 0  # of done_units, the weight a previous run left on disk
+        self.bucket_total = collections.defaultdict(int)  # dur_bucket -> weight this run must pay for
+        self.bucket_done = collections.defaultdict(int)  # of that, the weight credited so far
+        self.bucket_span = collections.defaultdict(float)  # wall seconds the bucket had a node running
+        self.bucket_tick_at = None  # log timestamp bucket_span is folded up to
+        self.spine = []  # chain nodes innermost first, from the tree
+        self.chain_marks = []  # (node, log timestamp, duration) as each chain join lands
         self.lines_seen = 0
         self.cursor_lines = 0   # lines_seen when the cursor last stepped
         self.cursor_phase = 0   # index into CURSOR_PULSE
@@ -840,7 +889,7 @@ def active_threads(state):
 def booked_threads(state):
     """Threads the scheduler has committed, pending donations included. This is
     what decides whether another task can launch, so it - not active_threads -
-    is what "starved" and the over-booking readout are measured against."""
+    is what the over-booking readout is measured against."""
     if state.phase in ("dividing", "displaying"):
         return thread_budget(state)
     if not state.threads_seen:
@@ -874,6 +923,24 @@ def thread_tick(state, ts):
         state.booked_time += (booked_capped(state) or 0) * dt
         state.thread_span += dt
         state.thread_last_ts = ts
+
+
+def bucket_tick(state, ts):
+    """Fold wall clock up to log timestamp ts into the span of every bucket
+    that has a node running. The span a bucket's work covers, not the work
+    itself: two nodes of one bucket running side by side cost it the one
+    stretch, which is what makes the cost below a cost in wall clock rather
+    than in machine time. Forward only, like thread_tick: lines interleave, and
+    an older stamp would fold the stretch since the newer one in twice."""
+    last = state.bucket_tick_at
+    if last is None or ts > last:
+        state.bucket_tick_at = ts
+    if last is None or ts <= last:
+        return
+    dt = ts - last
+    for bucket in {dur_bucket(entry["node"]) for entry in state.active.values()
+                   if entry.get("node") is not None}:
+        state.bucket_span[bucket] += dt
 
 
 def attach_task_plan(state, pid, tree_node):
@@ -946,6 +1013,7 @@ def handle_node_process(state, content):
             mark_units_done(tree_node, tree_node.subtree_weight)
             if state.tree_root is not None:
                 state.free_units += state.tree_root.units_done - before
+            drop_bucket_weights(state, tree_node)
             tree_node.own_units = tree_node.weight
             mark_node_done(tree_node)
     elif action == "joining":
@@ -970,8 +1038,13 @@ def handle_node_process(state, content):
             bucket = dur_bucket(tree_node) if tree_node is not None else leaves_covered(i0, i_max)
             state.join_events_by_level[bucket].append((dur, entry_threads(entry) if entry else None))
         if tree_node is not None:
-            mark_own_units(tree_node, tree_node.weight)
+            credit_own_units(state, tree_node, tree_node.weight)
             mark_node_done(tree_node)
+            # Chunk to chunk: what the run's repeating unit costs, measured
+            # rather than modelled. A chain a previous run left on disk never
+            # reaches here, and one that skipped committed terms has no dur.
+            if tree_node.kind == "CHAIN" and dur is not None:
+                state.chain_marks.append((tree_node, float(m.group("ts")), dur))
 
 
 def handle_piece(state, content):
@@ -992,7 +1065,7 @@ def handle_piece(state, content):
         tree_node = state.tree_by_key.get((i0, i_max))
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
-            mark_own_units(tree_node, tree_node.weight)
+            credit_own_units(state, tree_node, tree_node.weight)
             mark_node_done(tree_node)
 
 
@@ -1057,7 +1130,7 @@ def handle_phase_line(state, content):
             tree_node.terms_done += 1
             quarter = tree_node.weight // JOIN_PARTS
             if tree_node.own_units + 2 * quarter <= tree_node.weight:
-                mark_own_units(tree_node, quarter)
+                credit_own_units(state, tree_node, quarter)
         tree_node.term = term
         tree_node.term_start = float(m.group("ts"))
         tree_node.term_threads = held_threads(tree_node)
@@ -1273,6 +1346,7 @@ def feed_line(state, line):
         if state.log_time is None or ts > state.log_time:
             state.log_time = ts
         thread_tick(state, ts)
+        bucket_tick(state, ts)
     handler(state, content)
 
 
@@ -1483,7 +1557,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now piece_events_by_level join_events_by_level"
-    " pid_rss pid_cpu pid_io disk_lock_enabled starved chunk_span index_max size width",
+    " pid_rss pid_cpu pid_io disk_lock_enabled chunk_span index_max size width",
 )
 
 
@@ -1501,11 +1575,9 @@ def node_state(node, view):
         return "\u2713", "done", None, NODE_DONE
     if node.in_progress:
         return "\u25b8", "in_progress", str(node.task_idx), NODE_RUNNING
-    # Vacuously true for a leaf, which is what it should be: a piece depends on
-    # nothing, so an unstarted one is launchable the moment the scheduler has a
-    # slot. Ready either way; the tint says whether it could actually start.
+    # Vacuously true for a leaf: a piece depends on nothing.
     if all(c.own_done for c in node.children):
-        return "\u00b7", "ready", None, (NODE_STARVED if view.starved else NODE_READY)
+        return "\u00b7", "ready", None, NODE_PENDING
     if node.active_count > 0:
         return "\u25cb", "in_progress", None, NODE_ACTIVE
     if node.leaves_done > 0:
@@ -1519,6 +1591,159 @@ def node_state(node, view):
 # elapsed over fraction-done comes in under the truth - at 16M it covered 1% of
 # frames, at a tenth over it covers 82%.
 RUN_MARGIN = 1.10
+
+
+def bucket_unit_cost(state):
+    """What a unit of each bucket's weight costs in wall clock while that
+    bucket is running, with the run's own average beside it for a bucket that
+    has paid for nothing yet. A leaf's unit is cheap because sixteen of them
+    run at once and a top join's is dear because it runs alone, so one rate for
+    the whole bar prices the work left as a blend of the two: it reads high
+    through a chunk's leaves and low through the joins above them."""
+    span = sum(state.bucket_span.values())
+    done = sum(state.bucket_done.values())
+    if span <= 0 or done <= 0:
+        return None, None
+    cost = {bucket: seconds / state.bucket_done[bucket]
+            for bucket, seconds in state.bucket_span.items()
+            if seconds > 0 and state.bucket_done.get(bucket, 0) > 0}
+    return cost, span / done
+
+
+def bucket_cost(cost, avg, bucket):
+    """A size that has not run yet is priced at the largest one below it that
+    has: cost per unit runs near flat from one join size to the next, where the
+    run's own average is mostly leaves and prices a join at a third of what it
+    costs. Only within the sizes - a chain's bucket is not one, and falls back
+    to the average."""
+    if bucket in cost:
+        return cost[bucket]
+    if isinstance(bucket, int):
+        below = [b for b in cost if isinstance(b, int) and 0 < b < bucket]
+        if below:
+            return cost[max(below)]
+    return avg
+
+
+def cycle_units_left(node, below):
+    """The weight a cycle still owes, by bucket: the spine node's subtree
+    without the one below it, which belongs to the cycle before, and without
+    the chain join itself - that one is timed off the chain before it rather
+    than priced by weight."""
+    left = collections.defaultdict(int)
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n is below:
+            continue
+        if n is not node and not n.own_done:
+            left[dur_bucket(n)] += n.weight - n.own_units
+        stack.extend(n.children)
+    return left
+
+
+def post_split_cost(state):
+    """What one of the two steps after the split tree costs, or None with
+    nothing to read it from. Neither is measured - the bar gives each a leaf's
+    weight - and a division at full precision is nearer a top-level
+    multiplication than a leaf, so the longest join the run has run stands in
+    for it."""
+    return max(state.join_events) if state.join_events else None
+
+
+def cycle_time_left(state, post_split_left, run_elapsed):
+    """Seconds still to run, taken off the run's own repeating unit: chunk to
+    chunk between consecutive chain joins. Nothing here is modelled - the
+    overlap between levels, the idle stretches and the disk contention are all
+    inside that one measurement - so it is the reading to prefer wherever it
+    exists. None until two chain joins have landed in this run.
+
+    The latest cycle rather than the mean of them, since it already carries
+    whatever the growing prefix has cost so far. Each cycle still to come is
+    that length with its own chain join grown by what the last two differed by,
+    scaled down for a short final chunk. The cycle in progress has no length of
+    its own to go by, so what it has left is priced bucket by bucket and its
+    own chain join timed off the one before."""
+    if len(state.chain_marks) < 2 or not state.spine:
+        return None
+    (prev_node, prev_ts, prev_dur), (last_node, last_ts, last_dur) = state.chain_marks[-2:]
+    cycle = last_ts - prev_ts
+    chunk_work = cycle - last_dur
+    chunk_leaves = last_node.leaves_total - prev_node.leaves_total
+    if chunk_work <= 0 or chunk_leaves <= 0:
+        return None
+    growth = last_dur - prev_dur
+    rest = 0.0
+    ahead = 0
+    below = None
+    for node in state.spine:
+        weight = node.subtree_weight - (below.subtree_weight if below else 0)
+        done = node.units_done - (below.units_done if below else 0)
+        leaves = node.leaves_total - (below.leaves_total if below else 0)
+        previous, below = below, node
+        if node.own_done or weight <= 0:
+            continue
+        ahead += 1
+        chain = last_dur + ahead * growth
+        if ahead == 1 and done:
+            # The one in progress: its own cycle is part spent, and nothing
+            # measures how much of it but the work itself.
+            priced = bucket_priced(
+                state, cycle_units_left(node, previous), run_elapsed)
+            if priced is not None:
+                rest += priced + chain
+                continue
+        length = leaves / chunk_leaves * chunk_work + chain
+        rest += length * max(0.0, 1.0 - done / weight)
+    step = post_split_cost(state)
+    if step is not None:
+        rest += post_split_left * step
+    return rest
+
+
+def run_estimate_now(state, frac, post_split_left, run_elapsed):
+    """How long the whole run will take, or None while there is nothing to read
+    it from. The run's own repeating unit first where it has one, then the
+    tree's buckets, then the bar's bare fraction - that last reading is too
+    coarse to divide by below a twentieth, and swings by hours between frames.
+    No margin on the first: padding a measurement only makes it a worse one."""
+    rest = cycle_time_left(state, post_split_left, run_elapsed)
+    if rest is None:
+        rest = run_time_left(state, post_split_left, run_elapsed)
+    if rest is not None:
+        return run_elapsed + rest
+    return run_elapsed / frac * RUN_MARGIN if frac >= 0.05 else None
+
+
+def bucket_priced(state, units_left, run_elapsed):
+    """Wall seconds for a parcel of weight given by bucket, or None before
+    anything has been paid for. The spans behind the costs overlap - work at
+    several buckets runs side by side - so the sum is scaled back by the
+    overlap the run has shown so far: its elapsed time over the spans measured
+    within it."""
+    cost, avg = bucket_unit_cost(state)
+    if cost is None:
+        return None
+    rest = sum(left * bucket_cost(cost, avg, bucket)
+               for bucket, left in units_left.items() if left > 0)
+    return rest * run_elapsed / sum(state.bucket_span.values())
+
+
+def run_time_left(state, post_split_left, run_elapsed):
+    """Seconds still to run with the whole bar priced bucket by bucket, or None
+    before anything has been paid for. The last chunk has nothing left to
+    overlap with and comes in short by up to a chunk's worth; RUN_MARGIN covers
+    it."""
+    left = {bucket: total - state.bucket_done.get(bucket, 0)
+            for bucket, total in state.bucket_total.items()}
+    rest = bucket_priced(state, left, run_elapsed)
+    if rest is None:
+        return None
+    _, avg = bucket_unit_cost(state)
+    step = post_split_cost(state)
+    rest += post_split_left * (step if step is not None else LEAF_WEIGHT * avg)
+    return rest * RUN_MARGIN
+
 
 # A join's four multiplications take near-fixed shares of it, so the time spent
 # in the terms that have finished divides out to a prediction of the whole. It
@@ -1629,10 +1854,10 @@ def node_detail(node, view, status):
         # Against the whole subtree with the node's own weight included, in the
         # overall bar's units: everything below can be finished while the node
         # itself still waits for a slot, so only its own completion reads 100%.
-        # A leaf is its own subtree and has nothing to report until it is done.
+        # A leaf is its own subtree, so it reads 0% until it is done.
         if node.children:
             return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}", []
-        return "", []
+        return f" {RSS_ON}0%{OFF}", []
     detail = f"[{status}]"
     parts = []
     if node.start_time is None:
@@ -2163,6 +2388,12 @@ def bar_row(*args, **kwargs):
     return " " * LABEL_W + render_bar(*args, **kwargs)
 
 
+def eta_wait(gate, frac):
+    """Stands in for the time left until it has a reading: the share of this
+    run's own weight it waits for, and how much of that is in."""
+    return f"   {RSS_ON}eta at {gate}% ({fmt_num(100.0 * frac)}%){OFF}"
+
+
 def _completion_rows(state, bar_w):
     rows = []
     phase_line = labelled("phase", state.phase)
@@ -2211,13 +2442,16 @@ def _completion_rows(state, bar_w):
     # would read more exact than they are. The pieces/joins line above is where
     # the countable figures live.
     # Time left for the whole run, from how long the weight already done took.
-    # Held back until a twentieth is in: before that the fraction is too coarse
-    # to divide by and the reading swings by hours between frames.
     left = ""
-    if not state.done and state.log_start and state.log_time and done_units:
+    if (not state.done and state.log_start and state.log_time
+            and total_units > state.free_units):
         frac = ((done_units - state.free_units)
                 / (total_units - state.free_units))
-        if frac >= 0.05:
+        # A hundredth of this run's own weight, which is what the buckets need
+        # before they price anything steadily.
+        if frac < 0.01:
+            left = eta_wait(1, frac)
+        else:
             # The log's clock only moves when a line lands, and a run is quiet
             # for minutes at a time inside a long multiplication - two fifths
             # of one 16M run sat in gaps over five seconds, the longest 1:24 -
@@ -2239,19 +2473,24 @@ def _completion_rows(state, bar_w):
             if (state.run_estimate_at != done_units
                     or state.run_estimate is None
                     or state.run_estimate <= run_elapsed):
-                state.run_estimate = run_elapsed / frac * RUN_MARGIN
-                state.run_estimate_at = done_units
-            remaining = state.run_estimate - run_elapsed
-            if remaining > 0:
-                left = f"   {fmt_duration(remaining)} left"
+                estimate = run_estimate_now(
+                    state, frac, POST_SPLIT_STEPS - post_split_done(state),
+                    run_elapsed)
+                if estimate is not None:
+                    state.run_estimate = estimate
+                    state.run_estimate_at = done_units
+            if state.run_estimate is None:
+                left = eta_wait(5, frac)
+            elif state.run_estimate > run_elapsed:
+                left = f"   {fmt_duration(state.run_estimate - run_elapsed)} left"
     pct_str = f"{fmt_num(pct)}%"
     width = LABEL_W + bar_w + 2
     # The percentage is right-aligned on the bar's own edge, so anything that
     # would push the row past it is dropped rather than carried over - and of
     # the two the time left is the one the bar below does not already say.
-    if len(rows[0]) + len(left) + len(pct_str) <= width:
+    if len(rows[0]) + visible_len(left) + len(pct_str) <= width:
         rows[0] += left
-    rows[0] = rows[0].ljust(width - len(pct_str)) + pct_str
+    rows[0] += " " * (width - len(pct_str) - visible_len(rows[0])) + pct_str
     rows.append(" " * LABEL_W + bar)
     return rows
 
@@ -2631,19 +2870,6 @@ def render(state):
     # view says nothing the completion box doesn't.
     if state.phase == "splitting":
         lines.append("")
-        # A ready node needs both a free thread and room under mem_launch to
-        # start. With neither, the whole ready set is queued rather than about
-        # to run, and the tree says so by dimming it.
-        # Booked, not running: a donation nobody has picked up yet still keeps
-        # the next task from launching.
-        # node_can_launch states outright why it stopped admitting work, and
-        # sees gates the reading below cannot - a node that did not fit under
-        # mem_max halts the walk while usage is still under mem_launch. The
-        # inference is kept only for logs predating the "launch halt" line.
-        if state.halt_seen:
-            starved = state.halt is not None
-        else:
-            starved = bool(over_launch or (budget and threads_booked is not None and threads_booked >= budget))
         if state.tree_root is not None:
             # Laid out on its own, then inset like the boxes above it: the
             # ladder builds its own rows without a prefix, so the margin cannot
@@ -2657,7 +2883,7 @@ def render(state):
             render_tree(state.tree_root, TreeView(
                 tree_lines, tree_now,
                 state.piece_events_by_level, state.join_events_by_level, pid_rss, pid_cpu,
-                pid_io, state.disk_lock_enabled is not False, starved,
+                pid_io, state.disk_lock_enabled is not False,
                 state.tree_chunk_span, state.index_max,
                 state.config.get("size", state.explicit_size), term_w - TREE_INSET,
             ))
