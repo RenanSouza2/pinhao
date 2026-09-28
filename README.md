@@ -158,7 +158,7 @@ a live terminal dashboard from `thread_log/run.log`:
 
 `./verify.py` checks a `res/dec/pi_<size>.txt` against
 [api.pi.delivery](https://api.pi.delivery): first the last `--tail` digits
-(default 1000), failing on any mismatch, then `--samples` random
+the precision fixes (default 1000), failing on any mismatch, then `--samples` random
 `--batch`-digit samples (default 100) every `--delay` seconds. With no
 `--samples` it runs until a mismatch or Ctrl-C. With no path it takes the
 largest `cache/res/dec/pi_*.txt`.
@@ -187,10 +187,10 @@ by index.
   under exactly the name of the node it belongs to, so `comm` against
   `pieces/` or `numbers/` shows what was in flight when a run stopped.
 - `res/bin/pi_<size>.bin` — the finished value.
-- `res/dec/pi_<size>.txt` — the finished value in decimal, bare digits
-  (`31415…`, no sign or point), so digit *k* sits at byte offset *k*. It
-  stops one limb short of the precision, at `floor((size - 2) × 64 × log10 2)`
-  fractional digits, so noise in the last limb stays out of the file.
+- `res/dec/pi_<size>.txt` — the finished value in decimal, as
+  `+ 3.1415… * 10 ^ 0`. It carries every digit the limbs hold; only the first
+  `floor((size - 2) × 64 × log10 2)` fractional digits are fixed by the
+  precision, and `verify.py` checks no further.
 
 The run log carries the same number in its third column — a node's `level`,
 or a chain's chunk count — so a log line and a filename name the node the same

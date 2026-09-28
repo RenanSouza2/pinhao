@@ -47,13 +47,12 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
     tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
     TIME_SETUP
-    fxd_num_t fxd_pi = fxd_num_wrap_flt(flt_pi, flt_pi.size - 1);
-    fxd_num_write_dec_threads(fp, fxd_pi, n_process);
+    flt_num_write_dec_threads(fp, flt_pi, n_process);
     int res = fclose(fp);
     assert(res == 0);
     TIME_END(t1)
     tprintf("[%17.6f] %-20s| %7.1f", get_wall_time(), "display end", dtime(t1));
-    fxd_num_free(fxd_pi);
+    flt_num_free(flt_pi);
 }
 
 // int main(int argc, char** argv)
