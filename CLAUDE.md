@@ -171,16 +171,17 @@ defined a join leaves the exact triples it consumed on disk for the next run,
 instead of deleting them.
 
 It's fine to clean generated files out of `cache/*/` between runs, but always
-keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `res/`,
-`tmp/`) — those keep the empty dirs tracked in git and must not be deleted.
+keep the `.gitkeep` file in each subdirectory (`numbers/`, `pieces/`, `partial/`,
+`res/bin/`, `res/dec/`, `swap/`) — those keep the empty dirs tracked in git and
+must not be deleted.
 
-`cache/tmp` holds two unrelated things. araucaria's disk-backed numbers go
-there — the `araucaria_disk_config_t` block in `pi()` is enabled and points at
-`cache/tmp` — but those files are `unlink`ed the moment they are created
-(`num_create_disk`), so they never appear in a listing and clearing the
-directory never touches them. Everything visible in `cache/tmp`
-is pinhao's own: a half-finished join's `P1xR2` checkpoint, stored under
-exactly the name its node uses in `pieces/` or `numbers/`.
+`cache/partial` holds a half-finished join's `P1xR2` checkpoint, stored under
+exactly the name its node uses in `pieces/` or `numbers/`. A resumed run picks
+it up, so clearing it throws away that join's progress.
+
+`cache/swap` is araucaria's `disk_path`, set by the `araucaria_disk_config_t`
+block in `pi()`. Its files are `unlink`ed the moment they are created
+(`num_create_disk`), so the directory always lists empty.
 
 Cache filenames are documented in README's *Cache file names*. Two rules there
 are load-bearing and easy to "tidy" wrongly: `p_` carries no `size` because an

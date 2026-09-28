@@ -14,6 +14,15 @@
 
 
 
+static FILE *pi_dec_open(uint64_t size)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "cache/res/dec/pi_" U64P(015) ".txt", size);
+    FILE *fp = fopen(path, "w");
+    assert(fp);
+    return fp;
+}
+
 [[maybe_unused]]
 static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t mem_max)
 {
@@ -27,17 +36,20 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
 
     // ram_budget_bytes is per worker: divides the band by the clamped n_process
     araucaria_disk_config_t config = {
-        .disk_path = "cache/tmp",
-        .disk_threshold_bytes = mem_max / 4,
+        .disk_path = "cache/swap",
+        .disk_threshold_bytes = mem_max / 2,
         .ram_budget_bytes = mem_max / n_process
     };
     araucaria_disk_config_set(&config);
 
+    FILE *fp = pi_dec_open(size);
+
     flt_num_t flt_pi = pi_tree(size, n_process, mem_launch, mem_max);
-    printf("\n\n");
     tprintf("[%17.6f] %-20s|", get_wall_time(), "display begin");
     TIME_SETUP
-    flt_num_display_dec_threads(flt_pi, n_process);
+    flt_num_write_dec_threads(fp, flt_pi, n_process);
+    int res = fclose(fp);
+    assert(res == 0);
     TIME_END(t1)
     tprintf("[%17.6f] %-20s| %7.1f", get_wall_time(), "display end", dtime(t1));
     flt_num_free(flt_pi);
@@ -49,10 +61,10 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    uint64_t mem_launch = U64(15) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(20) * 1024 * 1024 * 1024;
+    uint64_t mem_launch = U64(20) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(25) * 1024 * 1024 * 1024;
 
-    pi(256'000'000, 16, mem_launch, mem_max);
+    pi(4'000'000'000, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;

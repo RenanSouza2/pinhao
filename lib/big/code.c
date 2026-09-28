@@ -94,7 +94,7 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 
 
 
-// dir picks the committed result or the half-join checkpoint under tmp: the
+// dir picks the committed result or the half-join checkpoint under partial: the
 // two carry the same name, so a crashed join pairs with its node by eye.
 static void sig_res_path_dir(
     char path[PATH_MAX_LEN],
@@ -322,11 +322,11 @@ static uint64_t union_res_op_size(
 
 
 
-// R's first addend (P1xR2), checkpointed under cache/tmp so it is not live
+// R's first addend (P1xR2), checkpointed under cache/partial so it is not live
 // across R1xQ2. Deleted once R is committed: never part of a node's result.
 static void sig_r_part_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
-    sig_res_path_dir(path, "tmp", i_0, span);
+    sig_res_path_dir(path, "partial", i_0, span);
 }
 
 static void sig_r_part_save(sig_num_t sig, uint64_t i_0, uint64_t span)
@@ -382,7 +382,7 @@ static void union_r_part_path_set(
     uint64_t level
 )
 {
-    union_res_path_dir(path, "tmp", size, i_0, remainder, level);
+    union_res_path_dir(path, "partial", size, i_0, remainder, level);
 }
 
 static void union_r_part_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
@@ -1366,7 +1366,7 @@ static void split_big(
 
 static void pi_path_set(char path[PATH_MAX_LEN], uint64_t size)
 {
-    snprintf(path, PATH_MAX_LEN, CACHE "/res/pi_" U64P(015) ".bin", size);
+    snprintf(path, PATH_MAX_LEN, CACHE "/res/bin/pi_" U64P(015) ".bin", size);
 }
 
 static void pi_save(uint64_t size, flt_num_t flt_pi)
