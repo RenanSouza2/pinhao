@@ -589,20 +589,29 @@ CPU_MIN_SPAN = 1.5
 # rusage_info_v2: 16 bytes of uuid, then ten uint64 (v0), six more (v1), and
 # the two disk counters (v2). Only the offsets that are read here are named.
 _RUSAGE_INFO_V2 = 2
-_RUSAGE_TIME_OFFSET = 16    # user_time then system_time, nanoseconds
+_RUSAGE_TIME_OFFSET = 16    # user_time then system_time, mach absolute ticks
 _RUSAGE_RSS_OFFSET = 64     # resident_size
 _RUSAGE_DISKIO_OFFSET = 144  # bytes read then bytes written
 _libproc = None
+_MACH_TICK_NS = 1.0  # mach_timebase_info numer / denom: 1 on Intel, 125/3 on Apple Silicon
+
+
+class _MachTimebase(ctypes.Structure):
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
 
 def _pid_counters_macos(pid):
-    global _libproc
+    global _libproc, _MACH_TICK_NS
     if _libproc is None:
         try:
             _libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
             _libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
             _libproc.proc_pid_rusage.restype = ctypes.c_int
-        except OSError:
+            timebase = _MachTimebase()
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or "/usr/lib/libSystem.dylib")
+            if libc.mach_timebase_info(ctypes.byref(timebase)) == 0 and timebase.denom:
+                _MACH_TICK_NS = timebase.numer / timebase.denom
+        except (OSError, AttributeError):
             _libproc = False
     if not _libproc:
         return None
@@ -612,7 +621,7 @@ def _pid_counters_macos(pid):
     user, system = struct.unpack_from("<QQ", buf.raw, _RUSAGE_TIME_OFFSET)
     rss, = struct.unpack_from("<Q", buf.raw, _RUSAGE_RSS_OFFSET)
     read, written = struct.unpack_from("<QQ", buf.raw, _RUSAGE_DISKIO_OFFSET)
-    return rss, (user + system) / 1e9, read, written
+    return rss, (user + system) * _MACH_TICK_NS / 1e9, read, written
 
 
 def _pid_counters_linux(pid):
@@ -643,8 +652,8 @@ def get_pid_counters(pids):
 
     Asked of the kernel, which keeps all four for every process, rather than
     of ps - one syscall a pid against one process spawn, and ps could not have
-    answered for the disk counters at all. The CPU time comes back in
-    nanoseconds here where ps rounded it to the second.
+    answered for the disk counters at all. The CPU time comes back finer than
+    the whole seconds ps rounded it to.
 
     Returns {} where the platform keeps no such record."""
     reader = _pid_counters_linux if sys.platform.startswith("linux") else _pid_counters_macos
