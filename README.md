@@ -154,6 +154,18 @@ a live terminal dashboard from `thread_log/run.log`:
 ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 ```
 
+### Verifying the digits
+
+`./verify.py` checks a `res/pi_<size>.txt` against
+[api.pi.delivery](https://api.pi.delivery): first the last `--tail` digits
+(default 1000), failing on any mismatch, then `--samples` random
+`--batch`-digit samples (default 100) every `--delay` seconds. With no
+`--samples` it runs until a mismatch or Ctrl-C. With no path it takes the
+largest `cache/res/pi_*.txt`.
+```bash
+./verify.py [path/to/pi_<size>.txt] [--tail N] [--samples N] [--batch N] [--delay S]
+```
+
 ### Cache file names
 
 A cached result is named after the node that produced it, so a directory
@@ -175,6 +187,10 @@ by index.
   under exactly the name of the node it belongs to, so `comm` against
   `pieces/` or `numbers/` shows what was in flight when a run stopped.
 - `res/pi_<size>.bin` — the finished value.
+- `res/pi_<size>.txt` — the finished value in decimal, bare digits
+  (`31415…`, no sign or point), so digit *k* sits at byte offset *k*. It
+  stops one limb short of the precision, at `floor((size - 2) × 64 × log10 2)`
+  fractional digits, so noise in the last limb stays out of the file.
 
 The run log carries the same number in its third column — a node's `level`,
 or a chain's chunk count — so a log line and a filename name the node the same
@@ -285,3 +301,5 @@ what it is still working on.
   *Cache file names* above for the naming scheme.
 - `dashboard.py`: Live terminal dashboard that visualizes a run's progress
   from `thread_log/run.log`.
+- `verify.py`: Spot-checks a finished run's decimal digits against
+  api.pi.delivery.
