@@ -3238,13 +3238,13 @@ def main():
     state = make_state()
     done_announced = False
     scroll_offset = 0
-    DISPLAY.replaying = not args.no_replay
     # Records already on disk when the dashboard opened: the replay's extent.
     try:
         replay_total = sum(1 for _ in open(args.log_path, errors="replace"))
     except OSError:
         replay_total = 0
     DISPLAY.walking = replay_total > 0
+    DISPLAY.replaying = DISPLAY.walking and not args.no_replay
     replay_seen = 0
     replay_frame = 1.0 / args.replay_fps if args.replay_fps > 0 else 0.0
     next_frame = time.time()
