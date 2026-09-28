@@ -208,6 +208,11 @@ RE_CONFIG = re.compile(
 # Leading task id of any per-task line, used only to advance the thread-time
 # accumulator to the newest log timestamp (see thread_tick).
 RE_TS = re.compile(_TASK_ID)
+# The stamp and action of any timestamped line, per-task or run-wide.
+RE_STAMP = re.compile(r"(?:\[\s*\d+\]\[\s*\d+\])?\[\s*(?P<ts>[\d.]+)\]\s*(?P<action>[^|\[]+?)\s*\|")
+# Actions that leave their work on disk for the next run to skip. A crashed
+# run's usable time ends at the last of these.
+COMMIT_ACTIONS = frozenset(("piece", "written", "joined", "binary split solved", "display begin", "display end"))
 
 
 def get_index_max(size, piece_size=None):
@@ -846,6 +851,11 @@ class State:
         self.root_pid = None  # the run's own pid, from get_root_pid() - only looked up once needed
         self.task_exit = None  # a worker that did not exit cleanly, as (pid, how, kind, value)
         self.done = False
+        self.first_stamp = None  # first log timestamp of this run, any line
+        self.commit_stamp = None  # newest COMMIT_ACTIONS timestamp of this run
+        self.banked_time = 0.0  # usable time of the earlier runs of this config in the log
+        self.runs_before = 0  # how many runs banked_time sums
+        self.marker_config = None  # main.c cksum from this run's marker
 
     def touch(self):
         if self.start_time is None:
@@ -1336,6 +1346,13 @@ def feed_line(state, line):
     if handler is None:
         return
     state.touch()
+    stamp = RE_STAMP.match(content)
+    if stamp:
+        ts = float(stamp.group("ts"))
+        if state.first_stamp is None:
+            state.first_stamp = ts
+        if stamp.group("action") in COMMIT_ACTIONS and (state.commit_stamp is None or ts > state.commit_stamp):
+            state.commit_stamp = ts
     m = RE_TS.match(content)
     if m:
         ts = float(m.group("ts"))
@@ -2217,6 +2234,10 @@ def render_status_screen(state):
     else:
         lines.append("  WARNING: process is no longer running, but never finished")
         lines.append("  (check thread_log/run.log for the last lines)")
+    total = total_row(state, time.time()) if state.ever_saw_process else None
+    if total is not None:
+        lines.append("")
+        lines.append("  " + total)
     return "\n".join(lines)
 
 
@@ -2717,6 +2738,9 @@ def header_rows(state, now):
     rows.append(f"elapsed: {fmt_duration(elapsed)} (since dashboard attached)")
     if state.run_start_time is not None:
         rows.append(f"run:     {fmt_duration(max(0.0, end - state.run_start_time))} (since process start)")
+    total = total_row(state, now)
+    if total is not None:
+        rows.append(total)
     return rows
 
 
@@ -2902,6 +2926,34 @@ RESTARTED = object()
 # anywhere in the record because a finished run's last line ends in a tab
 # rather than a newline, which can glue the marker onto it.
 RUN_MARKER = "=== run "
+RE_RUN_MARKER = re.compile(r"=== run .*? \| main\.c (?P<config>\S+) ===")
+
+
+def usable_time(state, now=None):
+    """Seconds of this run that produced kept work: up to "display end" once it
+    finished, up to now while it runs, up to its last commit once it died.
+    now=None means it died."""
+    if state.first_stamp is None:
+        return 0.0
+    if state.run_end_time is not None:
+        end = state.run_end_time
+    elif now is not None:
+        end = now
+    else:
+        end = state.commit_stamp if state.commit_stamp is not None else state.first_stamp
+    return max(0.0, end - state.first_stamp)
+
+
+def total_row(state, now):
+    """"total:" over every run of this config in the log, None before any stamp."""
+    runs = state.runs_before + (state.first_stamp is not None)
+    if not runs:
+        return None
+    alive = state.process_running and not state.done
+    if DISPLAY.replaying and state.log_time:
+        now = state.log_time
+    total = state.banked_time + usable_time(state, now if alive else None)
+    return f"total:   {fmt_duration(total)} (usable work, {runs} run{'s' if runs != 1 else ''})"
 
 
 def is_node_event(line):
@@ -3207,12 +3259,23 @@ def main():
                 # Only across a marker: a RESTARTED is a new file, with no
                 # previous run to disagree with.
                 prev_config = state.config if line is not RESTARTED else {}
+                marker = RE_RUN_MARKER.search(line) if line is not RESTARTED else None
+                marker_config = marker.group("config") if marker else None
+                # The total runs across a boundary only between runs of one config.
+                if marker_config is not None and marker_config == state.marker_config:
+                    banked = state.banked_time + usable_time(state)
+                    runs_before = state.runs_before + (state.first_stamp is not None)
+                else:
+                    banked, runs_before = 0.0, 0
                 # "since dashboard attached" is a reading about the dashboard,
-                # not about the run, so it is the one thing a boundary keeps.
+                # not about the run, so it and the total are what a boundary keeps.
                 attached = state.start_time
                 state = make_state()
                 state.prev_config = prev_config
                 state.start_time = attached
+                state.banked_time = banked
+                state.runs_before = runs_before
+                state.marker_config = marker_config
                 # Keyed by pid, and the next run forks its own workers.
                 _CPU_SAMPLER.reset()
                 done_announced = False
