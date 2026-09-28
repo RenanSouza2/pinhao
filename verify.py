@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-RES_DIR = os.path.join(REPO_ROOT, "cache", "res")
+RES_DIR = os.path.join(REPO_ROOT, "cache", "res", "dec")
 
 API = "https://api.pi.delivery/v1/pi?start={}&numberOfDigits={}"
 API_MAX_DIGITS = 1000
@@ -114,7 +114,7 @@ def default_path():
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("path", nargs="?", help="digits file (default: largest cache/res/pi_*.txt)")
+    parser.add_argument("path", nargs="?", help="digits file (default: largest cache/res/dec/pi_*.txt)")
     parser.add_argument("--tail", type=int, default=1000, help="trailing digits checked first (default 1000)")
     parser.add_argument("--samples", type=int, default=None, help="random samples after the tail (default: until a mismatch or Ctrl-C)")
     parser.add_argument("--batch", type=int, default=100, help=f"digits per random sample, <= {API_MAX_DIGITS} (default 100)")

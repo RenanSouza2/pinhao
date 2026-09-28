@@ -2700,9 +2700,8 @@ def _ram_rows(state, bar_w, row_w, pid_rss, est, real, over_launch):
 
 def _disk_rows(state):
     """The three cache directories a run fills, and what is left on the volume.
-    res/ is left out while it is empty. The tmp reading counts only linked
-    files, so it misses araucaria's disk-backed numbers, which are unlinked the
-    moment they are created."""
+    res/ is left out while it is empty, and so is swap/: araucaria's
+    disk-backed numbers are unlinked the moment they are created."""
     PAIR_COL = 22
 
     def pair(left, right):
@@ -2717,7 +2716,7 @@ def _disk_rows(state):
         free = "?"
     rows = [
         pair(labelled("numbers", size("numbers")), labelled("pieces", size("pieces"))),
-        pair(labelled("tmp", size("tmp")), labelled("free", free)),
+        pair(labelled("partial", size("partial")), labelled("free", free)),
     ]
     # Only once the lock is both compiled in and actually contended: a run that
     # never misses has nothing to say here, and LOCK_DISK_IO is off by default.
