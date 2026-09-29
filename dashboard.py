@@ -1682,6 +1682,10 @@ def post_split_cost(state):
     return max(state.join_events) if state.join_events else None
 
 
+# Chain cycles the rate is averaged over.
+CYCLE_WINDOW = 4
+
+
 def cycle_time_left(state, post_split_left, run_elapsed):
     """Seconds still to run, taken off the run's own repeating unit: chunk to
     chunk between consecutive chain joins. Nothing here is modelled - the
@@ -1689,21 +1693,20 @@ def cycle_time_left(state, post_split_left, run_elapsed):
     inside that one measurement - so it is the reading to prefer wherever it
     exists. None until two chain joins have landed in this run.
 
-    The latest cycle rather than the mean of them, since it already carries
-    whatever the growing prefix has cost so far. Each cycle still to come is
-    that length with its own chain join grown by what the last two differed by,
-    scaled down for a short final chunk. The cycle in progress has no length of
-    its own to go by, so what it has left is priced bucket by bucket and its
-    own chain join timed off the one before."""
+    Each cycle still to come is the mean of the last CYCLE_WINDOW, scaled down
+    for a short final chunk, and each chain join the mean of theirs. The cycle
+    in progress has no length of its own to go by, so what it has left is
+    priced bucket by bucket, plus that mean chain join."""
     if len(state.chain_marks) < 2 or not state.spine:
         return None
-    (prev_node, prev_ts, prev_dur), (last_node, last_ts, last_dur) = state.chain_marks[-2:]
-    cycle = last_ts - prev_ts
-    chunk_work = cycle - last_dur
-    chunk_leaves = last_node.leaves_total - prev_node.leaves_total
+    marks = state.chain_marks[-CYCLE_WINDOW - 1:]
+    (first_node, first_ts, _), (last_node, last_ts, _) = marks[0], marks[-1]
+    cycles = len(marks) - 1
+    chain = sum(dur for _, _, dur in marks[1:]) / cycles
+    chunk_work = (last_ts - first_ts) / cycles - chain
+    chunk_leaves = (last_node.leaves_total - first_node.leaves_total) / cycles
     if chunk_work <= 0 or chunk_leaves <= 0:
         return None
-    growth = last_dur - prev_dur
     rest = 0.0
     ahead = 0
     below = None
@@ -1715,7 +1718,6 @@ def cycle_time_left(state, post_split_left, run_elapsed):
         if node.own_done or weight <= 0:
             continue
         ahead += 1
-        chain = last_dur + ahead * growth
         if ahead == 1 and done:
             # The one in progress: its own cycle is part spent, and nothing
             # measures how much of it but the work itself.
