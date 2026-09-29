@@ -1480,9 +1480,10 @@ def fit_cost(state):
 
 
 def join_time_left(node, cost, now):
-    """Seconds a running join still needs: its multiplications left, priced at
-    the threads it holds and scaled by how its finished ones ran against the
-    curve, plus their share of loads and writes."""
+    """Seconds a running join still needs: its multiplications left, the running
+    one priced at the threads it started on and the rest at the threads booked,
+    scaled by how its finished ones ran against the curve, plus their share of
+    loads and writes."""
     limbs = effective_limbs(node.op_limbs, node.kind, cost.size)
     runs = [sec * cost.speedup(thr) / cost.work(n) for n, thr, sec in node.mul_samples or ()]
     scale = statistics.median(runs) if runs else 1.0
@@ -1497,7 +1498,7 @@ def join_time_left(node, cost, now):
             wall = w / cost.speedup(node.mul_threads)
             left += max(wall - (now - node.micro_start), 0.05 * wall)
         else:
-            left += w / cost.speedup(held_threads(node))
+            left += w / cost.speedup(node.threads)
     return left + cost.io * work
 
 
