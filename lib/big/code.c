@@ -510,7 +510,7 @@ uint64_t split_span_res_op_size(
     return union_res_op_size(size, i_0, remainder, level, index);
 }
 
-static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
+bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 {
     // size, i_0 , span - 1, level + 1
     if(!sig_res_is_stored(i_0, span - 1))

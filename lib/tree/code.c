@@ -112,6 +112,8 @@ STRUCT(node)
     bool ops_set;
     // [0] left child, [1] right child; inner index is NODE_OP_P/Q/R
     uint64_t ops[2][3];
+    // limbs an op is multiplied at, at most: size off the exact path
+    uint64_t ops_cap;
     tree_plan_t plan;
     union {
         big_t big;
@@ -426,6 +428,7 @@ static void node_op_sizes(node_p n)
                 n->ops[0][i] = split_span_res_op_size(size, i_0, span - 1, level + 1, i);
                 n->ops[1][i] = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, level + 1, i);
             }
+            n->ops_cap = split_span_res_is_sig(size, i_0, span) ? UINT64_MAX : size;
         }
         break;
 
@@ -442,6 +445,7 @@ static void node_op_sizes(node_p n)
                 n->ops[0][i] = split_span_res_op_size(size, i_0, span, level + 1, i);
                 n->ops[1][i] = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), level + 1, i);
             }
+            n->ops_cap = size;
         }
         break;
 
@@ -457,6 +461,7 @@ static void node_op_sizes(node_p n)
                 n->ops[0][i] = split_big_res_op_size(size, i_0, prefix, 0, i);
                 n->ops[1][i] = split_big_res_op_size(size, i_0 + prefix, chunk, 0, i);
             }
+            n->ops_cap = size;
         }
         break;
 
@@ -536,6 +541,12 @@ static uint64_t get_free_index(tree_scheduler_p s)
 
 
 
+static uint64_t node_op_mul(node_p n, uint64_t child, uint64_t op)
+{
+    uint64_t count = n->ops[child][op];
+    return count < n->ops_cap ? count : n->ops_cap;
+}
+
 static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 {
     if(node_is_leaf(n))
@@ -547,10 +558,10 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 
     // split_span_res_join's four terms, in order: P1xP2, Q1xQ2, P1xR2, R1xQ2
     const uint64_t terms[4][2] = {
-        { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_P] },
-        { n->ops[0][NODE_OP_Q], n->ops[1][NODE_OP_Q] },
-        { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_R] },
-        { n->ops[0][NODE_OP_R], n->ops[1][NODE_OP_Q] }
+        { node_op_mul(n, 0, NODE_OP_P), node_op_mul(n, 1, NODE_OP_P) },
+        { node_op_mul(n, 0, NODE_OP_Q), node_op_mul(n, 1, NODE_OP_Q) },
+        { node_op_mul(n, 0, NODE_OP_P), node_op_mul(n, 1, NODE_OP_R) },
+        { node_op_mul(n, 0, NODE_OP_R), node_op_mul(n, 1, NODE_OP_Q) }
     };
 
     double total = 0.0;
@@ -612,7 +623,7 @@ static uint64_t node_threads_ceiling(node_p n)
     }
 
     node_op_sizes(n);
-    return num_mul_threads_ceiling(n->ops[0][NODE_OP_R], n->ops[1][NODE_OP_Q]);
+    return num_mul_threads_ceiling(node_op_mul(n, 0, NODE_OP_R), node_op_mul(n, 1, NODE_OP_Q));
 }
 
 static uint64_t node_threads(node_p n, uint64_t free_threads)
