@@ -809,6 +809,7 @@ class State:
         self.ever_saw_process = False
         self.run_start_time = None  # wall-clock start of the actual pi process, from get_run_start_time()
         self.run_end_time = None  # wall-clock end, from the "display end" line's own stamp
+        self.phase_stamps = {}  # run-wide phase line -> its latest log stamp
         self.root_pid = None  # the run's own pid, from get_root_pid() - only looked up once needed
         self.task_exit = None  # a worker that did not exit cleanly, as (pid, how, kind, value)
         self.done = False
@@ -1209,6 +1210,8 @@ def handle_phase(state, content):
         return
     action = m.group("action").strip()
     ts = m.group("ts")
+    if ts is not None:
+        state.phase_stamps[action] = float(ts)
     if action in ("dividing", "divided", "pi already stored", "binary split solved"):
         set_phase(state, action, ts)
     if action == "pi already stored":
@@ -2071,13 +2074,13 @@ TREE_THUMB = "\u2588"
 TREE_BOX_CHROME = 4
 
 
-def _pack_parts(parts, indent, limit):
+def _pack_parts(parts, indent, limit, sep=" | "):
     """Segments greedily filled into rows of at most `limit` columns, breaking
     only between them. A segment too wide to share a row gets one of its own:
     there is nothing to gain by breaking inside it."""
     rows, line = [], ""
     for part in parts:
-        merged = f"{line} | {part}" if line else part
+        merged = f"{line}{sep}{part}" if line else part
         if line and visible_len(indent + merged) > limit:
             rows.append(line)
             line = part
@@ -2424,9 +2427,14 @@ def render_box(title, rows, width):
     head += "\u2500" * max(0, inner + 2 - len(head) - 1) + "\u2510"
     out = [head]
     for row in rows:
-        out.append("\u2502 " + _fit_visible(row, inner - 1) + "\u2502")
+        out.append("\u2502 " + _fit_visible(row, box_row_width(width)) + "\u2502")
     out.append("\u2514" + "\u2500" * inner + "\u2518")
     return out
+
+
+def box_row_width(width):
+    """Columns a row gets inside a box `width` wide, as render_box fits it."""
+    return max(BOX_MIN_WIDTH, width - 2) - 1
 
 
 def visible_len(line):
@@ -2599,13 +2607,62 @@ def _threads_rows(state, bar_w, now, budget, threads_now, threads_booked, cpu=No
         ))
 
     if state.thread_span > 0 and budget:
-        # Two indices whose product is the run's thread utilization: the share
-        # of the budget booked, and the share of that booking computing rather
-        # than parked.
-        work_avg, book_avg = thread_avgs(state, now)
-        alloc = 100.0 * book_avg / budget
-        used = 100.0 * work_avg / book_avg if book_avg else 0.0
-        rows.append(" " * LABEL_W + f"alloc {alloc:.0f}% x used {used:.0f}% = {alloc * used / 100.0:.0f}%")
+        rows.append(_utilization_row(*thread_avgs(state, now), budget))
+    return rows
+
+
+def _utilization_row(work_avg, book_avg, budget):
+    """Two indices whose product is the run's thread utilization: the share of
+    the budget booked, and the share of that booking computing rather than
+    parked."""
+    alloc = 100.0 * book_avg / budget
+    used = 100.0 * work_avg / book_avg if book_avg else 0.0
+    return " " * LABEL_W + f"alloc {alloc:.0f}% x used {used:.0f}% = {alloc * used / 100.0:.0f}%"
+
+
+def _final_threads_rows(state, bar_w, now, budget):
+    """The threads box once the run has finished: its averages over the run."""
+    if state.thread_span <= 0 or not budget:
+        return []
+    # the bar is drawn at the precision shown
+    work_avg, book_avg = (round(x, 1) for x in thread_avgs(state, now))
+    counts = (work_avg, book_avg - work_avg, max(0.0, budget - book_avg))
+    tint = severity_colour(1.0 - work_avg / budget, alarm=0.5)
+    return [
+        labelled("threads", f"avg {work_avg:.1f} used / {book_avg:.1f} allocated of {budget}"),
+        bar_row(bar_w, counts, BAR_FULL + BAR_HELD + BAR_NONE, colour=(tint, tint, BAR_ON)),
+        _utilization_row(work_avg, book_avg, budget),
+    ]
+
+
+def guaranteed_decimals(size):
+    """Decimals of a size-limb pi fixed by all but its last limb, as
+    fxd_dec_digits in araucaria and trusted_frac in verify.py count them."""
+    if size < 3:
+        return 0
+    return int((size - 2) * 64 * math.log10(2))
+
+
+def _result_rows(state, now, row_w):
+    """The finished run: how long it took and where, and the decimals its
+    precision guarantees. `row_w` is the box's inner width."""
+    rows = []
+    start, end = state.first_stamp, state.run_end_time
+    if start is not None and end is not None:
+        rows.append(labelled("took", f"{fmt_duration(end - start)}, ended {fmt_clock(end, now)}"))
+    stamps = state.phase_stamps
+    stages = []
+    if start is not None and "binary split solved" in stamps:
+        stages.append(f"tree {fmt_duration(stamps['binary split solved'] - start)}")
+    for name, begin, finish in (("division", "dividing", "divided"), ("decimal", "display begin", "display end")):
+        if begin in stamps and finish in stamps:
+            stages.append(f"{name} {fmt_duration(stamps[finish] - stamps[begin])}")
+    indent = " " * LABEL_W
+    for i, row in enumerate(_pack_parts(stages, indent, row_w, sep="   ")):
+        rows.append(labelled("split", row) if i == 0 else indent + row)
+    size = state.config.get("size")
+    if size:
+        rows.append(labelled("digits", f"{guaranteed_decimals(size):,}"))
     return rows
 
 
@@ -2787,18 +2844,19 @@ def banner_rows(state, now, work_durs):
     return rows
 
 
-def box_geometry(term_w):
+def box_geometry(term_w, four=True):
     """Column widths for the four boxes, the bar width inside each, and the
     inner width of a ram row.
 
     A column holds its box only while it can still fit the widest row that box
     has; below that, boxes stack full width rather than clipping their own
     text. Four columns share the same per-box floor as two - a wider terminal
-    just has room to fit more of them across one row."""
+    just has room to fit more of them across one row. `four` False holds it to
+    two, for a finished run's two boxes."""
     avail = term_w - 2 * BOX_INSET
     COL_MIN = 50
     four_w = (avail - 3 * BOX_GAP) // 4
-    four_col = four_w >= COL_MIN
+    four_col = four and four_w >= COL_MIN
     if four_col:
         two_col = False  # unused on this path; four-across already fits every box
         widths = [four_w, four_w, four_w, avail - 3 * BOX_GAP - 3 * four_w]
@@ -2812,9 +2870,9 @@ def box_geometry(term_w):
     # inner width, less "\u2502 ", the indent, the brackets, and a trailing
     # column so a full bar doesn't butt against the right border
     bar_widths = [max(10, w - 15) for w in widths]
-    # The full inner width of a row in the ram box, matching render_box's own
-    # arithmetic: what a right-aligned flag has to align against.
-    ram_row_w = max(BOX_MIN_WIDTH, widths[2] - 2) - 1
+    # The full inner width of a row in the ram box: what a right-aligned flag
+    # has to align against.
+    ram_row_w = box_row_width(widths[2])
     return widths, bar_widths, avail, ram_row_w, four_col, two_col
 
 
@@ -2848,40 +2906,49 @@ def render(state):
     pid_io = _IO_SAMPLER.update(now, {pid: (c[2], c[3]) for pid, c in counters.items()})
     cpu_total = sum(pid_cpu.values()) if pid_cpu else None
 
-    # Geometry first: completion, threads, ram and disk each need a column
-    # width to size their own bar to before anything is rendered.
+    # Geometry first: every box needs a column width to size its own bar to
+    # before anything is rendered.
     term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
-    widths, bar_widths, avail, ram_row_w, four_col, two_col = box_geometry(term_w)
+    widths, bar_widths, avail, ram_row_w, four_col, two_col = box_geometry(term_w, four=not state.done)
     done_bar_w, thread_bar_w, ram_bar_w, _ = bar_widths
-
-    # The scheduler logs its own total_mem_cost, the number it gates launches
-    # on. Summing the tree's bookings only reconstructs it, so that is the
-    # fallback for logs predating the "active memory" line.
-    est = state.mem_booked
-    if est is None and state.tree_root is not None:
-        est = active_mem_estimate(state.tree_root)
-    if state.phase in ("dividing", "displaying"):
-        # No task scheduler booking exists once the split tree is done - "0"
-        # would read as a real reading of no memory in use, not as unknown.
-        est = None
-    real = sum(pid_rss.values()) if pid_rss else None
-    over_launch = bool(est is not None and state.mem_launch and est >= state.mem_launch)
     budget = thread_budget(state)
-    threads_now = active_threads(state)
-    threads_booked = booked_threads(state)
 
-    cost = fit_cost(state)
-    completion_lines = _completion_rows(state, done_bar_w, cost)
-    thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked, cpu_total)
-    ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, pid_rss, est, real, over_launch)
-    disk_lines = _disk_rows(state)
+    if state.done:
+        boxes_info = (
+            ("result", _result_rows(state, now, box_row_width(widths[0])), widths[0]),
+            ("threads", _final_threads_rows(state, thread_bar_w, now, budget), widths[1]),
+        )
+        rows_of_boxes = (boxes_info,)
+    else:
+        # The scheduler logs its own total_mem_cost, the number it gates
+        # launches on. Summing the tree's bookings only reconstructs it, so
+        # that is the fallback for logs predating the "active memory" line.
+        est = state.mem_booked
+        if est is None and state.tree_root is not None:
+            est = active_mem_estimate(state.tree_root)
+        if state.phase in ("dividing", "displaying"):
+            # No task scheduler booking exists once the split tree is done -
+            # "0" would read as a real reading of no memory in use, not as
+            # unknown.
+            est = None
+        real = sum(pid_rss.values()) if pid_rss else None
+        over_launch = bool(est is not None and state.mem_launch and est >= state.mem_launch)
+        threads_now = active_threads(state)
+        threads_booked = booked_threads(state)
+
+        cost = fit_cost(state)
+        completion_lines = _completion_rows(state, done_bar_w, cost)
+        thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked, cpu_total)
+        ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, pid_rss, est, real, over_launch)
+        disk_lines = _disk_rows(state)
+
+        boxes_info = (
+            ("completion", completion_lines, widths[0]), ("threads", thread_lines, widths[1]),
+            ("ram", ram_lines, widths[2]), ("disk", disk_lines, widths[3]),
+        )
+        rows_of_boxes = (boxes_info,) if four_col else (boxes_info[:2], boxes_info[2:])
 
     inset = " " * BOX_INSET
-    boxes_info = (
-        ("completion", completion_lines, widths[0]), ("threads", thread_lines, widths[1]),
-        ("ram", ram_lines, widths[2]), ("disk", disk_lines, widths[3]),
-    )
-    rows_of_boxes = (boxes_info,) if four_col else (boxes_info[:2], boxes_info[2:])
     for row_boxes in rows_of_boxes:
         present = [(t, r, w) for t, r, w in row_boxes if r]
         if not present:
