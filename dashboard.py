@@ -9,6 +9,7 @@ import collections
 import contextlib
 import ctypes
 import ctypes.util
+import datetime
 import math
 import os
 import re
@@ -1315,6 +1316,18 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+def fmt_clock(ts, now):
+    """Local time at ts to the nearest minute: bare on now's date, with the
+    weekday up to six days on, with the date past that."""
+    at = datetime.datetime.fromtimestamp(round(ts / 60) * 60)
+    days = (at.date() - datetime.date.fromtimestamp(now)).days
+    if days == 0:
+        return at.strftime("%H:%M")
+    if 0 < days < 7:
+        return at.strftime("%a %H:%M")
+    return at.strftime("%b %d %H:%M")
+
+
 # ETA: one cost curve for a multiplication, fitted to the run's own:
 # seconds = a * limbs**b * (s + (1 - s) / threads), limbs both operands' in all.
 
@@ -2416,7 +2429,7 @@ def _completion_rows(state, bar_w, cost):
     # a count of anything the reader can point at - printing them as a tally
     # would read more exact than they are. The pieces/joins line above is where
     # the countable figures live.
-    left = ""
+    eta = ""
     if not state.done and state.log_start and state.log_time:
         # The log's clock carried forward by however long the dashboard has
         # been waiting for the next line, so it ticks through a long
@@ -2427,18 +2440,18 @@ def _completion_rows(state, bar_w, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            left = f"   {fmt_duration(rest)} left"
+            eta = f"   ends {fmt_clock(clock + rest, clock)}"
         elif state.sizes_missing:
-            left = f"   {RSS_ON}no eta: log has no operand sizes{OFF}"
+            eta = f"   {RSS_ON}no eta: log has no operand sizes{OFF}"
         elif state.tree_root is not None:
-            left = f"   {RSS_ON}eta after the first join{OFF}"
+            eta = f"   {RSS_ON}eta after the first join{OFF}"
     pct_str = f"{fmt_num(pct)}%"
     width = LABEL_W + bar_w + 2
     # The percentage is right-aligned on the bar's own edge, so anything that
     # would push the row past it is dropped rather than carried over - and of
-    # the two the time left is the one the bar below does not already say.
-    if len(rows[0]) + visible_len(left) + len(pct_str) <= width:
-        rows[0] += left
+    # the two the finish time is the one the bar below does not already say.
+    if len(rows[0]) + visible_len(eta) + len(pct_str) <= width:
+        rows[0] += eta
     rows[0] += " " * (width - len(pct_str) - visible_len(rows[0])) + pct_str
     rows.append(" " * LABEL_W + bar)
     return rows
