@@ -41,9 +41,14 @@
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", \
         IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, LEVEL, DUR)
 
-#define LOG_NODE_MEM(IDX, PID, LABEL, I_0, I_MAX, LEVEL, MEM) \
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", \
-        IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, LEVEL, MEM)
+// The plan's memory, then the operands' limb counts: left child's P Q R, then
+// the right child's.
+#define LOG_NODE_JOINING(IDX, PID, I_0, I_MAX, LEVEL, N) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B" \
+        " | limbs " U64P(10) " " U64P(10) " " U64P(10) " " U64P(10) " " U64P(10) " " U64P(10) "", \
+        IDX, PID, get_wall_time(), "joining", I_0, I_MAX, LEVEL, (N)->plan.mem_cost, \
+        (N)->ops[0][NODE_OP_P], (N)->ops[0][NODE_OP_Q], (N)->ops[0][NODE_OP_R], \
+        (N)->ops[1][NODE_OP_P], (N)->ops[1][NODE_OP_Q], (N)->ops[1][NODE_OP_R])
 
 #define LOG_NODE_PIECE(IDX, PID, I_0, I_MAX, DUR) \
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", \
@@ -752,6 +757,7 @@ static void node_big_process(node_p n, uint64_t index, _Atomic uint64_t *threads
     uint64_t i_max = i_0 + remainder - 1;
 
     LOG_NODE(index, pid, "begin", i_0, i_max, level);
+    LOG_NODE_JOINING(index, pid, i_0, i_max, level, n);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -784,7 +790,7 @@ static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *thread
         return;
     }
 
-    LOG_NODE_MEM(index, pid, "joining", i_0, i_max, level, n->plan.mem_cost);
+    LOG_NODE_JOINING(index, pid, i_0, i_max, level, n);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -809,7 +815,7 @@ static void node_chain_process(node_p n, uint64_t index, _Atomic uint64_t *threa
     uint64_t prefix = remainder - node_chain_chunk(n);
 
     LOG_NODE(index, pid, "begin", i_0, i_max, level);
-    LOG_NODE_MEM(index, pid, "joining", i_0, i_max, level, n->plan.mem_cost);
+    LOG_NODE_JOINING(index, pid, i_0, i_max, level, n);
     split_task_t t = {
         .index = index,
         .size = size,

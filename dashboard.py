@@ -165,7 +165,8 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<level>\d+)"
-    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B)(?:\s+(?P<lock>HIT|MISS))?)?"
+    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B(?:\s*\|\s*limbs\s+(?P<limbs>\d+(?:\s+\d+){5}))?)"
+    r"(?:\s+(?P<lock>HIT|MISS))?)?"
 )
 RE_PIECE = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*(?P<i0>\d+)\s+(?P<i_max>\d+)\s*\|\s*(?P<dur>[\d.]+)"
@@ -292,7 +293,7 @@ class TreeNode:
         "wrap_rows", "shrink_since", "wrap_width", "unwrap_hold",
         "terms_done", "term_start", "term_threads", "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
-        "mem_estimate", "term", "micro", "micro_start",
+        "mem_estimate", "op_limbs", "term", "micro", "micro_start",
     )
 
     def __init__(self, i0, level, kind, n2, parent):
@@ -325,6 +326,7 @@ class TreeNode:
         self.parent = parent
         self.children = []
         self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
+        self.op_limbs = None  # limbs of P1 Q1 R1 P2 Q2 R2, from "joining"
         self.term = None  # e.g. "P1xP2" or "R", from a join's "mul ..." header line; leaves have none
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
         self.micro_start = None  # log timestamp the current micro-phase was entered at
@@ -1039,6 +1041,9 @@ def handle_node_process(state, content):
         mem = m.group("mem")
         if tree_node is not None and mem is not None:
             tree_node.mem_estimate = int(mem)
+        limbs = m.group("limbs")
+        if tree_node is not None and limbs is not None:
+            tree_node.op_limbs = tuple(int(v) for v in limbs.split())
     elif action == "joined":
         state.joins_done += 1
         dur = m.group("dur")
