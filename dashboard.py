@@ -296,7 +296,7 @@ class TreeNode:
         "wrap_rows", "shrink_since", "wrap_width", "unwrap_hold",
         "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
-        "mem_estimate", "op_limbs", "result_limbs", "mul_done", "mul_threads", "mul_samples",
+        "mem_estimate", "op_limbs", "result_limbs", "steps_done", "mul_threads", "mul_samples",
         "term", "micro", "micro_start",
     )
 
@@ -329,7 +329,7 @@ class TreeNode:
         self.mem_estimate = None  # bytes the scheduler booked, from "task start" MEM
         self.op_limbs = None  # limbs of P1 Q1 R1 P2 Q2 R2, from "joining"
         self.result_limbs = None  # a piece's own P Q R, from its parent's "joining"
-        self.mul_done = 0  # TERM_BITS of the multiplications finished or resumed
+        self.steps_done = 0  # of JOIN_STEPS, how many are finished or resumed
         self.mul_threads = None  # threads the running multiplication started on
         self.mul_samples = None  # (limbs, threads, seconds) of each one finished
         self.term = None  # e.g. "P1xP2" or "R", from a join's "mul ..." header line; leaves have none
@@ -761,6 +761,8 @@ class State:
         self.mul_limbs_hi = None
         self.piece_time = 0.0  # seconds of finished pieces
         self.io_time = 0.0  # seconds joins spent loading, writing and adding
+        # phase -> (limbs, seconds) of the last loads, writes or adds
+        self.io_recent = {phase: collections.deque(maxlen=IO_WINDOW) for phase in IO_PHASES}
         self.piece_fit = [0.0] * 9  # sums [n, x, x^2, P, Q, R, xP, xQ, xR], x log i0
         self.piece_last = None  # (P, Q, R) of the last piece sized
         self.sizes_missing = False  # a "joining" line carried no limbs
@@ -1078,7 +1080,7 @@ def handle_phase_line(state, content):
         tree_node.micro = action
         if action == "resumed":
             tree_node.resumed = True
-            tree_node.mul_done |= TERM_BITS.get(tree_node.term, 0)
+            skip_term(tree_node)
     if action == "multiplying":
         attach_task_plan(state, pid, tree_node)
         tree_node.mul_threads = held_threads(tree_node)
@@ -1330,6 +1332,7 @@ def fmt_clock(ts, now):
 
 # ETA: one cost curve for a multiplication, fitted to the run's own:
 # seconds = a * limbs**b * (s + (1 - s) / threads), limbs both operands' in all.
+# A load, a write and an add each cost seconds per limb they move.
 
 # b and s until the run has measured its own.
 MUL_EXPONENT = 1.27
@@ -1340,8 +1343,10 @@ MUL_SERIAL = 0.0
 FIT_LIMB_SPREAD = 4.0
 SERIAL_GRID = tuple(i / 100 for i in range(61))
 
-# Multiplications and pieces the current cost is taken over.
+# Multiplications, loads, writes, adds (each) and pieces the current cost is
+# taken over.
 MUL_WINDOW = 64
+IO_WINDOW = 64
 PIECE_WINDOW = 16
 
 # The division and the decimal output, each, in multiplications of two
@@ -1351,7 +1356,22 @@ POST_SPLIT_MULS = 13
 # A multiplication's operands, as indices into a join's six logged limb
 # counts: the left child's P Q R, then the right child's.
 TERM_OPERANDS = {"P1xP2": (0, 3), "Q1xQ2": (1, 4), "P1xR2": (0, 5), "R1xQ2": (2, 4)}
-TERM_BITS = {term: 1 << i for i, term in enumerate(TERM_OPERANDS)}
+OPERAND_INDEX = {"P1": 0, "Q1": 1, "R1": 2, "P2": 3, "Q2": 4, "R2": 5}
+
+# A join's steps in the order it runs them, as (term, phase, what it moves): an
+# operand, a product by the term that makes it, or R.
+JOIN_STEPS = (
+    ("P1xP2", "loading", "P1"), ("P1xP2", "loading", "P2"),
+    ("P1xP2", "multiplying", "P1xP2"), ("P1xP2", "writing", "P1xP2"),
+    ("Q1xQ2", "loading", "Q1"), ("Q1xQ2", "loading", "Q2"),
+    ("Q1xQ2", "multiplying", "Q1xQ2"), ("Q1xQ2", "writing", "Q1xQ2"),
+    ("P1xR2", "loading", "P1"), ("P1xR2", "loading", "R2"),
+    ("P1xR2", "multiplying", "P1xR2"), ("P1xR2", "writing", "P1xR2"),
+    ("R1xQ2", "loading", "R1"), ("R1xQ2", "loading", "Q2"),
+    ("R1xQ2", "multiplying", "R1xQ2"),
+    ("R", "loading", "P1xR2"), ("R", "adding", "R"), ("R", "writing", "R"),
+)
+IO_PHASES = ("loading", "writing", "adding")
 
 # The phase line that ends each timed phase, by the one that began it.
 PHASE_BEGIN = {"loaded": "loading", "written": "writing", "added": "adding", "multiplied": "multiplying"}
@@ -1364,15 +1384,61 @@ def exact_path(limbs, kind, size):
             and any(x != size for x in limbs[:3]) and any(x != size for x in limbs[3:]))
 
 
-def effective_limbs(limbs, kind, size):
-    """The six operand sizes a join actually multiplies: off the exact path an
-    operand past size is a float of size limbs."""
-    return limbs if exact_path(limbs, kind, size) else tuple(min(x, size) for x in limbs)
+def step_limbs(op, exact, size):
+    """Limbs each of JOIN_STEPS moves, in step order - both operands' for a
+    multiplication. Off the exact path an operand or product past size is a
+    float of size limbs."""
+    if not exact:
+        op = tuple(min(x, size) for x in op)
+
+    def product(term):
+        i, j = TERM_OPERANDS[term]
+        return op[i] + op[j] if exact else min(op[i] + op[j], size)
+
+    out = []
+    for _, phase, what in JOIN_STEPS:
+        if phase == "multiplying":
+            i, j = TERM_OPERANDS[what]
+            out.append(op[i] + op[j])
+        elif what in OPERAND_INDEX:
+            out.append(op[OPERAND_INDEX[what]])
+        elif what == "R":
+            out.append(max(product("P1xR2"), product("R1xQ2")))
+        else:
+            out.append(product(what))
+    return out
+
+
+def advance_step(node, phase, what):
+    """Move a join past the step that just ended and return its index, or None
+    if it has no such step left. `what` names a load's operand."""
+    for k in range(node.steps_done, len(JOIN_STEPS)):
+        term, step_phase, step_what = JOIN_STEPS[k]
+        if term == node.term and step_phase == phase and (what is None or step_what == what):
+            node.steps_done = k + 1
+            return k
+    return None
+
+
+def skip_term(node):
+    """Move a join past every step of the term it resumed."""
+    for k in range(len(JOIN_STEPS), node.steps_done, -1):
+        if JOIN_STEPS[k - 1][0] == node.term:
+            node.steps_done = k
+            return
+
+
+def step_running(node):
+    """Whether the join is inside the step it finishes next."""
+    if node.steps_done >= len(JOIN_STEPS) or node.micro_start is None:
+        return False
+    term, phase, what = JOIN_STEPS[node.steps_done]
+    return term == node.term and node.micro == (f"{phase} {what}" if phase == "loading" else phase)
 
 
 def book_phase_end(state, node, action, ts):
-    """Book a join's finished multiplication, load, write or add into what
-    the cost curve is fitted from."""
+    """Move a join past its finished multiplication, load, write or add, and
+    book it into what the cost is fitted from."""
     begin = PHASE_BEGIN.get(action.split(" ", 1)[0])
     if (begin is None or not node.children or node.micro is None
             or node.micro_start is None or node.micro.split(" ", 1)[0] != begin):
@@ -1380,14 +1446,17 @@ def book_phase_end(state, node, action, ts):
     seconds = ts - node.micro_start
     if begin != "multiplying":
         state.io_time += seconds
-        return
-    node.mul_done |= TERM_BITS.get(node.term, 0)
+    k = advance_step(node, begin, action.partition(" ")[2] or None)
     size = state.config.get("size")
-    if node.op_limbs is None or node.term not in TERM_OPERANDS or size is None or seconds <= 0:
+    if k is None or node.op_limbs is None or size is None:
         return
-    i, j = TERM_OPERANDS[node.term]
-    eff = effective_limbs(node.op_limbs, node.kind, size)
-    limbs, threads = eff[i] + eff[j], node.mul_threads or 1
+    limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, size), size)[k]
+    if begin != "multiplying":
+        state.io_recent[begin].append((limbs, seconds))
+        return
+    if seconds <= 0:
+        return
+    threads = node.mul_threads or 1
     if node.mul_samples is None:
         node.mul_samples = []
     node.mul_samples.append((limbs, threads, seconds))
@@ -1455,11 +1524,11 @@ def _fit_exponent(sums, serial, fixed):
 class Cost:
     """The run's cost curve as of one frame."""
 
-    __slots__ = ("a", "b", "s", "piece", "io", "size")
+    __slots__ = ("a", "b", "s", "piece", "rates", "size")
 
-    def __init__(self, a, b, s, piece, size):
+    def __init__(self, a, b, s, piece, rates, size):
         self.a, self.b, self.s, self.piece, self.size = a, b, s, piece, size
-        self.io = 0.0  # seconds of loads, writes and adds per single-thread second multiplied
+        self.rates = rates  # IO_PHASES -> seconds per limb moved, 0 until one has run
 
     def speedup(self, threads):
         return 1.0 / (self.s + (1.0 - self.s) / max(threads or 1, 1))
@@ -1486,33 +1555,36 @@ def fit_cost(state):
         a = statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
                               for limbs, thr, sec in state.mul_recent)
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
-    cost = Cost(a, b, s, piece, state.config.get("size"))
-    work = sum(sec * cost.speedup(thr) for thr, sec in state.mul_seconds.items())
-    cost.io = state.io_time / work if work else 0.0
-    return cost
+    rates = {}
+    for phase, recent in state.io_recent.items():
+        limbs = sum(n for n, _ in recent)
+        rates[phase] = sum(sec for _, sec in recent) / limbs if limbs else 0.0
+    return Cost(a, b, s, piece, rates, state.config.get("size"))
 
 
 def join_time_left(node, cost, now):
-    """Seconds a running join still needs: its multiplications left, the running
-    one priced at the threads it started on and the rest at the threads booked,
-    scaled by how its finished ones ran against the curve, plus their share of
-    loads and writes."""
-    limbs = effective_limbs(node.op_limbs, node.kind, cost.size)
+    """Seconds a running join still needs, step by step: a multiplication by
+    the curve, scaled by how its finished ones ran against it, the running one
+    at the threads it started on and the rest at the threads booked; a load,
+    write or add at its rate per limb."""
+    limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
     runs = [sec * cost.speedup(thr) / cost.work(n) for n, thr, sec in node.mul_samples or ()]
     scale = statistics.median(runs) if runs else 1.0
-    left = work = 0.0
-    for term, (i, j) in TERM_OPERANDS.items():
-        if node.mul_done & TERM_BITS[term]:
-            continue
-        w = scale * cost.work(limbs[i] + limbs[j])
-        work += w
-        if node.term == term and node.micro == "multiplying" and node.micro_start is not None:
+    running = step_running(node)
+    left = 0.0
+    for k in range(node.steps_done, len(JOIN_STEPS)):
+        phase = JOIN_STEPS[k][1]
+        current = running and k == node.steps_done
+        if phase == "multiplying":
             # a donation only reaches the worker at its next multiplication
-            wall = w / cost.speedup(node.mul_threads)
-            left += max(wall - (now - node.micro_start), 0.05 * wall)
+            threads = node.mul_threads if current else node.threads
+            wall = scale * cost.work(limbs[k]) / cost.speedup(threads)
         else:
-            left += w / cost.speedup(node.threads)
-    return left + cost.io * work
+            wall = cost.rates[phase] * limbs[k]
+        if current:
+            wall = max(wall - (now - node.micro_start), 0.05 * wall)
+        left += wall
+    return left
 
 
 def node_time_left(node, cost, now):
@@ -1554,8 +1626,9 @@ def result_limbs(node, size, piece_sizes, memo):
 
 def run_work_left(state, cost, piece_sizes, now):
     """Single-thread seconds of work still in the tree: pieces at the current
-    piece time, joins by the curve, sized by their "joining" line once they
-    start and from the piece sizes before."""
+    piece time, joins step by step - multiplications by the curve, loads,
+    writes and adds at their rates per limb - sized by their "joining" line
+    once they start and from the piece sizes before."""
     memo = {}
     left = 0.0
     stack = [state.tree_root]
@@ -1569,22 +1642,22 @@ def run_work_left(state, cost, piece_sizes, now):
             left += max(cost.piece - spent, 0.05 * cost.piece)
             continue
         if node.op_limbs is not None:
-            limbs = effective_limbs(node.op_limbs, node.kind, cost.size)
+            limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
         else:
             lr = result_limbs(node.children[0], cost.size, piece_sizes, memo)
             rr = result_limbs(node.children[1], cost.size, piece_sizes, memo)
-            limbs = lr[:3] + rr[:3]
-            if not (node.kind == "SPAN" and lr[3] and rr[3] and limbs[0] < cost.size):
-                limbs = tuple(min(x, cost.size) for x in limbs)
-        work = 0.0
-        for term, (i, j) in TERM_OPERANDS.items():
-            if node.mul_done & TERM_BITS[term]:
-                continue
-            w = cost.work(limbs[i] + limbs[j])
-            if node.term == term and node.micro == "multiplying" and node.micro_start is not None:
-                w = max(w - (now - node.micro_start) * cost.speedup(node.mul_threads), 0.05 * w)
-            work += w
-        left += work * (1.0 + cost.io)
+            op = lr[:3] + rr[:3]
+            limbs = step_limbs(op, node.kind == "SPAN" and lr[3] and rr[3] and op[0] < cost.size, cost.size)
+        running = step_running(node)
+        for k in range(node.steps_done, len(JOIN_STEPS)):
+            phase = JOIN_STEPS[k][1]
+            w = cost.work(limbs[k]) if phase == "multiplying" else cost.rates[phase] * limbs[k]
+            if running and k == node.steps_done:
+                spent = now - node.micro_start
+                if phase == "multiplying":
+                    spent *= cost.speedup(node.mul_threads)
+                w = max(w - spent, 0.05 * w)
+            left += w
     return left
 
 
