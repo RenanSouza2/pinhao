@@ -2422,18 +2422,14 @@ def _completion_rows(state, bar_w, cost):
         (done_units, remaining),
         BAR_FULL + BAR_NONE, cursor=cursor_glyph(state),
     )
-    # The split tree's own counts only mean anything while it is being
-    # walked; past that the phase line carries the progress.
-    if state.phase == "splitting":
-        rows.append(
-            labelled("pieces", f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}")
-        )
     # Right-aligned on the phase row rather than on one of its own: it is a
     # reading of the run as a whole, like the phase, and weighted units are not
     # a count of anything the reader can point at - printing them as a tally
-    # would read more exact than they are. The pieces/joins line above is where
-    # the countable figures live.
-    eta = ""
+    # would read more exact than they are. The pieces/joins row is where the
+    # countable figures live.
+    pct_str = f"{fmt_num(pct)}%"
+    width = LABEL_W + bar_w + 2
+    rows[0] += " " * (width - len(pct_str) - visible_len(rows[0])) + pct_str
     if not state.done and state.log_start and state.log_time:
         # The log's clock carried forward by however long the dashboard has
         # been waiting for the next line, so it ticks through a long
@@ -2444,19 +2440,17 @@ def _completion_rows(state, bar_w, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            eta = f"   ends {fmt_clock(clock + rest, clock)}"
+            rows.append(labelled("eta", f"ends {fmt_clock(clock + rest, clock)}"))
         elif state.sizes_missing:
-            eta = f"   {RSS_ON}no eta: log has no operand sizes{OFF}"
+            rows.append(labelled("eta", f"{RSS_ON}log has no operand sizes{OFF}"))
         elif state.tree_root is not None:
-            eta = f"   {RSS_ON}eta after the first join{OFF}"
-    pct_str = f"{fmt_num(pct)}%"
-    width = LABEL_W + bar_w + 2
-    # The percentage is right-aligned on the bar's own edge, so anything that
-    # would push the row past it is dropped rather than carried over - and of
-    # the two the finish time is the one the bar below does not already say.
-    if len(rows[0]) + visible_len(eta) + len(pct_str) <= width:
-        rows[0] += eta
-    rows[0] += " " * (width - len(pct_str) - visible_len(rows[0])) + pct_str
+            rows.append(labelled("eta", f"{RSS_ON}after the first join{OFF}"))
+    # The split tree's own counts only mean anything while it is being
+    # walked; past that the phase line carries the progress.
+    if state.phase == "splitting":
+        rows.append(
+            labelled("pieces", f"{state.pieces_done} / {state.total_pieces}    joins: {state.joins_done} / {total_joins}")
+        )
     rows.append(" " * LABEL_W + bar)
     return rows
 
