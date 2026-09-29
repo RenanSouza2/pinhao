@@ -1754,7 +1754,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now cost"
-    " pid_rss pid_cpu pid_io disk_lock_enabled chunk_span index_max size width",
+    " pid_rss pid_cpu pid_io disk_lock_enabled chunk_span size width",
 )
 
 
@@ -1916,6 +1916,11 @@ def node_label(node, span_w=0, i0_w=0):
         size = "B" if node.kind == "BIG" else "C"
     i0 = f"{(node.i0 - 1) // PIECES_PER_LEAF:,}" if DISPLAY.pieces else f"{node.i0:,}"
     return f"[{node.level}, {size:>{span_w}}, {i0:>{i0_w}}]"
+
+
+def root_label(view):
+    """The tree's root, named by the run's size in limbs."""
+    return f"[{view.size:,}]" if view.size is not None else "[?]"
 
 
 def chain_label(node, chunk):
@@ -2097,15 +2102,13 @@ def render_chain_ladder(root, view):
     chunk = 1 << view.chunk_span
     rungs = chain_rungs(root, chunk)
 
-    # The run itself, named by the three fields the cache path is keyed by.
     # The root chain is also the last rung's join, so it reads here and the
     # rung below it keeps showing its chunk rather than repeating this task.
     mark, _, status, tint = node_state(root, view)
-    size = f"{view.size:,}" if view.size is not None else "?"
     head, parts = node_detail(root, view, status)
     append_node_row(
         view, root,
-        f"{tint}{mark}{OFF} {tint}[{size}, {root.i0:,}, {view.index_max:,}]{OFF}" + head,
+        f"{tint}{mark}{OFF} {tint}{root_label(view)}{OFF}" + head,
         parts, "",
     )
 
@@ -2171,8 +2174,9 @@ def render_tree(node, view, prefix="", is_last=True, is_root=True):
     connector = "" if is_root else ("\u2514\u2500 " if is_last else "\u251c\u2500 ")
     child_prefix = prefix if is_root else prefix + ("   " if is_last else "\u2502  ")
     head, parts = node_detail(node, view, status)
+    label = root_label(view) if is_root else node_label(node)
     append_node_row(
-        view, node, f"{prefix}{connector}{tint}{mark}{OFF} {tint}{node_label(node)}{OFF}" + head,
+        view, node, f"{prefix}{connector}{tint}{mark}{OFF} {tint}{label}{OFF}" + head,
         parts, child_prefix,
     )
 
@@ -2849,7 +2853,7 @@ def render(state):
                 tree_lines, tree_now,
                 cost, pid_rss, pid_cpu,
                 pid_io, state.disk_lock_enabled is not False,
-                state.tree_chunk_span, state.index_max,
+                state.tree_chunk_span,
                 state.config.get("size", state.explicit_size), term_w - TREE_INSET,
             ))
             lines.extend(" " * TREE_INSET + row for row in tree_lines)
