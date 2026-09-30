@@ -786,7 +786,7 @@ class State:
         self.log_start = None  # first log timestamp seen, the run's own zero
         self.mul_fit = {}  # threads -> sums [n, x, x^2, y, xy, y^2], x log limbs, y log seconds
         self.mul_samples = []  # (limbs, threads, seconds) of every multiplication
-        self.mul_scale = None  # ((samples, b, s), the median scale fitted to them)
+        self.mul_scale = None  # ((samples, b, s), the median scale fitted to them, slowdown by threads)
         self.mul_limbs_lo = None  # smallest and largest limbs multiplied
         self.mul_limbs_hi = None
         self.io_sums = {phase: [0, 0.0] for phase in IO_PHASES}  # phase -> [limbs, seconds] of every load, write or add
@@ -802,6 +802,8 @@ class State:
         self.explicit_size = explicit_size
         self.mem_launch = None  # new tasks launch only while usage is below this
         self.mem_max = None  # the first slot may overshoot up to here beside running tasks
+        self.spill_limbs = None  # fewest limbs in all whose multiplication goes to disk, from mem_max
+        self.spill_samples = []  # (limbs, threads, seconds) of every multiplication that went to disk
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.config = {}  # every "<label> | <int>" config line this run logged
         self.prev_config = {}  # the same, from the run before this one in an appended log
@@ -1245,6 +1247,7 @@ def handle_phase(state, content):
             state.mem_launch = val
         elif name == "mem max":
             state.mem_max = val
+            state.spill_limbs = spill_limbs(val)
         elif name == "disk lock":
             state.disk_lock_enabled = bool(val)
         return
@@ -1384,6 +1387,14 @@ def fmt_clock(ts, now):
 MUL_EXPONENT = 1.27
 MUL_SERIAL = 0.0
 
+# A multiplication araucaria backs with disk, against the curve, until the run
+# has spilled one of its own.
+SPILL_SLOWDOWN = 2.9
+
+# Limbs in all from which a multiplication measures how much slower its thread
+# count runs than the curve.
+SLOWDOWN_LIMBS = 64_000_000
+
 # b is fitted once the limbs multiplied span this ratio, s once two thread
 # counts have run; s is picked from this grid.
 FIT_LIMB_SPREAD = 4.0
@@ -1507,6 +1518,9 @@ def book_phase_end(state, node, action, ts):
     if node.mul_samples is None:
         node.mul_samples = []
     node.mul_samples.append((limbs, threads, seconds))
+    if state.spill_limbs is not None and limbs >= state.spill_limbs:
+        state.spill_samples.append((limbs, threads, seconds))
+        return
     state.mul_samples.append((limbs, threads, seconds))
     x, y = math.log(limbs), math.log(seconds)
     sums = state.mul_fit.setdefault(threads, [0.0] * 6)
@@ -1567,21 +1581,50 @@ def _fit_exponent(sums, serial, fixed):
     return b, syy - 2 * a * sy - 2 * b * sxy + n * a * a + 2 * a * b * sx + b * b * sxx
 
 
+def ssm_fft_limbs(count):
+    # ssm_get_params: limbs in each of the two FFT buffers a multiplication of
+    # `count` limbs in all allocates
+    m = 1 << (count.bit_length() // 2)
+    k = 2 * (1 << ((count + m - 1) // m - 1).bit_length())
+    m = count // k + 1
+    n = 2 * m + 2 if k < 64 else k * (128 * m // k + 1) // 64 + 1
+    pad = (n - 1) & 7
+    if pad and (n > 129 or n - 1 < 8 or pad > 4):
+        n += 8 - pad
+    return n * k
+
+
+def spill_limbs(mem_max):
+    """Fewest limbs in all whose multiplication araucaria backs with disk: an
+    FFT buffer past disk_threshold_bytes, which pi() sets to mem_max / 2."""
+    lo, hi = 1, 1 << 48
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if 8 * ssm_fft_limbs(mid) > mem_max // 2:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
 class Cost:
     """The run's cost curve as of one frame."""
 
-    __slots__ = ("a", "b", "s", "piece", "rates", "size")
+    __slots__ = ("a", "b", "s", "piece", "rates", "size", "spill", "spill_limbs", "slowdown")
 
-    def __init__(self, a, b, s, piece, rates, size):
+    def __init__(self, a, b, s, piece, rates, size, spill=1.0, spill_limbs=None, slowdown=None):
         self.a, self.b, self.s, self.piece, self.size = a, b, s, piece, size
         self.rates = rates  # IO_PHASES -> seconds per limb moved, 0 until one has run
+        self.spill, self.spill_limbs = spill, spill_limbs  # slowdown on disk, and from how many limbs
+        self.slowdown = slowdown or {}  # threads -> big multiplications on them against the curve
 
     def speedup(self, threads):
         return 1.0 / (self.s + (1.0 - self.s) / max(threads or 1, 1))
 
     def work(self, limbs):
         # single-thread seconds
-        return self.a * limbs ** self.b
+        work = self.a * limbs ** self.b
+        return work * self.spill if self.spill_limbs is not None and limbs >= self.spill_limbs else work
 
 
 def fit_cost(state):
@@ -1596,16 +1639,25 @@ def fit_cost(state):
             if best is None or err < best[0]:
                 best = (err, exponent, serial)
         _, b, s = best
-    a = None
+    a, slowdown = None, {}
     if state.mul_samples:
         key = (len(state.mul_samples), b, s)
         if state.mul_scale is None or state.mul_scale[0] != key:
-            state.mul_scale = (key, statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
-                                                      for limbs, thr, sec in state.mul_samples))
-        a = state.mul_scale[1]
+            scale = statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
+                                      for limbs, thr, sec in state.mul_samples)
+            big = collections.defaultdict(list)
+            for limbs, thr, sec in state.mul_samples:
+                if limbs >= SLOWDOWN_LIMBS:
+                    big[thr].append(sec / (scale * limbs ** b * (s + (1.0 - s) / thr)))
+            state.mul_scale = (key, scale, {t: statistics.median(v) for t, v in big.items() if len(v) >= 3})
+        _, a, slowdown = state.mul_scale
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
     rates = {phase: sec / limbs if limbs else 0.0 for phase, (limbs, sec) in state.io_sums.items()}
-    return Cost(a, b, s, piece, rates, state.config.get("size"))
+    spill = SPILL_SLOWDOWN
+    if state.spill_samples and a is not None:
+        spill = statistics.median(sec / (a * limbs ** b * (s + (1.0 - s) / thr))
+                                  for limbs, thr, sec in state.spill_samples)
+    return Cost(a, b, s, piece, rates, state.config.get("size"), spill, state.spill_limbs, slowdown)
 
 
 def join_time_left(node, cost):
@@ -1787,9 +1839,10 @@ def node_thread_price(state, node, cost, piece_sizes, memo, budget):
 def run_thread_left(state, cost):
     """Booked thread-seconds the split still needs: every unfinished node at its
     price scaled by how its cost class's finished tasks ran against theirs - a
-    class none has finished at the largest finished span class's, at least 1 -
-    a pending piece by its terms' size against the pieces just finished, and a
-    running join less the multiplications it has finished."""
+    class none has finished slowed down as the run's big multiplications on as
+    many threads are, and at the largest finished span class's ratio, at least
+    1 - a pending piece by its terms' size against the pieces just finished,
+    and a running join less the multiplications it has finished."""
     piece_sizes = piece_sizes_at(state)
     memo, budget = {}, thread_budget(state) or 1
     ratios = {c: statistics.fmean(sec / node_thread_price(state, node, cost, piece_sizes, memo, budget)
@@ -1808,7 +1861,15 @@ def run_thread_left(state, cost):
         if node.own_done:
             continue
         stack.extend(node.children)
-        price = node_thread_price(state, node, cost, piece_sizes, memo, budget) * ratios.get(cost_class(node), fallback)
+        c = cost_class(node)
+        price = node_thread_price(state, node, cost, piece_sizes, memo, budget)
+        if c in ratios:
+            price *= ratios[c]
+        else:
+            if node.children:
+                threads = node_price_parts(state, node, cost, piece_sizes, memo, budget)[0]
+                price *= cost.slowdown.get(threads, 1.0)
+            price *= fallback
         if not node.children and recent:
             price *= (sum(piece_sizes(node.i0)) / recent) ** cost.b
         left += price * (1 - node.parts_done / JOIN_PARTS)
