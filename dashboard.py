@@ -755,14 +755,13 @@ class State:
         self.log_time = None  # newest log timestamp seen, the clock a replay runs on
         self.log_start = None  # first log timestamp seen, the run's own zero
         self.mul_fit = {}  # threads -> sums [n, x, x^2, y, xy, y^2], x log limbs, y log seconds
-        self.mul_recent = collections.deque(maxlen=MUL_WINDOW)  # (limbs, threads, seconds)
+        self.mul_samples = []  # (limbs, threads, seconds) of every multiplication
         self.mul_seconds = collections.defaultdict(float)  # threads -> seconds multiplied
         self.mul_limbs_lo = None  # smallest and largest limbs multiplied
         self.mul_limbs_hi = None
         self.piece_time = 0.0  # seconds of finished pieces
         self.io_time = 0.0  # seconds joins spent loading, writing and adding
-        # phase -> (limbs, seconds) of the last loads, writes or adds
-        self.io_recent = {phase: collections.deque(maxlen=IO_WINDOW) for phase in IO_PHASES}
+        self.io_sums = {phase: [0, 0.0] for phase in IO_PHASES}  # phase -> [limbs, seconds] of every load, write or add
         self.piece_fit = [0.0] * 9  # sums [n, x, x^2, P, Q, R, xP, xQ, xR], x log i0
         self.piece_last = None  # (P, Q, R) of the last piece sized
         self.sizes_missing = False  # a "joining" line carried no limbs
@@ -1335,7 +1334,8 @@ def fmt_clock(ts, now):
 
 # ETA: one cost curve for a multiplication, fitted to the run's own:
 # seconds = a * limbs**b * (s + (1 - s) / threads), limbs both operands' in all.
-# A load, a write and an add each cost seconds per limb they move.
+# A load, a write and an add each cost seconds per limb they move, averaged
+# over the run.
 
 # b and s until the run has measured its own.
 MUL_EXPONENT = 1.27
@@ -1346,15 +1346,16 @@ MUL_SERIAL = 0.0
 FIT_LIMB_SPREAD = 4.0
 SERIAL_GRID = tuple(i / 100 for i in range(61))
 
-# Multiplications, loads, writes, adds (each) and pieces the current cost is
-# taken over.
-MUL_WINDOW = 64
-IO_WINDOW = 64
-PIECE_WINDOW = 16
+# Pieces the current piece time is taken over.
+PIECE_WINDOW = 128
 
-# The division and the decimal output, each, in multiplications of two
-# size-limb operands on the full thread budget.
-POST_SPLIT_MULS = 13
+# Multiplications finished before the run's ETA is shown.
+ETA_WARMUP_MULS = 64
+
+# The division and the decimal output in multiplications of two size-limb
+# operands on the full thread budget.
+DIVIDE_MULS = 20.5
+DISPLAY_MULS = 15.8
 
 # A multiplication's operands, as indices into a join's six logged limb
 # counts: the left child's P Q R, then the right child's.
@@ -1455,7 +1456,9 @@ def book_phase_end(state, node, action, ts):
         return
     limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, size), size)[k]
     if begin != "multiplying":
-        state.io_recent[begin].append((limbs, seconds))
+        sums = state.io_sums[begin]
+        sums[0] += limbs
+        sums[1] += seconds
         return
     if seconds <= 0:
         return
@@ -1463,7 +1466,7 @@ def book_phase_end(state, node, action, ts):
     if node.mul_samples is None:
         node.mul_samples = []
     node.mul_samples.append((limbs, threads, seconds))
-    state.mul_recent.append((limbs, threads, seconds))
+    state.mul_samples.append((limbs, threads, seconds))
     state.mul_seconds[threads] += seconds
     x, y = math.log(limbs), math.log(seconds)
     sums = state.mul_fit.setdefault(threads, [0.0] * 6)
@@ -1554,14 +1557,11 @@ def fit_cost(state):
                 best = (err, exponent, serial)
         _, b, s = best
     a = None
-    if state.mul_recent:
+    if state.mul_samples:
         a = statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
-                              for limbs, thr, sec in state.mul_recent)
+                              for limbs, thr, sec in state.mul_samples)
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
-    rates = {}
-    for phase, recent in state.io_recent.items():
-        limbs = sum(n for n, _ in recent)
-        rates[phase] = sum(sec for _, sec in recent) / limbs if limbs else 0.0
+    rates = {phase: sec / limbs if limbs else 0.0 for phase, (limbs, sec) in state.io_sums.items()}
     return Cost(a, b, s, piece, rates, state.config.get("size"))
 
 
@@ -1682,37 +1682,55 @@ def run_work_done(state, cost, now):
     return done
 
 
-def post_split_left(state, step, now):
-    """Seconds of the division and the decimal output still ahead, `step`
-    each."""
+def post_split_left(state, mul, now):
+    """Seconds of the division and the decimal output still ahead, `mul` the
+    seconds of one multiplication they are counted in."""
+    divide, display = DIVIDE_MULS * mul, DISPLAY_MULS * mul
     spent = max(0.0, now - (state.phase_start_time or now))
     if state.phase == "dividing":
-        return max(step - spent, 0.05 * step) + step
+        return max(divide - spent, 0.05 * divide) + display
     if state.phase in ("divided", "pi already stored"):
-        return step
+        return display
     if state.phase == "displaying":
-        return max(step - spent, 0.05 * step)
+        return max(display - spent, 0.05 * display)
     if state.phase == "displayed":
         return 0.0
-    return 2 * step
+    return divide + display
+
+
+def eta_wait(state, cost):
+    """Why the run's ETA can't be priced yet, or None once it can."""
+    if cost.size is None or not state.total_pieces:
+        return "waiting for the run's size"
+    if state.phase != "splitting":
+        return None if cost.a is not None else "log has no multiplication to price by"
+    if state.tree_root is None:
+        return state.tree_skipped_reason or "waiting for the run's chunk span"
+    if state.log_start is None:
+        return "waiting for the first task"
+    if cost.piece is None:
+        return "after the first piece"
+    if len(state.mul_samples) < ETA_WARMUP_MULS:
+        return f"after {ETA_WARMUP_MULS} multiplications ({len(state.mul_samples)} so far)"
+    if state.piece_fit[0] == 0:
+        return "log has no operand sizes" if state.sizes_missing else "after the first join"
+    return None
 
 
 def run_time_left(state, cost, now):
-    """Seconds the run still needs, or None until the curve, the piece time
-    and a piece's size are known: the work left over the rate the run has done
-    work at so far, plus the division and the decimal output."""
-    if (cost is None or cost.a is None or cost.piece is None or cost.size is None
-            or state.tree_root is None or state.log_start is None or now <= state.log_start):
+    """Seconds the run still needs, or None while eta_wait gives a reason: the
+    work left over the rate the run has done work at so far, plus the division
+    and the decimal output."""
+    if eta_wait(state, cost) is not None:
         return None
-    step = POST_SPLIT_MULS * cost.work(2 * cost.size) / cost.speedup(thread_budget(state))
-    post = post_split_left(state, step, now)
+    mul = cost.work(2 * cost.size) / cost.speedup(thread_budget(state))
+    post = post_split_left(state, mul, now)
     if state.phase != "splitting":
         return post
-    piece_sizes = piece_sizes_at(state)
     done = run_work_done(state, cost, now)
-    if piece_sizes is None or done <= 0:
+    if done <= 0:
         return None
-    return run_work_left(state, cost, piece_sizes, now) * (now - state.log_start) / done + post
+    return run_work_left(state, cost, piece_sizes_at(state), now) * (now - state.log_start) / done + post
 
 
 def is_io_phase(micro):
@@ -2467,6 +2485,24 @@ def bar_row(*args, **kwargs):
     return " " * LABEL_W + render_bar(*args, **kwargs)
 
 
+def _eta_row(state, cost):
+    """When the run is expected to end, or why that can't be priced yet."""
+    why = eta_wait(state, cost)
+    if why is None:
+        # The log's clock carried forward by however long the dashboard has
+        # been waiting for the next line, so it ticks through a long
+        # multiplication and stays anchored to the log rather than to today.
+        # Replaying, only the log knows the time at all.
+        clock = state.log_time
+        if not DISPLAY.replaying and state.last_line_time is not None:
+            clock += max(0.0, time.time() - state.last_line_time)
+        rest = run_time_left(state, cost, clock)
+        if rest is not None:
+            return labelled("eta", f"ends {fmt_clock(clock + rest, clock)}")
+        why = "no work measured yet"
+    return labelled("eta", f"{RSS_ON}{why}{OFF}")
+
+
 def _completion_rows(state, bar_w, cost):
     rows = []
     phase_line = labelled("phase", state.phase)
@@ -2477,6 +2513,8 @@ def _completion_rows(state, bar_w, cost):
         phase_line += f"   {fmt_duration(clock - state.phase_start_time)} elapsed"
     rows.append(phase_line)
     if not state.total_pieces:
+        if not state.done:
+            rows.append(_eta_row(state, cost))
         rows.append(
             labelled("pieces", f"{state.pieces_done} / ?    joins: {state.joins_done} / ? (waiting for the log's \"piece size\"/\"run size\" lines)")
         )
@@ -2511,21 +2549,8 @@ def _completion_rows(state, bar_w, cost):
     pct_str = f"{fmt_num(pct)}%"
     width = LABEL_W + bar_w + 2
     rows[0] += " " * (width - len(pct_str) - visible_len(rows[0])) + pct_str
-    if not state.done and state.log_start and state.log_time:
-        # The log's clock carried forward by however long the dashboard has
-        # been waiting for the next line, so it ticks through a long
-        # multiplication and stays anchored to the log rather than to today.
-        # Replaying, only the log knows the time at all.
-        clock = state.log_time
-        if not DISPLAY.replaying and state.last_line_time is not None:
-            clock += max(0.0, time.time() - state.last_line_time)
-        rest = run_time_left(state, cost, clock)
-        if rest is not None:
-            rows.append(labelled("eta", f"ends {fmt_clock(clock + rest, clock)}"))
-        elif state.sizes_missing:
-            rows.append(labelled("eta", f"{RSS_ON}log has no operand sizes{OFF}"))
-        elif state.tree_root is not None:
-            rows.append(labelled("eta", f"{RSS_ON}after the first join{OFF}"))
+    if not state.done:
+        rows.append(_eta_row(state, cost))
     # The split tree's own counts only mean anything while it is being
     # walked; past that the phase line carries the progress.
     if state.phase == "splitting":
