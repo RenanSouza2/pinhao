@@ -84,6 +84,10 @@ TREE_BOX_ON = "\x1b[38;2;74;78;90m"
 # on, the measurement is the check on it, so only one of the pair reads loud.
 RSS_ON = "\x1b[38;2;124;128;140m"
 
+# Dim grey (#4A4E5A, contrast 2.15) for the share of a subtree its running
+# tasks will finish.
+IN_FLIGHT_ON = "\x1b[38;2;74;78;90m"
+
 # Cyan (#4396A2) on a task's thread count. Flat across every width: the number
 # carries how wide the task is, the colour only says which reading it is.
 # The only cyan on the dashboard, and cool on purpose - every warm hue here
@@ -232,30 +236,30 @@ def leaves_covered(i0, i_max):
     return (i_max - i0 + 1) // PIECES_PER_LEAF
 
 
-# Bar weights: a node's share of the bar is its share of the work, not one
-# point per node. A join's cost doubles with every span above TREE_PIECE_SIZE;
-# LEAF_WEIGHT is a leaf in those same units and is calibrated for
-# TREE_PIECE_SIZE 22 - re-measure it if that changes. Chain and big nodes join a
-# prefix against a single chunk, so their cost is flat in width rather than
-# doubling with it. Every weight is scaled by JOIN_PARTS so that a quarter of a
-# join is still a whole number: span 23 is 4 and its quarter is 1.
 JOIN_PARTS = 4  # multiplications in a join: P1xP2, Q1xQ2, P1xR2, R1xQ2
-LEAF_WEIGHT = 4 * JOIN_PARTS
-
-# A chain or big node fuses a growing prefix against one chunk, so its cost is
-# affine in the leaves under it rather than flat in width, and it runs with
-# nothing beside it: weighted flat, the spine that ends the run is invisible on
-# the bar and every reading of the time left comes in short. Calibrated at
-# TREE_PIECE_SIZE 22 - re-measure both with it.
-CHAIN_BASE = 5448  # a chain node's cost before its prefix is counted
-CHAIN_PER_LEAF = 0.883
 
 
-def node_weight(kind, leaves):
-    if kind == "SPAN":
-        return LEAF_WEIGHT if leaves == 1 else leaves // 2 * JOIN_PARTS
-    weight = CHAIN_BASE + int(CHAIN_PER_LEAF * leaves)
-    return weight - weight % JOIN_PARTS
+def cost_class(node):
+    """What a node's cost is estimated from: a piece or span join by the pieces
+    it covers, every chain link as one, a big node by its pieces."""
+    if node.kind == "SPAN":
+        return node.leaves_total
+    if node.kind == "CHAIN":
+        return "chain"
+    return ("big", node.leaves_total)
+
+
+def subtree_counts(node):
+    """Nodes in a subtree by cost class, the node itself included."""
+    if node.kind == "SPAN":
+        # 2^k pieces hold 2^(k-j) nodes of 2^j pieces each
+        return {1 << j: node.leaves_total >> j for j in range(node.leaves_total.bit_length())}
+    if node.class_counts is None:
+        counts = collections.Counter({cost_class(node): 1})
+        for child in node.children:
+            counts.update(subtree_counts(child))
+        node.class_counts = counts
+    return node.class_counts
 
 
 TREE_NODE_CAP = 250000  # total nodes; skip the view rather than choke on it
@@ -291,13 +295,13 @@ DISPLAY = Display()
 
 class TreeNode:
     __slots__ = (
-        "i0", "level", "kind", "n2", "leaves_total", "leaves_done", "units_done",
-        "weight", "subtree_weight", "own_units",
+        "i0", "level", "kind", "n2", "leaves_total", "leaves_done",
+        "parts_done", "done_counts", "class_counts",
         "wrap_rows", "shrink_since", "wrap_width", "unwrap_hold",
         "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "op_limbs", "result_limbs", "steps_done", "mul_threads", "mul_samples",
-        "term", "micro", "micro_start",
+        "term", "micro", "micro_start", "eta_anchor",
     )
 
     def __init__(self, i0, level, kind, n2, parent):
@@ -307,15 +311,14 @@ class TreeNode:
         self.n2 = n2  # remainder (BIG, CHAIN) or span (SPAN)
         self.leaves_total = (1 << (n2 - TREE_PIECE_SIZE)) if kind == "SPAN" else (n2 // PIECES_PER_LEAF)
         self.leaves_done = 0
-        self.weight = node_weight(kind, self.leaves_total)
-        self.subtree_weight = 0  # own weight plus every descendant's; set by _weigh
-        self.own_units = 0  # of self.weight, how much is credited: a join earns it by quarters
+        self.parts_done = 0  # of JOIN_PARTS, the multiplications counted done
+        self.done_counts = None  # finished nodes in this subtree by cost class
+        self.class_counts = None  # every node in this subtree by cost class, for a node that is not a span
         self.wrap_rows = 0  # rows its reading is laid out over now; 0 is beside the node
         self.shrink_since = None  # when it first fitted in fewer, for unwrap_hold
         self.unwrap_hold = TREE_UNWRAP_HOLD  # how long it must fit before shrinking
         self.wrap_width = None  # terminal width the current layout was chosen at
         self.resumed = False  # skipped a term a previous run had committed
-        self.units_done = 0  # weight of the nodes finished in this subtree
         self.own_done = False
         self.in_progress = False
         self.task_idx = None
@@ -335,6 +338,7 @@ class TreeNode:
         self.term = None  # e.g. "P1xP2" or "R", from a join's "mul ..." header line; leaves have none
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
         self.micro_start = None  # log timestamp the current micro-phase was entered at
+        self.eta_anchor = None  # (when it was priced, seconds left then): the task's ETA counts down from it
 
 
 def _build_span(i0, span, level, parent, by_key):
@@ -388,18 +392,12 @@ def _build_chunked(i0, remainder, chunk_span, level, parent, by_key):
     return _build_chain(i0, remainder, chunk_span, parent, by_key)
 
 
-def _weigh(node):
-    node.subtree_weight = node.weight + sum(_weigh(c) for c in node.children)
-    return node.subtree_weight
-
-
 def build_tree(index_max, chunk_span):
     total_pieces = index_max // PIECES_PER_LEAF
     if 2 * total_pieces - 1 > TREE_NODE_CAP:
         return None, None
     by_key = {}
     root = _build_chunked(1, index_max, chunk_span, 0, None, by_key)
-    _weigh(root)
     return root, by_key
 
 
@@ -418,6 +416,14 @@ def apply_index_max(state, index_max):
         state.tree_skipped_reason = (
             f"tree too large to display ({2 * state.total_pieces - 1} nodes > {TREE_NODE_CAP})"
         )
+        return
+    # the last span of each size, and the smallest chain link, as the model sees them
+    state.class_reps = {}
+    for node in state.tree_by_key.values():
+        c = cost_class(node)
+        rep = state.class_reps.get(c)
+        if rep is None or (node.i0 > rep.i0 if node.kind == "SPAN" else node.leaves_total < rep.leaves_total):
+            state.class_reps[c] = node
 
 
 def mark_leaves_done(node, leaves):
@@ -427,24 +433,17 @@ def mark_leaves_done(node, leaves):
         n = n.parent
 
 
-def mark_units_done(node, units):
-    """Units are node_weight sums, as on the overall bar. The clamp keeps a
-    replayed or interleaved record from overshooting the subtree's own total."""
+def count_done(node):
+    """Count every node of a finished subtree not counted yet, on the node and
+    each of its ancestors."""
+    done = node.done_counts or {}
+    new = {c: k - done.get(c, 0) for c, k in subtree_counts(node).items() if k > done.get(c, 0)}
     n = node
     while n is not None:
-        n.units_done = min(n.units_done + units, n.subtree_weight)
+        if n.done_counts is None:
+            n.done_counts = collections.Counter()
+        n.done_counts.update(new)
         n = n.parent
-
-
-def mark_own_units(node, units):
-    """Credit part of a node's own weight, capped at what it is still owed: a
-    join earns its weight a quarter at a time, and a resumed or replayed record
-    must not carry it past what the node is worth."""
-    units = min(units, node.weight - node.own_units)
-    if units <= 0:
-        return
-    node.own_units += units
-    mark_units_done(node, units)
 
 
 def mark_active(node, delta):
@@ -464,7 +463,9 @@ def mark_node_done(node):
     active_count negative on every ancestor, and a negative count reads as
     "nothing running below here" for the rest of the run."""
     was_active = node.in_progress
+    count_done(node)
     node.own_done = True
+    node.parts_done = JOIN_PARTS
     node.in_progress = False
     node.task_idx = None
     node.pid = None
@@ -489,6 +490,23 @@ def pi_process_running():
         return result.returncode == 0
     except OSError:
         return False
+
+
+def run_alive(state):
+    """Whether the run is still going: its root pid once pgrep has found it,
+    pgrep again once that pid is gone."""
+    if state.root_pid is not None:
+        try:
+            os.kill(state.root_pid, 0)
+            return True
+        except ProcessLookupError:
+            state.root_pid = None
+        except PermissionError:
+            return True
+    if not pi_process_running():
+        return False
+    state.root_pid = get_root_pid()
+    return True
 
 
 def _parse_ps_clock(text):
@@ -738,6 +756,18 @@ def fmt_num(n):
     return f"{n:.1f}".removesuffix(".0")
 
 
+def fmt_share(n):
+    # fmt_num, but a positive value under 0.2 to its first significant digit,
+    # or its first two when they are a 1 and a non-zero
+    if n >= 0.2:
+        return fmt_num(n)
+    rounded, digits = float(f"{n:.2g}"), 2
+    lead = f"{rounded:e}"
+    if lead[0] != "1" or lead[2] == "0":
+        rounded, digits = float(f"{n:.1g}"), 1
+    return f"{rounded:.{digits - 1 - math.floor(math.log10(rounded))}f}"
+
+
 def fmt_bytes(n):
     if n is None:
         return "?"
@@ -756,11 +786,9 @@ class State:
         self.log_start = None  # first log timestamp seen, the run's own zero
         self.mul_fit = {}  # threads -> sums [n, x, x^2, y, xy, y^2], x log limbs, y log seconds
         self.mul_samples = []  # (limbs, threads, seconds) of every multiplication
-        self.mul_seconds = collections.defaultdict(float)  # threads -> seconds multiplied
+        self.mul_scale = None  # ((samples, b, s), the median scale fitted to them)
         self.mul_limbs_lo = None  # smallest and largest limbs multiplied
         self.mul_limbs_hi = None
-        self.piece_time = 0.0  # seconds of finished pieces
-        self.io_time = 0.0  # seconds joins spent loading, writing and adding
         self.io_sums = {phase: [0, 0.0] for phase in IO_PHASES}  # phase -> [limbs, seconds] of every load, write or add
         self.piece_fit = [0.0] * 9  # sums [n, x, x^2, P, Q, R, xP, xQ, xR], x log i0
         self.piece_last = None  # (P, Q, R) of the last piece sized
@@ -781,6 +809,7 @@ class State:
         self.pieces_done = 0
         self.joins_done = 0
         self.piece_events = collections.deque(maxlen=2000)  # durations, seconds
+        self.piece_recent_i0 = collections.deque(maxlen=PIECE_WINDOW)  # i0 of the last pieces finished
         self.join_events = collections.deque(maxlen=2000)  # durations, seconds
         self.lock_requests = 0  # "locked" lines seen, across all workers
         self.lock_misses = 0  # of those, the ones that found the lock already held
@@ -798,6 +827,14 @@ class State:
         self.chunk_span = None  # from the log's "chunk span" line
         self.tree_chunk_span = None  # the span the tree on screen was built with
         self.tree_root = None
+        self.class_reps = {}  # cost class -> the node the model prices it by
+        self.class_cost = {}  # cost class -> [booked thread-seconds, tasks] of its finished tasks
+        self.class_samples = collections.defaultdict(list)  # cost class -> (node, thread-seconds) of its finished joins that logged their sizes
+        self.class_tasks = 0  # finished tasks booked into class_cost
+        self.class_price_cache = None  # (key, prices) of the classes no task has finished yet
+        self.sizes_version = 0  # bumped whenever a join logs its sizes
+        self.price_parts = {}  # node id -> node_price_parts, for sizes_version
+        self.price_parts_version = None
         self.tree_by_key = None  # (i0, i_max) -> TreeNode; the range identifies a node on its own
         self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
         self.halt = None  # last "launch halt" as (reason, i0, i_max, level, mem), cleared by the next launch
@@ -894,6 +931,8 @@ def thread_tick(state, ts):
         state.booked_time += (booked_capped(state) or 0) * dt
         state.thread_span += dt
         state.thread_last_ts = ts
+        for entry in state.active.values():
+            entry["thread_s"] = entry.get("thread_s", 0.0) + (entry.get("threads") or 0) * dt
 
 
 def attach_task_plan(state, pid, tree_node):
@@ -960,8 +999,6 @@ def handle_node_process(state, content):
         state.joins_done += covered - 1
         if tree_node is not None:
             mark_leaves_done(tree_node, covered)
-            mark_units_done(tree_node, tree_node.subtree_weight)
-            tree_node.own_units = tree_node.weight
             mark_node_done(tree_node)
     elif action == "joining":
         mem = m.group("mem")
@@ -973,6 +1010,7 @@ def handle_node_process(state, content):
         elif tree_node is not None:
             tree_node.op_limbs = tuple(int(v) for v in limbs.split())
             note_piece_sizes(state, tree_node)
+            state.sizes_version += 1
     elif action == "joined":
         state.joins_done += 1
         dur = m.group("dur")
@@ -986,7 +1024,6 @@ def handle_node_process(state, content):
         if dur is not None:
             state.join_events.append(float(dur))
         if tree_node is not None:
-            mark_own_units(tree_node, tree_node.weight)
             mark_node_done(tree_node)
 
 
@@ -997,14 +1034,13 @@ def handle_piece(state, content):
     dur = float(m.group("dur"))
     state.pieces_done += 1
     state.piece_events.append(dur)
-    state.piece_time += dur
 
     i0, i_max = int(m.group("i0")), int(m.group("i_max"))
+    state.piece_recent_i0.append(i0)
     if state.tree_by_key:
         tree_node = state.tree_by_key.get((i0, i_max))
         if tree_node is not None:
             mark_leaves_done(tree_node, 1)
-            mark_own_units(tree_node, tree_node.weight)
             mark_node_done(tree_node)
 
 
@@ -1062,13 +1098,11 @@ def handle_phase_line(state, content):
         return
     if is_header:
         # A term's header means the previous multiplication finished, so the
-        # join banks a quarter of its weight. The last quarter is held back for
-        # "joined": the trailing add and write are still to come, and a node
-        # must not read complete while any of its work remains.
-        if tree_node.term is not None:
-            quarter = tree_node.weight // JOIN_PARTS
-            if tree_node.own_units + 2 * quarter <= tree_node.weight:
-                mark_own_units(tree_node, quarter)
+        # join counts a quarter of itself done. The last quarter is held back
+        # for "joined": the trailing add and write are still to come, and a
+        # node must not read complete while any of its work remains.
+        if tree_node.term is not None and tree_node.parts_done + 2 <= JOIN_PARTS:
+            tree_node.parts_done += 1
         tree_node.term = term
     else:
         # Only a change of phase restarts the clock: a phase logged twice
@@ -1126,7 +1160,18 @@ def handle_task_end(state, content):
     if not m:
         return
     pid = int(m.group("pid"))
-    state.active.pop(pid, None)
+    entry = state.active.pop(pid, None)
+    node = entry.get("node") if entry is not None else None
+    # a resumed join timed only what was left of it
+    if node is None or not node.own_done or not entry.get("thread_s") or entry.get("resumed"):
+        return
+    c = cost_class(node)
+    booked = state.class_cost.setdefault(c, [0.0, 0])
+    booked[0] += entry["thread_s"]
+    booked[1] += 1
+    state.class_tasks += 1
+    if node.children and node.op_limbs is not None:
+        state.class_samples[c].append((node, entry["thread_s"]))
 
 
 def handle_task_exit(state, content):
@@ -1219,8 +1264,6 @@ def handle_phase(state, content):
             state.joins_done = state.total_joins
         if state.tree_root is not None:
             mark_leaves_done(state.tree_root, state.tree_root.leaves_total)
-            mark_units_done(state.tree_root, state.tree_root.subtree_weight)
-            state.tree_root.own_units = state.tree_root.weight
             mark_node_done(state.tree_root)
     elif action == "display begin":
         set_phase(state, "displaying", ts)
@@ -1448,8 +1491,6 @@ def book_phase_end(state, node, action, ts):
             or node.micro_start is None or node.micro.split(" ", 1)[0] != begin):
         return
     seconds = ts - node.micro_start
-    if begin != "multiplying":
-        state.io_time += seconds
     k = advance_step(node, begin, action.partition(" ")[2] or None)
     size = state.config.get("size")
     if k is None or node.op_limbs is None or size is None:
@@ -1467,7 +1508,6 @@ def book_phase_end(state, node, action, ts):
         node.mul_samples = []
     node.mul_samples.append((limbs, threads, seconds))
     state.mul_samples.append((limbs, threads, seconds))
-    state.mul_seconds[threads] += seconds
     x, y = math.log(limbs), math.log(seconds)
     sums = state.mul_fit.setdefault(threads, [0.0] * 6)
     for k, v in enumerate((1.0, x, x * x, y, x * y, y * y)):
@@ -1558,18 +1598,21 @@ def fit_cost(state):
         _, b, s = best
     a = None
     if state.mul_samples:
-        a = statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
-                              for limbs, thr, sec in state.mul_samples)
+        key = (len(state.mul_samples), b, s)
+        if state.mul_scale is None or state.mul_scale[0] != key:
+            state.mul_scale = (key, statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
+                                                      for limbs, thr, sec in state.mul_samples))
+        a = state.mul_scale[1]
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
     rates = {phase: sec / limbs if limbs else 0.0 for phase, (limbs, sec) in state.io_sums.items()}
     return Cost(a, b, s, piece, rates, state.config.get("size"))
 
 
-def join_time_left(node, cost, now):
-    """Seconds a running join still needs, step by step: a multiplication by
-    the curve, scaled by how its finished ones ran against it, the running one
-    at the threads it started on and the rest at the threads booked; a load,
-    write or add at its rate per limb."""
+def join_time_left(node, cost):
+    """Seconds a join's steps take in full, from the one it is in: a
+    multiplication by the curve, scaled by how its finished ones ran against
+    it, the running one at the threads it started on and the rest at the
+    threads booked; a load, write or add at its rate per limb."""
     limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
     runs = [sec * cost.speedup(thr) / cost.work(n) for n, thr, sec in node.mul_samples or ()]
     scale = statistics.median(runs) if runs else 1.0
@@ -1577,29 +1620,32 @@ def join_time_left(node, cost, now):
     left = 0.0
     for k in range(node.steps_done, len(JOIN_STEPS)):
         phase = JOIN_STEPS[k][1]
-        current = running and k == node.steps_done
         if phase == "multiplying":
             # a donation only reaches the worker at its next multiplication
-            threads = node.mul_threads if current else node.threads
-            wall = scale * cost.work(limbs[k]) / cost.speedup(threads)
+            threads = node.mul_threads if running and k == node.steps_done else node.threads
+            left += scale * cost.work(limbs[k]) / cost.speedup(threads)
         else:
-            wall = cost.rates[phase] * limbs[k]
-        if current:
-            wall = max(wall - (now - node.micro_start), 0.05 * wall)
-        left += wall
+            left += cost.rates[phase] * limbs[k]
     return left
 
 
 def node_time_left(node, cost, now):
     """Seconds a running task still needs, or None where the curve cannot price
-    it yet. A piece past the typical piece reads negative."""
+    it yet. A piece is priced when it starts and a join whenever its phase
+    changes; in between it counts down, negative once overrun."""
     if cost is None or node.start_time is None:
         return None
     if not node.children:
-        return None if cost.piece is None else cost.piece - (now - node.start_time)
-    if cost.a is None or cost.size is None or node.op_limbs is None:
+        if cost.piece is None:
+            return None
+        since = node.start_time
+    elif cost.a is None or cost.size is None or node.op_limbs is None:
         return None
-    return join_time_left(node, cost, now)
+    else:
+        since = node.micro_start if node.micro_start is not None else node.start_time
+    if node.eta_anchor is None or node.eta_anchor[0] != since:
+        node.eta_anchor = (since, join_time_left(node, cost) if node.children else cost.piece)
+    return node.eta_anchor[1] - (now - since)
 
 
 def result_limbs(node, size, piece_sizes, memo):
@@ -1625,61 +1671,6 @@ def result_limbs(node, size, piece_sizes, memo):
             out = tuple(min(size, min(op[k], size) + min(op[k + 3], size)) for k in range(3)) + (False,)
     memo[id(node)] = out
     return out
-
-
-def run_work_left(state, cost, piece_sizes, now):
-    """Single-thread seconds of work still in the tree: pieces at the current
-    piece time, joins step by step - multiplications by the curve, loads,
-    writes and adds at their rates per limb - sized by their "joining" line
-    once they start and from the piece sizes before."""
-    memo = {}
-    left = 0.0
-    stack = [state.tree_root]
-    while stack:
-        node = stack.pop()
-        if node.own_done:
-            continue
-        stack.extend(node.children)
-        if not node.children:
-            spent = now - node.start_time if node.start_time is not None else 0.0
-            left += max(cost.piece - spent, 0.05 * cost.piece)
-            continue
-        if node.op_limbs is not None:
-            limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
-        else:
-            lr = result_limbs(node.children[0], cost.size, piece_sizes, memo)
-            rr = result_limbs(node.children[1], cost.size, piece_sizes, memo)
-            op = lr[:3] + rr[:3]
-            limbs = step_limbs(op, node.kind == "SPAN" and lr[3] and rr[3] and op[0] < cost.size, cost.size)
-        running = step_running(node)
-        for k in range(node.steps_done, len(JOIN_STEPS)):
-            phase = JOIN_STEPS[k][1]
-            w = cost.work(limbs[k]) if phase == "multiplying" else cost.rates[phase] * limbs[k]
-            if running and k == node.steps_done:
-                spent = now - node.micro_start
-                if phase == "multiplying":
-                    spent *= cost.speedup(node.mul_threads)
-                w = max(w - spent, 0.05 * w)
-            left += w
-    return left
-
-
-def run_work_done(state, cost, now):
-    """Single-thread seconds of work this run has done: pieces, multiplications
-    at the speedup of the threads they ran on, and the joins' loads, writes and
-    adds, the running ones counted up to now."""
-    done = state.piece_time + state.io_time
-    done += sum(sec * cost.speedup(thr) for thr, sec in state.mul_seconds.items())
-    for entry in state.active.values():
-        node = entry.get("node")
-        if node is None or node.micro is None or node.micro_start is None:
-            continue
-        spent = max(0.0, now - node.micro_start)
-        if node.micro == "multiplying":
-            done += spent * cost.speedup(node.mul_threads)
-        elif node.micro == "evaluating" or is_single_thread_phase(node.micro):
-            done += spent
-    return done
 
 
 def post_split_left(state, mul, now):
@@ -1719,18 +1710,196 @@ def eta_wait(state, cost):
 
 def run_time_left(state, cost, now):
     """Seconds the run still needs, or None while eta_wait gives a reason: the
-    work left over the rate the run has done work at so far, plus the division
-    and the decimal output."""
+    split's booked thread-seconds left over the threads the run keeps booked,
+    plus the division and the decimal output."""
     if eta_wait(state, cost) is not None:
         return None
     mul = cost.work(2 * cost.size) / cost.speedup(thread_budget(state))
     post = post_split_left(state, mul, now)
     if state.phase != "splitting":
         return post
-    done = run_work_done(state, cost, now)
-    if done <= 0:
-        return None
-    return run_work_left(state, cost, piece_sizes_at(state), now) * (now - state.log_start) / done + post
+    budget = thread_budget(state) or 1
+    booked = min(state.booked_time / state.thread_span / budget, 1.0) if state.thread_span else 1.0
+    return run_thread_left(state, cost) / (budget * booked) + post
+
+
+def node_operands(node, cost, piece_sizes, memo):
+    """(limbs of P1 Q1 R1 P2 Q2 R2, whether exact) of a join: as logged once it
+    starts, from its children's results before."""
+    if node.op_limbs is not None:
+        return node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size)
+    left = result_limbs(node.children[0], cost.size, piece_sizes, memo)
+    right = result_limbs(node.children[1], cost.size, piece_sizes, memo)
+    op = left[:3] + right[:3]
+    return op, node.kind == "SPAN" and left[3] and right[3] and op[0] < cost.size
+
+
+def node_work(node, cost, piece_sizes, memo):
+    """Single-thread seconds the model prices a whole node at, every step of it."""
+    if not node.children:
+        return cost.piece
+    op, exact = node_operands(node, cost, piece_sizes, memo)
+    limbs = step_limbs(op, exact, cost.size)
+    return sum(cost.work(n) if phase == "multiplying" else cost.rates[phase] * n
+               for (_, phase, _), n in zip(JOIN_STEPS, limbs))
+
+
+def mul_threads_ceiling(count):
+    # num_mul_threads_ceiling: the largest power of two t with 512 t^2 <= count,
+    # 1 below 8192 limbs
+    if count < 8192:
+        return 1
+    return 1 << (((int(count) // 512).bit_length() - 1) // 2)
+
+
+def node_price_parts(state, node, cost, piece_sizes, memo, budget):
+    """(threads the scheduler gives a join, its multiplications' limbs, limbs by
+    load/write/add phase), kept until a join logs its sizes."""
+    if state.price_parts_version != state.sizes_version:
+        state.price_parts, state.price_parts_version = {}, state.sizes_version
+    parts = state.price_parts.get(id(node))
+    if parts is None:
+        op, exact = node_operands(node, cost, piece_sizes, memo)
+        threads = min(mul_threads_ceiling(min(op[2], op[4])), budget)
+        moved = collections.Counter()
+        muls = []
+        for (_, phase, _), n in zip(JOIN_STEPS, step_limbs(op, exact, cost.size)):
+            if phase == "multiplying":
+                muls.append(n)
+            else:
+                moved[phase] += n
+        parts = (1 << (threads.bit_length() - 1), tuple(muls), tuple(moved.items()))
+        state.price_parts[id(node)] = parts
+    return parts
+
+
+def node_thread_price(state, node, cost, piece_sizes, memo, budget):
+    """Booked thread-seconds the model prices a whole node at: the threads the
+    scheduler gives it, held through every step - its multiplications at their
+    speedup, its loads, writes and add at their rates."""
+    if not node.children:
+        return cost.piece
+    threads, muls, moved = node_price_parts(state, node, cost, piece_sizes, memo, budget)
+    speedup = cost.speedup(threads)
+    return threads * (sum(cost.work(n) for n in muls) / speedup + sum(cost.rates[phase] * n for phase, n in moved))
+
+
+def run_thread_left(state, cost):
+    """Booked thread-seconds the split still needs: every unfinished node at its
+    price scaled by how its cost class's finished tasks ran against theirs - a
+    class none has finished at the largest finished span class's, at least 1 -
+    a pending piece by its terms' size against the pieces just finished, and a
+    running join less the multiplications it has finished."""
+    piece_sizes = piece_sizes_at(state)
+    memo, budget = {}, thread_budget(state) or 1
+    ratios = {c: statistics.fmean(sec / node_thread_price(state, node, cost, piece_sizes, memo, budget)
+                                  for node, sec in samples[-16:])
+              for c, samples in state.class_samples.items()}
+    if 1 in state.class_cost:
+        sec, tasks = state.class_cost[1]
+        ratios[1] = sec / tasks / cost.piece
+    spans = [c for c in ratios if isinstance(c, int) and c > 1]
+    fallback = max(ratios[max(spans)], 1.0) if spans else 1.0
+    recent = sum(piece_sizes(statistics.median(state.piece_recent_i0))) if state.piece_recent_i0 else None
+    left = 0.0
+    stack = [state.tree_root]
+    while stack:
+        node = stack.pop()
+        if node.own_done:
+            continue
+        stack.extend(node.children)
+        price = node_thread_price(state, node, cost, piece_sizes, memo, budget) * ratios.get(cost_class(node), fallback)
+        if not node.children and recent:
+            price *= (sum(piece_sizes(node.i0)) / recent) ** cost.b
+        left += price * (1 - node.parts_done / JOIN_PARTS)
+    return left
+
+
+# The tree priced by cost class: weights per class, whether they are
+# thread-seconds, and per node id the cost of its running tasks counted done
+# (a join's finished multiplications) and still in flight.
+Progress = collections.namedtuple("Progress", "weights seconds partial flight")
+
+
+def class_weights(state, cost):
+    """(weights, seconds): each cost class at the mean booked thread-seconds of
+    its finished tasks; a class none has finished is priced by the model on one
+    of its nodes, scaled up by how the largest finished span class ran against
+    it. While the model cannot price yet, each class weighs the pieces it covers."""
+    weights = {c: sec / tasks for c, (sec, tasks) in state.class_cost.items()}
+    missing = [c for c in state.class_reps if c not in weights]
+    if not missing:
+        return weights, True
+    piece_sizes = piece_sizes_at(state)
+    if cost.a is None or cost.piece is None or cost.size is None or piece_sizes is None:
+        return {c: node.leaves_total for c, node in state.class_reps.items()}, False
+    key = (len(state.mul_samples), state.class_tasks)
+    if state.class_price_cache is None or state.class_price_cache[0] != key:
+        memo = {}
+        scale = 1.0
+        spans = [c for c in state.class_samples if isinstance(c, int)]
+        if spans:
+            ratios = [sec / node_work(node, cost, piece_sizes, memo)
+                      for node, sec in state.class_samples[max(spans)][-16:]]
+            scale = max(statistics.fmean(ratios), 1.0)
+        prices = {c: scale * node_work(state.class_reps[c], cost, piece_sizes, memo) for c in missing}
+        state.class_price_cache = (key, prices)
+    prices = state.class_price_cache[1]
+    for c in missing:
+        weights[c] = prices.get(c) or state.class_reps[c].leaves_total
+    return weights, True
+
+
+def running_progress(state, weights):
+    """Per ancestor of a running task, by id: the cost of the running tasks
+    below it already counted done, and the rest."""
+    partial, flight = collections.Counter(), collections.Counter()
+    for entry in state.active.values():
+        node = entry.get("node")
+        if node is None or node.own_done:
+            continue
+        weight = weights[cost_class(node)]
+        done = weight * node.parts_done / JOIN_PARTS
+        parent = node.parent
+        while parent is not None:
+            partial[id(parent)] += done
+            flight[id(parent)] += weight - done
+            parent = parent.parent
+    return partial, flight
+
+
+def subtree_cost(node, weights):
+    return sum(k * weights[c] for c, k in subtree_counts(node).items())
+
+
+def done_cost(node, progress):
+    """Cost of a subtree counted done: its finished nodes, and the finished part
+    of its running ones."""
+    done = sum(k * progress.weights[c] for c, k in (node.done_counts or {}).items())
+    return done + progress.partial.get(id(node), 0.0)
+
+
+def post_split_cost(state, cost, now):
+    """(done, total) thread-seconds of the division and the decimal output on the
+    whole thread budget: measured for a phase that ended, the model's price for
+    one ahead, and the larger of the two for the one running."""
+    budget = thread_budget(state) or 1
+    mul = 0.0
+    if cost.a is not None and cost.size:
+        mul = cost.work(2 * cost.size) / cost.speedup(budget)
+    done = total = 0.0
+    for begin, end, muls in (("dividing", "divided", DIVIDE_MULS), ("display begin", "display end", DISPLAY_MULS)):
+        start, stop = state.phase_stamps.get(begin), state.phase_stamps.get(end)
+        if start is not None and stop is not None:
+            done += stop - start
+            total += stop - start
+        elif start is not None:
+            spent = max(0.0, now - start)
+            done += spent
+            total += max(spent, muls * mul)
+        else:
+            total += muls * mul
+    return done * budget, total * budget
 
 
 def is_io_phase(micro):
@@ -1848,7 +2017,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now cost"
-    " pid_rss pid_cpu pid_io disk_lock_enabled chunk_span size width",
+    " pid_rss pid_cpu pid_io disk_lock_enabled chunk_span size width progress",
 )
 
 
@@ -1964,12 +2133,17 @@ def node_detail(node, view, status):
     if status is None:
         if node.own_done:
             return f" {RSS_ON}100%{OFF}", []
-        # Against the whole subtree with the node's own weight included, in the
+        # Against the whole subtree with the node's own cost included, in the
         # overall bar's units: everything below can be finished while the node
         # itself still waits for a slot, so only its own completion reads 100%.
         # A leaf is its own subtree, so it reads 0% until it is done.
         if node.children:
-            return f" {RSS_ON}{fmt_num(100.0 * node.units_done / node.subtree_weight)}%{OFF}", []
+            total = subtree_cost(node, view.progress.weights)
+            text = f" {RSS_ON}{fmt_num(100.0 * done_cost(node, view.progress) / total)}%{OFF}"
+            owed = view.progress.flight.get(id(node))
+            if owed:
+                text += f" {IN_FLIGHT_ON}+{fmt_share(100.0 * owed / total)}%{OFF}"
+            return text, []
         return f" {RSS_ON}0%{OFF}", []
     detail = f"[{status}]"
     parts = []
@@ -1980,7 +2154,7 @@ def node_detail(node, view, status):
     if node.in_progress:
         # Nothing is pending in a replay: the row shows how long the node had
         # been going, and what it went on to take is already history.
-        remaining = None if DISPLAY.replaying else node_time_left(node, view.cost, view.now)
+        remaining = None if DISPLAY.walking else node_time_left(node, view.cost, view.now)
         if remaining is not None:
             # Unsigned is time left, "+" is time overrun.
             eta_str = (
@@ -2312,9 +2486,8 @@ def render_status_screen(state):
     return "\n".join(lines)
 
 
-# The two steps after the split tree: one big division, then the decimal
-# display. Each is a single long step with no sub-progress to count, and each
-# costs about what a leaf costs, so the bar gives each one LEAF_WEIGHT.
+# The two steps after the split tree, one big division then the decimal
+# display, counted one point each when the tree's nodes are.
 POST_SPLIT_STEPS = 2
 
 
@@ -2487,7 +2660,7 @@ def bar_row(*args, **kwargs):
 
 def _eta_row(state, cost):
     """When the run is expected to end, or why that can't be priced yet."""
-    why = eta_wait(state, cost)
+    why = "after the replay" if DISPLAY.walking else eta_wait(state, cost)
     if why is None:
         # The log's clock carried forward by however long the dashboard has
         # been waiting for the next line, so it ticks through a long
@@ -2503,13 +2676,13 @@ def _eta_row(state, cost):
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
 
 
-def _completion_rows(state, bar_w, cost):
+def _completion_rows(state, bar_w, cost, progress):
     rows = []
     phase_line = labelled("phase", state.phase)
+    # The log's clock while replaying: phase stamps are log stamps, and wall
+    # clock against them measures the gap to today, not the phase.
+    clock = state.log_time if (DISPLAY.replaying and state.log_time) else time.time()
     if not state.done and state.phase != "splitting" and state.phase_start_time:
-        # The log's clock while replaying: phase_start_time is a log stamp, and
-        # wall clock against it measures the gap to today, not the phase.
-        clock = state.log_time if (DISPLAY.replaying and state.log_time) else time.time()
         phase_line += f"   {fmt_duration(clock - state.phase_start_time)} elapsed"
     rows.append(phase_line)
     if not state.total_pieces:
@@ -2520,18 +2693,22 @@ def _completion_rows(state, bar_w, cost):
         )
         return rows
     total_joins = state.total_joins
-    # Weighted against the tree when there is one; without it the weights are
-    # not recoverable from the log alone, so every node falls back to one point
-    # and the post-split steps scale down with them to stay on that scale.
+    # Priced against the tree when there is one, the division and the decimal
+    # output on the same thread-seconds once the tree is; without a tree every
+    # node counts one point, and so does each step after it.
     root = state.tree_root
-    if root is not None:
-        split_units, done_units, step = root.subtree_weight, root.units_done, LEAF_WEIGHT
+    if root is not None and progress.seconds:
+        post_done, post_total = post_split_cost(state, cost, clock)
+        total_units = subtree_cost(root, progress.weights) + post_total
+        done_units = done_cost(root, progress) + post_done
+    elif root is not None:
+        total_units = subtree_cost(root, progress.weights) + POST_SPLIT_STEPS
+        done_units = done_cost(root, progress) + post_split_done(state)
     else:
-        split_units = state.total_pieces + total_joins
-        done_units = min(state.pieces_done + state.joins_done, split_units)
-        step = 1
-    total_units = split_units + POST_SPLIT_STEPS * step
-    done_units += post_split_done(state) * step
+        total_units = state.total_pieces + total_joins + POST_SPLIT_STEPS
+        done_units = min(state.pieces_done + state.joins_done, total_units) + post_split_done(state)
+    if state.done:
+        done_units = total_units
     pct = 100.0 * done_units / total_units
     # The cursor adds a cell, so give the segments one less and the bar keeps
     # the width it has once the run finishes and the cursor goes away.
@@ -2962,7 +3139,9 @@ def render(state):
         threads_booked = booked_threads(state)
 
         cost = fit_cost(state)
-        completion_lines = _completion_rows(state, done_bar_w, cost)
+        weights, seconds = class_weights(state, cost) if state.tree_root is not None else ({}, False)
+        progress = Progress(weights, seconds, *running_progress(state, weights))
+        completion_lines = _completion_rows(state, done_bar_w, cost, progress)
         thread_lines = _threads_rows(state, thread_bar_w, now, budget, threads_now, threads_booked, cpu_total)
         ram_lines = _ram_rows(state, ram_bar_w, ram_row_w, pid_rss, est, real, over_launch)
         disk_lines = _disk_rows(state)
@@ -3014,6 +3193,7 @@ def render(state):
                 pid_io, state.disk_lock_enabled is not False,
                 state.tree_chunk_span,
                 state.config.get("size", state.explicit_size), term_w - TREE_INSET,
+                progress,
             ))
             lines.extend(" " * TREE_INSET + row for row in tree_lines)
         elif state.tree_skipped_reason:
@@ -3425,7 +3605,7 @@ def main():
                     state.ever_saw_process = True
                     state.process_running = not state.done
                 elif not state.done:
-                    state.process_running = pi_process_running()
+                    state.process_running = run_alive(state)
                     if state.process_running:
                         state.ever_saw_process = True
                         state.process_gone_since = None
