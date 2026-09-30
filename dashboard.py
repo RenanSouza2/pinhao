@@ -10,6 +10,7 @@ import contextlib
 import ctypes
 import ctypes.util
 import datetime
+import heapq
 import math
 import os
 import re
@@ -297,7 +298,7 @@ class TreeNode:
         "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "op_limbs", "result_limbs", "steps_done", "mul_threads", "mul_samples",
-        "term", "micro", "micro_start",
+        "term", "micro", "micro_start", "micro_compute",
     )
 
     def __init__(self, i0, level, kind, n2, parent):
@@ -331,10 +332,11 @@ class TreeNode:
         self.result_limbs = None  # a piece's own P Q R, from its parent's "joining"
         self.steps_done = 0  # of JOIN_STEPS, how many are finished or resumed
         self.mul_threads = None  # threads the running multiplication started on
-        self.mul_samples = None  # (limbs, threads, seconds) of each one finished
+        self.mul_samples = None  # (limbs, threads, seconds, busy) of each one finished
         self.term = None  # e.g. "P1xP2" or "R", from a join's "mul ..." header line; leaves have none
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
         self.micro_start = None  # log timestamp the current micro-phase was entered at
+        self.micro_compute = None  # state.compute_time at micro_start
 
 
 def _build_span(i0, span, level, parent, by_key):
@@ -475,6 +477,7 @@ def mark_node_done(node):
     node.resumed = False
     node.micro = None
     node.micro_start = None
+    node.micro_compute = None
     if was_active:
         mark_active(node, -1)
 
@@ -754,15 +757,26 @@ class State:
         self.last_line_time = None
         self.log_time = None  # newest log timestamp seen, the clock a replay runs on
         self.log_start = None  # first log timestamp seen, the run's own zero
-        self.mul_fit = {}  # threads -> sums [n, x, x^2, y, xy, y^2], x log limbs, y log seconds
-        self.mul_recent = collections.deque(maxlen=MUL_WINDOW)  # (limbs, threads, seconds)
-        self.mul_seconds = collections.defaultdict(float)  # threads -> seconds multiplied
-        self.mul_limbs_lo = None  # smallest and largest limbs multiplied
-        self.mul_limbs_hi = None
-        self.piece_time = 0.0  # seconds of finished pieces
-        self.io_time = 0.0  # seconds joins spent loading, writing and adding
-        # phase -> (limbs, seconds) of the last loads, writes or adds
-        self.io_recent = {phase: collections.deque(maxlen=IO_WINDOW) for phase in IO_PHASES}
+        self.compute_time = 0.0  # thread-seconds computing machine-wide, in log time
+        self.busy_avg = 0.0  # computing_threads(), averaged over BUSY_TAU of log time
+        self.compute_last_ts = None  # log timestamp both are folded up to
+        # fit sums X'X and X'y: a piece's x = (1, ln index, busy), y = ln seconds;
+        # a multiplication's x = (1, ln limbs, threads - 1), y = ln(seconds * threads),
+        # and X'busy beside it
+        self.piece_xtx = [[0.0] * 3 for _ in range(3)]
+        self.piece_xty = [0.0] * 3
+        self.mul_xtx = [[0.0] * 3 for _ in range(3)]
+        self.mul_xty = [0.0] * 3
+        self.mul_xtc = [0.0] * 3
+        # phase -> (log ts, limbs, seconds) of the loads, writes or adds within
+        # IO_WINDOW, their (limbs, seconds), and every one's
+        self.io_window = {phase: collections.deque() for phase in IO_PHASES}
+        self.io_window_sums = {phase: [0.0, 0.0] for phase in IO_PHASES}
+        self.io_total = {phase: [0.0, 0.0] for phase in IO_PHASES}
+        self.task_events = 0  # tasks started, ended or found stored
+        self.eta_cache = None  # the last simulation, see eta_time_left
+        self.tree_order = None  # see tree_order(), for the tree_order_root it was built on
+        self.tree_order_root = None
         self.piece_fit = [0.0] * 9  # sums [n, x, x^2, P, Q, R, xP, xQ, xR], x log i0
         self.piece_last = None  # (P, Q, R) of the last piece sized
         self.sizes_missing = False  # a "joining" line carried no limbs
@@ -897,6 +911,33 @@ def thread_tick(state, ts):
         state.thread_last_ts = ts
 
 
+def computing_threads(state):
+    """Threads computing machine-wide: a piece evaluating, a join multiplying on
+    the threads it has picked up."""
+    busy = 0
+    for entry in state.active.values():
+        micro = entry.get("micro")
+        if micro == "evaluating":
+            busy += 1
+        elif micro == "multiplying":
+            busy += entry_threads(entry) or 1
+    return busy
+
+
+def compute_tick(state, ts):
+    """Fold computing_threads() up to log timestamp ts into state.compute_time
+    and state.busy_avg, forward only, as thread_tick does."""
+    if state.compute_last_ts is None:
+        state.compute_last_ts = ts
+    elif ts > state.compute_last_ts:
+        dt = ts - state.compute_last_ts
+        busy = computing_threads(state)
+        state.compute_time += busy * dt
+        keep = math.exp(-dt / BUSY_TAU)
+        state.busy_avg = keep * state.busy_avg + (1.0 - keep) * busy
+        state.compute_last_ts = ts
+
+
 def attach_task_plan(state, pid, tree_node):
     """A task's plan (threads, booked memory) and its node identity arrive on
     two separate lines ("task start" and "begin") whose order isn't guaranteed -
@@ -956,6 +997,7 @@ def handle_node_process(state, content):
             mark_active(tree_node, 1)
     elif action == "already stored":
         state.active.pop(pid, None)
+        state.task_events += 1
         covered = leaves_covered(i0, i_max)
         state.pieces_done += covered
         state.joins_done += covered - 1
@@ -998,7 +1040,6 @@ def handle_piece(state, content):
     dur = float(m.group("dur"))
     state.pieces_done += 1
     state.piece_events.append(dur)
-    state.piece_time += dur
 
     i0, i_max = int(m.group("i0")), int(m.group("i_max"))
     if state.tree_by_key:
@@ -1078,6 +1119,7 @@ def handle_phase_line(state, content):
             ts = float(m.group("ts"))
             book_phase_end(state, tree_node, action, ts)
             tree_node.micro_start = ts
+            tree_node.micro_compute = state.compute_time
         tree_node.micro = action
         if action == "resumed":
             tree_node.resumed = True
@@ -1100,6 +1142,7 @@ def handle_task_start(state, content):
     # about it, and shares this handler.
     if m.group("action").strip() == "task start":
         state.halt = None
+        state.task_events += 1
     entry = state.active.setdefault(pid, {"start": float(m.group("ts")), "level": None, "i0": None, "node": None})
 
     mem = m.group("mem")
@@ -1128,6 +1171,7 @@ def handle_task_end(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
+    state.task_events += 1
 
 
 def handle_task_exit(state, content):
@@ -1139,6 +1183,7 @@ def handle_task_exit(state, content):
         return
     pid = int(m.group("pid"))
     state.active.pop(pid, None)
+    state.task_events += 1
     state.task_exit = (pid, m.group("how"), m.group("kind"), int(m.group("val")))
 
 
@@ -1296,6 +1341,7 @@ def feed_line(state, line):
         if state.log_time is None or ts > state.log_time:
             state.log_time = ts
         thread_tick(state, ts)
+        compute_tick(state, ts)
     handler(state, content)
 
 
@@ -1333,28 +1379,31 @@ def fmt_clock(ts, now):
     return at.strftime("%b %d %H:%M")
 
 
-# ETA: one cost curve for a multiplication, fitted to the run's own:
-# seconds = a * limbs**b * (s + (1 - s) / threads), limbs both operands' in all.
+# ETA: the rest of the tree scheduled on a machine model fitted to the run:
+# seconds = solo * exp(g * c) * exp(rho * (threads - 1)) / threads, c the
+# threads computing machine-wide; solo = exp(pa + pb * ln index) for a piece,
+# exp(la + b * ln limbs) for a multiplication, limbs both operands' in all.
 # A load, a write and an add each cost seconds per limb they move.
 
-# b and s until the run has measured its own.
-MUL_EXPONENT = 1.27
-MUL_SERIAL = 0.0
+# Ridge priors, coefficient index -> (weight, value): a piece's ln index slope
+# and g, a multiplication's b and rho.
+PIECE_PRIORS = {1: (5.0, 0.09), 2: (50.0, 0.06)}
+MUL_PRIORS = {1: (2.0, 1.15), 2: (20.0, 0.025)}
 
-# b is fitted once the limbs multiplied span this ratio, s once two thread
-# counts have run; s is picked from this grid.
-FIT_LIMB_SPREAD = 4.0
-SERIAL_GRID = tuple(i / 100 for i in range(61))
-
-# Multiplications, loads, writes, adds (each) and pieces the current cost is
-# taken over.
-MUL_WINDOW = 64
-IO_WINDOW = 64
-PIECE_WINDOW = 16
+# Seconds of log time loads, writes and adds are priced over, and the
+# exponential time constant of the contention a frame is priced at.
+IO_WINDOW = 1800.0
+BUSY_TAU = 60.0
 
 # The division and the decimal output, each, in multiplications of two
 # size-limb operands on the full thread budget.
 POST_SPLIT_MULS = 13
+
+# A simulation of the rest of the tree reruns once a task starts or ends, or
+# ETA_MAX_AGE seconds of log time on, and no sooner than ETA_SIM_GAP times what
+# the last one took.
+ETA_MAX_AGE = 60.0
+ETA_SIM_GAP = 30.0
 
 # A multiplication's operands, as indices into a join's six logged limb
 # counts: the left child's P Q R, then the right child's.
@@ -1377,7 +1426,10 @@ JOIN_STEPS = (
 IO_PHASES = ("loading", "writing", "adding")
 
 # The phase line that ends each timed phase, by the one that began it.
-PHASE_BEGIN = {"loaded": "loading", "written": "writing", "added": "adding", "multiplied": "multiplying"}
+PHASE_BEGIN = {
+    "loaded": "loading", "written": "writing", "added": "adding", "multiplied": "multiplying",
+    "evaluated": "evaluating",
+}
 
 
 def exact_path(limbs, kind, size):
@@ -1439,38 +1491,49 @@ def step_running(node):
     return term == node.term and node.micro == (f"{phase} {what}" if phase == "loading" else phase)
 
 
+def _add_sample(xtx, xty, x, y):
+    for i, xi in enumerate(x):
+        xty[i] += xi * y
+        for j, xj in enumerate(x):
+            xtx[i][j] += xi * xj
+
+
 def book_phase_end(state, node, action, ts):
     """Move a join past its finished multiplication, load, write or add, and
-    book it into what the cost is fitted from."""
+    book it, or a piece's evaluation, into what the cost is fitted from."""
     begin = PHASE_BEGIN.get(action.split(" ", 1)[0])
-    if (begin is None or not node.children or node.micro is None
-            or node.micro_start is None or node.micro.split(" ", 1)[0] != begin):
+    if (begin is None or node.micro is None or node.micro_start is None
+            or node.micro.split(" ", 1)[0] != begin):
         return
     seconds = ts - node.micro_start
-    if begin != "multiplying":
-        state.io_time += seconds
+    # threads computing machine-wide, on average over the phase
+    busy = (state.compute_time - node.micro_compute) / seconds if seconds > 0 else 0.0
+    if not node.children:
+        if begin == "evaluating" and seconds > 0:
+            x = (1.0, math.log(node.i0 + PIECES_PER_LEAF / 2), busy)
+            _add_sample(state.piece_xtx, state.piece_xty, x, math.log(seconds))
+        return
     k = advance_step(node, begin, action.partition(" ")[2] or None)
     size = state.config.get("size")
     if k is None or node.op_limbs is None or size is None:
         return
     limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, size), size)[k]
     if begin != "multiplying":
-        state.io_recent[begin].append((limbs, seconds))
+        state.io_window[begin].append((ts, limbs, seconds))
+        for sums in (state.io_window_sums[begin], state.io_total[begin]):
+            sums[0] += limbs
+            sums[1] += seconds
         return
     if seconds <= 0:
         return
     threads = node.mul_threads or 1
     if node.mul_samples is None:
         node.mul_samples = []
-    node.mul_samples.append((limbs, threads, seconds))
-    state.mul_recent.append((limbs, threads, seconds))
-    state.mul_seconds[threads] += seconds
-    x, y = math.log(limbs), math.log(seconds)
-    sums = state.mul_fit.setdefault(threads, [0.0] * 6)
-    for k, v in enumerate((1.0, x, x * x, y, x * y, y * y)):
-        sums[k] += v
-    state.mul_limbs_lo = limbs if state.mul_limbs_lo is None else min(state.mul_limbs_lo, limbs)
-    state.mul_limbs_hi = limbs if state.mul_limbs_hi is None else max(state.mul_limbs_hi, limbs)
+    node.mul_samples.append((limbs, threads, seconds, busy))
+    x = (1.0, math.log(limbs), threads - 1.0)
+    _add_sample(state.mul_xtx, state.mul_xty, x, math.log(seconds * threads))
+    for i, xi in enumerate(x):
+        state.mul_xtc[i] += xi * busy
 
 
 def note_piece_sizes(state, node):
@@ -1506,72 +1569,79 @@ def piece_sizes_at(state):
     return lambda i0: tuple(a + b * math.log(i0 + half) for a, b in lines)
 
 
-def _fit_exponent(sums, serial, fixed):
-    """Least squares of log seconds on log limbs with the thread term for
-    `serial` taken out, as (exponent, squared error); `fixed` pins the
-    exponent."""
-    n = sx = sxx = sy = sxy = syy = 0.0
-    for threads, (k, kx, kxx, ky, kxy, kyy) in sums.items():
-        c = math.log(serial + (1.0 - serial) / threads)
-        n += k
-        sx += kx
-        sxx += kxx
-        sy += ky - k * c
-        sxy += kxy - c * kx
-        syy += kyy - 2 * c * ky + k * c * c
-    b = fixed if fixed is not None else (n * sxy - sx * sy) / (n * sxx - sx * sx)
-    a = (sy - b * sx) / n
-    return b, syy - 2 * a * sy - 2 * b * sxy + n * a * a + 2 * a * b * sx + b * b * sxx
+def _solve(xtx, xty, priors):
+    """Coefficients of a three-term least-squares fit under ridge priors."""
+    a = [row[:] + [y] for row, y in zip(xtx, xty)]
+    for i, (weight, value) in priors.items():
+        a[i][i] += weight
+        a[i][3] += weight * value
+    for i in range(3):
+        for j in range(i + 1, 3):
+            f = a[j][i] / a[i][i]
+            for k in range(i, 4):
+                a[j][k] -= f * a[i][k]
+    out = [0.0] * 3
+    for i in reversed(range(3)):
+        out[i] = (a[i][3] - sum(a[i][j] * out[j] for j in range(i + 1, 3))) / a[i][i]
+    return out
 
 
 class Cost:
-    """The run's cost curve as of one frame."""
+    """The machine model as of one frame."""
 
-    __slots__ = ("a", "b", "s", "piece", "rates", "size")
+    __slots__ = ("pa", "pb", "g", "la", "b", "rho", "rates", "size", "busy")
 
-    def __init__(self, a, b, s, piece, rates, size):
-        self.a, self.b, self.s, self.piece, self.size = a, b, s, piece, size
-        self.rates = rates  # IO_PHASES -> seconds per limb moved, 0 until one has run
+    def __init__(self, size, busy):
+        self.pa = self.la = None
+        self.pb, self.g = PIECE_PRIORS[1][1], PIECE_PRIORS[2][1]
+        self.b, self.rho = MUL_PRIORS[1][1], MUL_PRIORS[2][1]
+        self.rates = {}  # IO_PHASES -> seconds per limb moved, 0 until one has run
+        self.size = size
+        self.busy = busy  # threads computing machine-wide, state.busy_avg
 
-    def speedup(self, threads):
-        return 1.0 / (self.s + (1.0 - self.s) / max(threads or 1, 1))
+    def piece_work(self, i0):
+        # solo seconds
+        return math.exp(self.pa + self.pb * math.log(i0 + PIECES_PER_LEAF / 2))
 
-    def work(self, limbs):
-        # single-thread seconds
-        return self.a * limbs ** self.b
+    def mul_work(self, limbs):
+        # solo seconds on one thread
+        return math.exp(self.la + self.b * math.log(limbs))
+
+    def speed(self, threads, busy):
+        # solo seconds done a second on `threads` threads, `busy` computing machine-wide
+        return threads * math.exp(-self.g * busy - self.rho * (threads - 1))
+
+    def mul_seconds(self, limbs, threads, busy):
+        return self.mul_work(limbs) / self.speed(threads, busy)
 
 
 def fit_cost(state):
-    """The cost curve fitted to what the run has finished so far. `a` is None
-    before a multiplication has finished, `piece` before a piece has."""
-    b, s = MUL_EXPONENT, MUL_SERIAL
-    if state.mul_fit:
-        fixed = None if state.mul_limbs_hi >= FIT_LIMB_SPREAD * state.mul_limbs_lo else MUL_EXPONENT
-        best = None
-        for serial in (SERIAL_GRID if len(state.mul_fit) > 1 else (MUL_SERIAL,)):
-            exponent, err = _fit_exponent(state.mul_fit, serial, fixed)
-            if best is None or err < best[0]:
-                best = (err, exponent, serial)
-        _, b, s = best
-    a = None
-    if state.mul_recent:
-        a = statistics.median(sec / (limbs ** b * (s + (1.0 - s) / thr))
-                              for limbs, thr, sec in state.mul_recent)
-    piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
-    rates = {}
-    for phase, recent in state.io_recent.items():
-        limbs = sum(n for n, _ in recent)
-        rates[phase] = sum(sec for _, sec in recent) / limbs if limbs else 0.0
-    return Cost(a, b, s, piece, rates, state.config.get("size"))
+    """The machine model fitted to what the run has finished so far. pa is None
+    before a piece has been evaluated, la before a multiplication has finished."""
+    cost = Cost(state.config.get("size"), state.busy_avg)
+    if state.piece_xtx[0][0]:
+        cost.pa, cost.pb, cost.g = _solve(state.piece_xtx, state.piece_xty, PIECE_PRIORS)
+    if state.mul_xtx[0][0]:
+        y = [v - cost.g * c for v, c in zip(state.mul_xty, state.mul_xtc)]
+        cost.la, cost.b, cost.rho = _solve(state.mul_xtx, y, MUL_PRIORS)
+    for phase in IO_PHASES:
+        window, sums = state.io_window[phase], state.io_window_sums[phase]
+        while window and state.log_time is not None and window[0][0] < state.log_time - IO_WINDOW:
+            _, limbs, seconds = window.popleft()
+            sums[0] -= limbs
+            sums[1] -= seconds
+        limbs, seconds = sums if window else state.io_total[phase]
+        cost.rates[phase] = seconds / limbs if limbs > 0 else 0.0
+    return cost
 
 
 def join_time_left(node, cost, now):
     """Seconds a running join still needs, step by step: a multiplication by
-    the curve, scaled by how its finished ones ran against it, the running one
-    at the threads it started on and the rest at the threads booked; a load,
-    write or add at its rate per limb."""
+    the model at cost.busy, scaled by how its finished ones ran against it, the
+    running one at the threads it started on and the rest at the threads
+    booked; a load, write or add at its rate per limb."""
     limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
-    runs = [sec * cost.speedup(thr) / cost.work(n) for n, thr, sec in node.mul_samples or ()]
+    runs = [sec / cost.mul_seconds(n, thr, busy) for n, thr, sec, busy in node.mul_samples or ()]
     scale = statistics.median(runs) if runs else 1.0
     running = step_running(node)
     left = 0.0
@@ -1580,8 +1650,8 @@ def join_time_left(node, cost, now):
         current = running and k == node.steps_done
         if phase == "multiplying":
             # a donation only reaches the worker at its next multiplication
-            threads = node.mul_threads if current else node.threads
-            wall = scale * cost.work(limbs[k]) / cost.speedup(threads)
+            threads = (node.mul_threads if current else node.threads) or 1
+            wall = scale * cost.mul_seconds(limbs[k], threads, cost.busy)
         else:
             wall = cost.rates[phase] * limbs[k]
         if current:
@@ -1591,13 +1661,15 @@ def join_time_left(node, cost, now):
 
 
 def node_time_left(node, cost, now):
-    """Seconds a running task still needs, or None where the curve cannot price
-    it yet. A piece past the typical piece reads negative."""
+    """Seconds a running task still needs, or None where the model cannot price
+    it yet. A piece past its evaluation's price reads negative."""
     if cost is None or node.start_time is None:
         return None
     if not node.children:
-        return None if cost.piece is None else cost.piece - (now - node.start_time)
-    if cost.a is None or cost.size is None or node.op_limbs is None:
+        if cost.pa is None:
+            return None
+        return cost.piece_work(node.i0) / cost.speed(1, cost.busy) - (now - node.start_time)
+    if cost.la is None or cost.size is None or node.op_limbs is None:
         return None
     return join_time_left(node, cost, now)
 
@@ -1627,59 +1699,189 @@ def result_limbs(node, size, piece_sizes, memo):
     return out
 
 
-def run_work_left(state, cost, piece_sizes, now):
-    """Single-thread seconds of work still in the tree: pieces at the current
-    piece time, joins step by step - multiplications by the curve, loads,
-    writes and adds at their rates per limb - sized by their "joining" line
-    once they start and from the piece sizes before."""
+def tree_order(state):
+    """id(node) -> its place in a pre-order walk of the tree, the order
+    node_get_next offers nodes in."""
+    if state.tree_order_root is not state.tree_root:
+        order, stack = {}, [state.tree_root]
+        while stack:
+            node = stack.pop()
+            order[id(node)] = len(order)
+            stack.extend(reversed(node.children))
+        state.tree_order, state.tree_order_root = order, state.tree_root
+    return state.tree_order
+
+
+def _join_segments(limbs, cost, k0=0):
+    """A join's steps from JOIN_STEPS[k0] on, as [kind, amount]: "c" a
+    multiplication's solo seconds, "io" wall seconds, consecutive I/O steps
+    merged."""
+    out = []
+    for k in range(k0, len(JOIN_STEPS)):
+        phase = JOIN_STEPS[k][1]
+        if phase == "multiplying":
+            out.append(["c", cost.mul_work(limbs[k])])
+        elif out and out[-1][0] == "io":
+            out[-1][1] += cost.rates[phase] * limbs[k]
+        else:
+            out.append(["io", cost.rates[phase] * limbs[k]])
+    return out
+
+
+class _SimTask:
+    """A task in simulate_split: its segments, the one it is in and what is
+    left of it."""
+
+    __slots__ = ("node", "segs", "i", "left", "computing", "speed", "threads", "booked", "pending")
+
+    def __init__(self, node, segs, threads, booked=None):
+        self.node, self.segs, self.i, self.left = node, segs, 0, segs[0][1]
+        self.computing = segs[0][0] == "c"
+        self.speed = 1.0  # solo seconds a second computing, 1 in an I/O segment
+        self.threads = threads  # threads its current or next multiplication runs on
+        self.booked = threads if booked is None else booked
+        self.pending = self.booked if self.booked > threads else None  # lent, not picked up yet
+
+    def open(self):
+        # a multiplication ahead that has not begun
+        return any(kind == "c" for kind, _ in self.segs[self.i + 1:])
+
+
+def simulate_split(state, cost, now):
+    """Seconds until the tree's root is joined, from a schedule of what is left
+    of it on the machine model, launched and lent threads as node_get_next and
+    task_donate do. None where the model cannot size it."""
+    budget = thread_budget(state)
+    root = state.tree_root
+    piece_sizes = piece_sizes_at(state)
+    if budget is None or root is None or piece_sizes is None:
+        return None
+    if root.own_done:
+        return 0.0
+    size = cost.size
     memo = {}
-    left = 0.0
-    stack = [state.tree_root]
+
+    def join_limbs(node):
+        if node.op_limbs is not None:
+            return step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, size), size)
+        left = result_limbs(node.children[0], size, piece_sizes, memo)
+        right = result_limbs(node.children[1], size, piece_sizes, memo)
+        op = left[:3] + right[:3]
+        return step_limbs(op, node.kind == "SPAN" and left[3] and right[3] and op[0] < size, size)
+
+    def running_task(node):
+        threads = node.threads or 1
+        if not node.children:
+            if node.micro not in (None, "evaluating"):
+                return _SimTask(node, [["io", 0.0]], 1)
+            work = cost.piece_work(node.i0)
+            progress = (now - node.start_time) * cost.speed(1, cost.busy)
+            return _SimTask(node, [["c", max(work - progress, 0.05 * work)]], 1)
+        limbs = join_limbs(node)
+        segs = _join_segments(limbs, cost, node.steps_done) or [["io", 0.0]]
+        if step_running(node):
+            spent = now - node.micro_start
+            if segs[0][0] == "c":
+                progress = spent * cost.speed(node.mul_threads or threads, cost.busy)
+                segs[0][1] = max(segs[0][1] - progress, 0.05 * segs[0][1])
+            else:
+                first = cost.rates[JOIN_STEPS[node.steps_done][1]] * limbs[node.steps_done]
+                segs[0][1] = max(segs[0][1] - min(spent, first), 0.05 * first)
+        on = node.mul_threads if (segs[0][0] == "c" and node.mul_threads) else threads
+        return _SimTask(node, segs, on, threads)
+
+    done, running, waiting = set(), [], []
+    stack = [root]
     while stack:
         node = stack.pop()
         if node.own_done:
+            done.add(id(node))
             continue
         stack.extend(node.children)
-        if not node.children:
-            spent = now - node.start_time if node.start_time is not None else 0.0
-            left += max(cost.piece - spent, 0.05 * cost.piece)
-            continue
-        if node.op_limbs is not None:
-            limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
+        if node.in_progress and node.start_time is not None:
+            running.append(running_task(node))
         else:
-            lr = result_limbs(node.children[0], cost.size, piece_sizes, memo)
-            rr = result_limbs(node.children[1], cost.size, piece_sizes, memo)
-            op = lr[:3] + rr[:3]
-            limbs = step_limbs(op, node.kind == "SPAN" and lr[3] and rr[3] and op[0] < cost.size, cost.size)
-        running = step_running(node)
-        for k in range(node.steps_done, len(JOIN_STEPS)):
-            phase = JOIN_STEPS[k][1]
-            w = cost.work(limbs[k]) if phase == "multiplying" else cost.rates[phase] * limbs[k]
-            if running and k == node.steps_done:
-                spent = now - node.micro_start
-                if phase == "multiplying":
-                    spent *= cost.speedup(node.mul_threads)
-                w = max(w - spent, 0.05 * w)
-            left += w
-    return left
+            waiting.append(node)
+    order = tree_order(state)
+    queued = set()
+    ready = []
+    for node in waiting:
+        if all(id(child) in done for child in node.children):
+            queued.add(id(node))
+            ready.append((order[id(node)], node))
+    heapq.heapify(ready)
+    booked = sum(task.booked for task in running)
 
+    def schedule():
+        nonlocal booked
+        while ready and booked < budget and len(running) < budget:
+            node = heapq.heappop(ready)[1]
+            if node.children:
+                threads = 1 << ((budget - booked).bit_length() - 1)
+                task = _SimTask(node, _join_segments(join_limbs(node), cost), threads)
+            else:
+                task = _SimTask(node, [["c", cost.piece_work(node.i0)]], 1)
+            running.append(task)
+            booked += task.booked
+        if booked < budget and len(running) < budget:
+            for task in running:
+                if booked >= budget or not task.open():
+                    continue
+                grant = 1 << ((budget - booked + task.booked).bit_length() - 1)
+                if grant > task.booked:
+                    booked += grant - task.booked
+                    task.booked = task.pending = grant
 
-def run_work_done(state, cost, now):
-    """Single-thread seconds of work this run has done: pieces, multiplications
-    at the speedup of the threads they ran on, and the joins' loads, writes and
-    adds, the running ones counted up to now."""
-    done = state.piece_time + state.io_time
-    done += sum(sec * cost.speedup(thr) for thr, sec in state.mul_seconds.items())
-    for entry in state.active.values():
-        node = entry.get("node")
-        if node is None or node.micro is None or node.micro_start is None:
-            continue
-        spent = max(0.0, now - node.micro_start)
-        if node.micro == "multiplying":
-            done += spent * cost.speedup(node.mul_threads)
-        elif node.micro == "evaluating" or is_single_thread_phase(node.micro):
-            done += spent
-    return done
+    schedule()
+    alone = {}  # threads -> speed with nothing else computing, before exp(-g * busy)
+    t = now
+    while running:
+        busy = 0
+        for task in running:
+            if task.computing:
+                busy += task.threads
+        contention = math.exp(-cost.g * busy)
+        dt, first = math.inf, None
+        for task in running:
+            if task.computing:
+                factor = alone.get(task.threads)
+                if factor is None:
+                    factor = alone[task.threads] = cost.speed(task.threads, 0.0)
+                task.speed = factor * contention
+            else:
+                task.speed = 1.0
+            wait = task.left / task.speed
+            if wait < dt:
+                dt, first = wait, task
+        t += dt
+        ended = []
+        for task in running:
+            task.left -= task.speed * dt
+            if task is not first and task.left > 1e-9:
+                continue
+            task.i += 1
+            if task.i == len(task.segs):
+                ended.append(task)
+                continue
+            kind, task.left = task.segs[task.i]
+            task.computing = kind == "c"
+            if task.pending and task.computing:
+                task.threads, task.pending = task.pending, None
+        for task in ended:
+            running.remove(task)
+            booked -= task.booked
+            node = task.node
+            done.add(id(node))
+            if node is root:
+                return t - now
+            parent = node.parent
+            if (parent is not None and id(parent) not in queued
+                    and all(id(child) in done for child in parent.children)):
+                queued.add(id(parent))
+                heapq.heappush(ready, (order[id(parent)], parent))
+        if ended:
+            schedule()
+    return None
 
 
 def post_split_left(state, step, now):
@@ -1698,21 +1900,38 @@ def post_split_left(state, step, now):
 
 
 def run_time_left(state, cost, now):
-    """Seconds the run still needs, or None until the curve, the piece time
-    and a piece's size are known: the work left over the rate the run has done
-    work at so far, plus the division and the decimal output."""
-    if (cost is None or cost.a is None or cost.piece is None or cost.size is None
+    """Seconds the run still needs, or None until the model can price it: the
+    rest of the split as simulate_split schedules it, plus the division and the
+    decimal output, each alone on the full thread budget."""
+    budget = thread_budget(state)
+    if (cost is None or cost.la is None or cost.size is None or budget is None
             or state.tree_root is None or state.log_start is None or now <= state.log_start):
         return None
-    step = POST_SPLIT_MULS * cost.work(2 * cost.size) / cost.speedup(thread_budget(state))
+    step = POST_SPLIT_MULS * cost.mul_seconds(2 * cost.size, budget, budget)
     post = post_split_left(state, step, now)
     if state.phase != "splitting":
         return post
-    piece_sizes = piece_sizes_at(state)
-    done = run_work_done(state, cost, now)
-    if piece_sizes is None or done <= 0:
+    if cost.pa is None and state.pieces_done < (state.total_pieces or 0):
         return None
-    return run_work_left(state, cost, piece_sizes, now) * (now - state.log_start) / done + post
+    split = simulate_split(state, cost, now)
+    return None if split is None else split + post
+
+
+def eta_time_left(state, cost, now):
+    """run_time_left, counted down from the last simulation until a task starts
+    or ends or ETA_MAX_AGE passes, and then no sooner than ETA_SIM_GAP times
+    what that simulation took."""
+    if state.phase != "splitting":
+        return run_time_left(state, cost, now)
+    wall = time.monotonic()
+    cache = state.eta_cache  # (task_events, seconds left, at, wall at, wall cost)
+    if cache is not None:
+        fresh = cache[0] == state.task_events and now - cache[2] <= ETA_MAX_AGE
+        if fresh or wall - cache[3] < ETA_SIM_GAP * cache[4]:
+            return None if cache[1] is None else max(cache[1] - (now - cache[2]), 0.0)
+    left = run_time_left(state, cost, now)
+    state.eta_cache = (state.task_events, left, now, wall, time.monotonic() - wall)
+    return left
 
 
 def is_io_phase(micro):
@@ -2519,7 +2738,7 @@ def _completion_rows(state, bar_w, cost):
         clock = state.log_time
         if not DISPLAY.replaying and state.last_line_time is not None:
             clock += max(0.0, time.time() - state.last_line_time)
-        rest = run_time_left(state, cost, clock)
+        rest = eta_time_left(state, cost, clock)
         if rest is not None:
             rows.append(labelled("eta", f"ends {fmt_clock(clock + rest, clock)}"))
         elif state.sizes_missing:
