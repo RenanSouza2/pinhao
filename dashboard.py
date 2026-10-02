@@ -5,11 +5,13 @@ Usage: ./dashboard.py [path/to/run.log] [--size N] [--n-process N]
 """
 
 import argparse
+import bisect
 import collections
 import contextlib
 import ctypes
 import ctypes.util
 import datetime
+import itertools
 import math
 import os
 import re
@@ -804,6 +806,7 @@ class State:
         self.mem_max = None  # the first slot may overshoot up to here beside running tasks
         self.spill_limbs = None  # fewest limbs in all whose multiplication goes to disk, from mem_max
         self.spill_samples = []  # (limbs, threads, seconds) of every multiplication that went to disk
+        self.spill_scale = None  # ((samples, a, b, s), (their limbs sorted, running sums of their slowdowns))
         self.disk_lock_enabled = None  # None until the log's "disk lock" line arrives
         self.config = {}  # every "<label> | <int>" config line this run logged
         self.prev_config = {}  # the same, from the run before this one in an appended log
@@ -812,6 +815,8 @@ class State:
         self.joins_done = 0
         self.piece_events = collections.deque(maxlen=2000)  # durations, seconds
         self.piece_recent_i0 = collections.deque(maxlen=PIECE_WINDOW)  # i0 of the last pieces finished
+        self.piece_log_count = 0  # pieces finished, and the sum of log(i0 + PIECES_PER_LEAF / 2) over them
+        self.piece_log_sum = 0.0
         self.join_events = collections.deque(maxlen=2000)  # durations, seconds
         self.lock_requests = 0  # "locked" lines seen, across all workers
         self.lock_misses = 0  # of those, the ones that found the lock already held
@@ -837,6 +842,8 @@ class State:
         self.sizes_version = 0  # bumped whenever a join logs its sizes
         self.price_parts = {}  # node id -> node_price_parts, for sizes_version
         self.price_parts_version = None
+        self.post_muls = None  # ((size, threads), the division's multiplications, the decimal output's)
+        self.post_price = None  # (key, division seconds, decimal output seconds)
         self.tree_by_key = None  # (i0, i_max) -> TreeNode; the range identifies a node on its own
         self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
         self.halt = None  # last "launch halt" as (reason, i0, i_max, level, mem), cleared by the next launch
@@ -1039,6 +1046,8 @@ def handle_piece(state, content):
 
     i0, i_max = int(m.group("i0")), int(m.group("i_max"))
     state.piece_recent_i0.append(i0)
+    state.piece_log_count += 1
+    state.piece_log_sum += math.log(i0 + PIECES_PER_LEAF / 2)
     if state.tree_by_key:
         tree_node = state.tree_by_key.get((i0, i_max))
         if tree_node is not None:
@@ -1331,6 +1340,9 @@ def feed_line(state, line):
             state.first_stamp = ts
         if stamp.group("action") in COMMIT_ACTIONS and (state.commit_stamp is None or ts > state.commit_stamp):
             state.commit_stamp = ts
+        # the division and the decimal output log no task lines, only these
+        if state.log_time is not None and ts > state.log_time:
+            state.log_time = ts
     m = RE_TS.match(content)
     if m:
         ts = float(m.group("ts"))
@@ -1406,10 +1418,22 @@ PIECE_WINDOW = 128
 # Multiplications finished before the run's ETA is shown.
 ETA_WARMUP_MULS = 64
 
-# The division and the decimal output in multiplications of two size-limb
-# operands on the full thread budget.
-DIVIDE_MULS = 20.5
-DISPLAY_MULS = 15.8
+# The division's and the decimal output's seconds against what their
+# multiplications price at on the curve.
+DIVIDE_SCALE = 0.74
+DISPLAY_SCALE = 1.30
+
+# An SSM square against a multiplication of as many limbs in all.
+SQUARE_COST = 2 / 3
+
+# Bits in a digit of FXD_DEC_BASE, 10^18.
+DEC_DIGIT_BITS = 18 * math.log2(10)
+
+# num_base_to_threads: base_to_barrett_min_limbs, base_to_pieces_per_thread,
+# base_to_barrett_top_quotient_share.
+BASE_TO_BARRETT_MIN_LIMBS = 32
+BASE_TO_PIECES_PER_THREAD = 4
+BASE_TO_TOP_QUOTIENT_SHARE = 2
 
 # A multiplication's operands, as indices into a join's six logged limb
 # counts: the left child's P Q R, then the right child's.
@@ -1610,21 +1634,33 @@ def spill_limbs(mem_max):
 class Cost:
     """The run's cost curve as of one frame."""
 
-    __slots__ = ("a", "b", "s", "piece", "rates", "size", "spill", "spill_limbs", "slowdown")
+    __slots__ = ("a", "b", "s", "piece", "rates", "size", "spills", "spill_limbs", "slowdown")
 
-    def __init__(self, a, b, s, piece, rates, size, spill=1.0, spill_limbs=None, slowdown=None):
+    def __init__(self, a, b, s, piece, rates, size, spills=None, spill_limbs=None, slowdown=None):
         self.a, self.b, self.s, self.piece, self.size = a, b, s, piece, size
         self.rates = rates  # IO_PHASES -> seconds per limb moved, 0 until one has run
-        self.spill, self.spill_limbs = spill, spill_limbs  # slowdown on disk, and from how many limbs
+        self.spills = spills  # the run's spills: (their limbs sorted, running sums of their slowdowns)
+        self.spill_limbs = spill_limbs  # fewest limbs in all that go to disk
         self.slowdown = slowdown or {}  # threads -> big multiplications on them against the curve
 
     def speedup(self, threads):
         return 1.0 / (self.s + (1.0 - self.s) / max(threads or 1, 1))
 
+    def spill(self, limbs):
+        # slowdown on disk: the mean over the run's spills within a factor of 2
+        # in limbs, over all of them when none is
+        if not self.spills:
+            return SPILL_SLOWDOWN
+        sizes, sums = self.spills
+        lo, hi = bisect.bisect_left(sizes, limbs / 2), bisect.bisect_right(sizes, 2 * limbs)
+        if lo == hi:
+            lo, hi = 0, len(sizes)
+        return (sums[hi] - sums[lo]) / (hi - lo)
+
     def work(self, limbs):
         # single-thread seconds
         work = self.a * limbs ** self.b
-        return work * self.spill if self.spill_limbs is not None and limbs >= self.spill_limbs else work
+        return work * self.spill(limbs) if self.spill_limbs is not None and limbs >= self.spill_limbs else work
 
 
 def fit_cost(state):
@@ -1653,11 +1689,16 @@ def fit_cost(state):
         _, a, slowdown = state.mul_scale
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
     rates = {phase: sec / limbs if limbs else 0.0 for phase, (limbs, sec) in state.io_sums.items()}
-    spill = SPILL_SLOWDOWN
+    spills = None
     if state.spill_samples and a is not None:
-        spill = statistics.median(sec / (a * limbs ** b * (s + (1.0 - s) / thr))
-                                  for limbs, thr, sec in state.spill_samples)
-    return Cost(a, b, s, piece, rates, state.config.get("size"), spill, state.spill_limbs, slowdown)
+        key = (len(state.spill_samples), a, b, s)
+        if state.spill_scale is None or state.spill_scale[0] != key:
+            slow = sorted((limbs, sec / (a * limbs ** b * (s + (1.0 - s) / thr)))
+                          for limbs, thr, sec in state.spill_samples)
+            sums = list(itertools.accumulate((r for _, r in slow), initial=0.0))
+            state.spill_scale = (key, ([limbs for limbs, _ in slow], sums))
+        spills = state.spill_scale[1]
+    return Cost(a, b, s, piece, rates, state.config.get("size"), spills, state.spill_limbs, slowdown)
 
 
 def join_time_left(node, cost):
@@ -1725,10 +1766,125 @@ def result_limbs(node, size, piece_sizes, memo):
     return out
 
 
-def post_split_left(state, mul, now):
-    """Seconds of the division and the decimal output still ahead, `mul` the
-    seconds of one multiplication they are counted in."""
-    divide, display = DIVIDE_MULS * mul, DISPLAY_MULS * mul
+def tally_mul(muls, x, y, threads, at_once=1, square=False):
+    # num_mul_core / num_sqr_core: schoolbook below 256 limbs (128 to square),
+    # left unpriced; SSM on at most mul_threads_ceiling threads. Keyed (limbs
+    # in all, threads, square, how many run side by side)
+    if min(x, y) < (128 if square else 256):
+        return
+    muls[(x + y, min(threads, mul_threads_ceiling(min(x, y))), square, at_once)] += 1
+
+
+def bz_rec_muls(n1, n2, threads, at_once, memo):
+    """num_div_mod_bz_rec on limb counts alone: (quotient limbs, its
+    multiplications)."""
+    key = (n1, n2)
+    if key not in memo:
+        muls = collections.Counter()
+        if n1 >= n2 + 2 and n2 > 1:
+            k = n2 // 2
+            rem = n1
+            for i in (1, 0):
+                if rem > k * (i + 1):
+                    q, sub = bz_rec_muls(rem - k * (i + 1), n2 - k, threads, at_once, memo)
+                    muls.update(sub)
+                    tally_mul(muls, q, k, threads, at_once)
+                rem = min(rem, n2 + k * i)
+        memo[key] = (max(n1 - n2 + 1, 0), muls)
+    return memo[key]
+
+
+def bz_muls(n1, n2, threads, at_once=1):
+    """num_div_mod_bz on limb counts alone: the multiplications of dividing n1
+    limbs by n2."""
+    memo, muls = {}, collections.Counter()
+    while n1 > 2 * n2:
+        muls.update(bz_rec_muls(2 * n2, n2, threads, at_once, memo)[1])
+        n1 -= n2
+    muls.update(bz_rec_muls(n1, n2, threads, at_once, memo)[1])
+    return muls
+
+
+def dec_limbs(digits):
+    # limbs of 10^(18 digits)
+    return int(digits * DEC_DIGIT_BITS) // 64 + 1
+
+
+def display_muls(size, threads):
+    """fxd_num_display_dec_core on limb counts alone: the multiplications of
+    writing pi's size - 1 fraction limbs out in decimal."""
+    muls = collections.Counter()
+    pos = size - 1
+    digits = math.ceil(pos * 64 / DEC_DIGIT_BITS)
+    # num_pow_threads(10^18, digits), a square per bit, then the fraction by it
+    for j in range(1, digits.bit_length()):
+        n = dec_limbs(digits >> j)
+        tally_mul(muls, n, n, threads, square=True)
+    x = dec_limbs(digits)
+    tally_mul(muls, pos, x, threads)
+    # num_base_to_threads: the bases 10^(18 2^i) by squaring, a Newton
+    # reciprocal per level split by Barrett, then the split itself
+    top = (digits - 1).bit_length()
+    bases = [dec_limbs(1 << i) for i in range(top)]
+    for n in bases[:-1]:
+        tally_mul(muls, n, n, threads, square=True)
+    levels = top - 1 if (x - bases[-1]) * BASE_TO_TOP_QUOTIENT_SHARE < bases[-1] else top
+    for i in range(1, levels):
+        n = bases[i]
+        tally_mul(muls, bases[i - 1] + 2, bases[i - 1] + 2, threads, square=True)
+        tally_mul(muls, n + 3, n, threads)
+        tally_mul(muls, n // 2 + 3, n // 2 + 3, threads)
+    leaf, pieces = top, 1
+    while leaf and pieces < threads * BASE_TO_PIECES_PER_THREAD:
+        leaf -= 1
+        pieces *= 2
+    work = collections.Counter({x: 1})  # limbs of a piece at this level -> how many
+    for level in range(top - 1, -1, -1):
+        n = bases[level]
+        split = max(sum(k for c, k in work.items() if c >= n), 1)
+        thr, at_once = (max(threads // split, 1), min(split, threads)) if level >= leaf else (1, threads)
+        below = collections.Counter()
+        for c, k in work.items():
+            if c < n:
+                below[c] += k
+                continue
+            q = c - n + 1
+            if level >= levels or n < BASE_TO_BARRETT_MIN_LIMBS:
+                one = bz_muls(c, n, thr, at_once)
+            else:
+                one = collections.Counter()
+                tally_mul(one, q, n + 2, thr, at_once)
+                tally_mul(one, q, n, thr, at_once)
+            for key, v in one.items():
+                muls[key] += v * k
+            below[n] += k
+            below[q] += k
+        work = below
+    return muls
+
+
+def post_split_prices(state, cost):
+    """(division, decimal output) seconds: their multiplications, mirrored once
+    per size and thread budget, on the curve with side by side ones sharing the
+    time, scaled to what the two took."""
+    if cost.a is None or not cost.size:
+        return 0.0, 0.0
+    threads = thread_budget(state) or 1
+    if state.post_muls is None or state.post_muls[0] != (cost.size, threads):
+        state.post_muls = ((cost.size, threads), bz_muls(2 * cost.size + 1, cost.size, threads),
+                           display_muls(cost.size, threads))
+    key = (cost.size, threads, cost.a, cost.b, cost.s, cost.spill_limbs, len(state.spill_samples))
+    if state.post_price is None or state.post_price[0] != key:
+        divide, display = (sum(k * cost.work(limbs) * (SQUARE_COST if square else 1.0) / cost.speedup(thr) / at_once
+                               for (limbs, thr, square, at_once), k in muls.items())
+                           for muls in state.post_muls[1:])
+        state.post_price = (key, DIVIDE_SCALE * divide, DISPLAY_SCALE * display)
+    return state.post_price[1:]
+
+
+def post_split_left(state, cost, now):
+    """Seconds of the division and the decimal output still ahead."""
+    divide, display = post_split_prices(state, cost)
     spent = max(0.0, now - (state.phase_start_time or now))
     if state.phase == "dividing":
         return max(divide - spent, 0.05 * divide) + display
@@ -1766,8 +1922,7 @@ def run_time_left(state, cost, now):
     plus the division and the decimal output."""
     if eta_wait(state, cost) is not None:
         return None
-    mul = cost.work(2 * cost.size) / cost.speedup(thread_budget(state))
-    post = post_split_left(state, mul, now)
+    post = post_split_left(state, cost, now)
     if state.phase != "splitting":
         return post
     budget = thread_budget(state) or 1
@@ -1841,19 +1996,22 @@ def run_thread_left(state, cost):
     price scaled by how its cost class's finished tasks ran against theirs - a
     class none has finished slowed down as the run's big multiplications on as
     many threads are, and at the largest finished span class's ratio, at least
-    1 - a pending piece by its terms' size against the pieces just finished,
-    and a running join less the multiplications it has finished."""
+    1 - a pending piece at the finished pieces' mean, by its terms' size against
+    theirs, and a running join less the multiplications it has finished."""
     piece_sizes = piece_sizes_at(state)
     memo, budget = {}, thread_budget(state) or 1
     ratios = {c: statistics.fmean(sec / node_thread_price(state, node, cost, piece_sizes, memo, budget)
                                   for node, sec in samples[-16:])
               for c, samples in state.class_samples.items()}
+    recent = sum(piece_sizes(statistics.median(state.piece_recent_i0))) if state.piece_recent_i0 else None
     if 1 in state.class_cost:
         sec, tasks = state.class_cost[1]
         ratios[1] = sec / tasks / cost.piece
+        if recent and state.piece_log_count:
+            done = piece_sizes(math.exp(state.piece_log_sum / state.piece_log_count) - PIECES_PER_LEAF / 2)
+            ratios[1] *= (recent / sum(done)) ** cost.b
     spans = [c for c in ratios if isinstance(c, int) and c > 1]
     fallback = max(ratios[max(spans)], 1.0) if spans else 1.0
-    recent = sum(piece_sizes(statistics.median(state.piece_recent_i0))) if state.piece_recent_i0 else None
     left = 0.0
     stack = [state.tree_root]
     while stack:
@@ -1945,11 +2103,9 @@ def post_split_cost(state, cost, now):
     whole thread budget: measured for a phase that ended, the model's price for
     one ahead, and the larger of the two for the one running."""
     budget = thread_budget(state) or 1
-    mul = 0.0
-    if cost.a is not None and cost.size:
-        mul = cost.work(2 * cost.size) / cost.speedup(budget)
+    divide, display = post_split_prices(state, cost)
     done = total = 0.0
-    for begin, end, muls in (("dividing", "divided", DIVIDE_MULS), ("display begin", "display end", DISPLAY_MULS)):
+    for begin, end, price in (("dividing", "divided", divide), ("display begin", "display end", display)):
         start, stop = state.phase_stamps.get(begin), state.phase_stamps.get(end)
         if start is not None and stop is not None:
             done += stop - start
@@ -1957,9 +2113,9 @@ def post_split_cost(state, cost, now):
         elif start is not None:
             spent = max(0.0, now - start)
             done += spent
-            total += max(spent, muls * mul)
+            total += max(spent, price)
         else:
-            total += muls * mul
+            total += price
     return done * budget, total * budget
 
 
