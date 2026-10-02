@@ -1418,6 +1418,12 @@ PIECE_WINDOW = 128
 # Multiplications finished before the run's ETA is shown.
 ETA_WARMUP_MULS = 64
 
+# The "likely by" bound: the ETA's time left times LIKELY_EARLY while the run
+# is under LIKELY_EARLY_SHARE done by the ETA's own reckoning, LIKELY_LATER after.
+LIKELY_EARLY_SHARE = 0.1
+LIKELY_EARLY = 1.25
+LIKELY_LATER = 1.15
+
 # The division's and the decimal output's seconds against what their
 # multiplications price at on the curve.
 DIVIDE_SCALE = 0.74
@@ -1914,6 +1920,13 @@ def eta_wait(state, cost):
     if state.piece_fit[0] == 0:
         return "log has no operand sizes" if state.sizes_missing else "after the first join"
     return None
+
+
+def likely_left(state, rest, now):
+    """Seconds the run likely ends within, from the ETA's `rest`."""
+    elapsed = max(0.0, now - (state.log_start or now))
+    early = elapsed < LIKELY_EARLY_SHARE * (elapsed + rest)
+    return rest * (LIKELY_EARLY if early else LIKELY_LATER)
 
 
 def run_time_left(state, cost, now):
@@ -2888,7 +2901,9 @@ def _eta_row(state, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            return labelled("eta", f"ends {fmt_clock(clock + rest, clock)}")
+            ends = fmt_clock(clock + rest, clock)
+            likely = fmt_clock(clock + likely_left(state, rest, clock), clock)
+            return labelled("eta", f"ends {ends}" if likely == ends else f"ends {ends}, likely by {likely}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
 
