@@ -280,15 +280,18 @@ class Display:
     replaying  animating that walk, so the log's clock drives the frame and
                the machine's own readings are left alone. Return turns this
                off; walking stays on until the backlog runs out
-    progress   how far through the backlog, 0.0 to 1.0, for the footer's bar"""
+    progress   how far through the backlog, 0.0 to 1.0, for the footer's bar
+    catch_up   how far the eta row's catch-up is through the backlog, 0.0 to
+               1.0, None once there is none running"""
 
-    __slots__ = ("pieces", "walking", "replaying", "progress")
+    __slots__ = ("pieces", "walking", "replaying", "progress", "catch_up")
 
     def __init__(self):
         self.pieces = True
         self.walking = False
         self.replaying = False
         self.progress = 0.0
+        self.catch_up = None
 
 
 DISPLAY = Display()
@@ -1434,6 +1437,9 @@ LIKELY_LATER = 1.15
 # ETA_RELEASE_MIN seconds at least.
 ETA_RELEASE_SHARE = 0.1
 ETA_RELEASE_MIN = 60.0
+
+# Seconds of log time between the ETAs the catch-up feeds the envelope.
+ETA_CATCH_UP_STEP = 60.0
 
 # The division's and the decimal output's seconds against what their
 # multiplications price at on the curve.
@@ -2941,7 +2947,12 @@ def bar_row(*args, **kwargs):
 
 def _eta_row(state, cost):
     """When the run is expected to end, or why that can't be priced yet."""
-    why = "after the replay" if DISPLAY.walking else eta_wait(state, cost)
+    if DISPLAY.walking:
+        why = "after the replay"
+    elif DISPLAY.catch_up is not None:
+        why = f"catching up on the log ({100 * DISPLAY.catch_up:.0f}%)"
+    else:
+        why = eta_wait(state, cost)
     if why is None:
         # The log's clock carried forward by however long the dashboard has
         # been waiting for the next line, so it ticks through a long
@@ -3588,6 +3599,94 @@ def tail(path):
             f.close()
 
 
+def catch_up_run(path, records, make_state, out):
+    """The catch-up's child: feed the log's first `records` to a state of its
+    own, the envelope fed an ETA every ETA_CATCH_UP_STEP of log time, and write
+    `out` its progress a line at a time and then the envelope it ends on, with
+    the run boundaries it crossed."""
+    state, runs, due, told = make_state(), 1, None, 0
+    with open(path, errors="replace") as f:
+        for k, line in enumerate(itertools.islice(f, records)):
+            if RUN_MARKER in line:
+                state, runs, due = make_state(), runs + 1, None
+                continue
+            feed_line(state, line)
+            if state.log_time is not None and not state.done and (due is None or state.log_time >= due):
+                rest = run_time_left(state, fit_cost(state), state.log_time)
+                if rest is not None:
+                    eta_envelope(state, likely_left(state, rest, state.log_time), state.log_time)
+                due = state.log_time + ETA_CATCH_UP_STEP
+            if 100 * k // records > told:
+                told = 100 * k // records
+                os.write(out, f"{told}\n".encode())
+    then, end = state.eta_envelope or (None, None)
+    os.write(out, f"end {runs} {then!r} {end!r}\n".encode())
+
+
+def catch_up_start(path, records, make_state):
+    """Fork the catch-up over the log's first `records`: (its pid, the pipe it
+    reports on, what has been read of a report so far)."""
+    read_end, write_end = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            os.close(read_end)
+            catch_up_run(path, records, make_state, write_end)
+            status = 0
+        finally:
+            os._exit(status)
+    os.close(write_end)
+    os.set_blocking(read_end, False)
+    DISPLAY.catch_up = 0.0
+    return [pid, read_end, b""]
+
+
+def catch_up_poll(job):
+    """Read what the catch-up has reported: None while it runs, else (run
+    boundaries it crossed, the envelope it ended on), both None if it died."""
+    pid, fd, _ = job
+    closed = False
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            break
+        if not data:
+            closed = True
+            break
+        job[2] += data
+    *lines, job[2] = job[2].split(b"\n")
+    result = None
+    for line in lines:
+        if line.startswith(b"end "):
+            runs, then, end = line.split()[1:]
+            result = (int(runs), None if then == b"None" else (float(then), float(end)))
+        elif line:
+            DISPLAY.catch_up = int(line) / 100
+    if result is None and closed:
+        result = (None, None)
+    if result is not None:
+        catch_up_stop(job)
+    return result
+
+
+def catch_up_stop(job):
+    pid, fd, _ = job
+    if pid is None:
+        return
+    job[0] = None
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
+    with contextlib.suppress(OSError):
+        os.waitpid(pid, 0)
+    with contextlib.suppress(OSError):
+        os.close(fd)
+    DISPLAY.catch_up = None
+
+
 def _fit_visible(line, width):
     """Truncate/pad line to width visible columns, treating ANSI SGR escapes
     (zero-width) as free so they're never split mid-sequence - a naive
@@ -3815,13 +3914,23 @@ def main():
     replay_seen = 0
     replay_frame = 1.0 / args.replay_fps if args.replay_fps > 0 else 0.0
     next_frame = time.time()
+    # The envelope a dashboard open since the log began would hold: caught up
+    # on beside the walk, and taken once both are through the same run.
+    catch_up = catch_up_start(args.log_path, replay_total, make_state) if replay_total else None
+    caught_up = None
+    runs = 0
 
     stdin_fd = sys.stdin.fileno()
     is_tty = sys.stdin.isatty()
-    with raw_terminal(stdin_fd, is_tty):
+    with raw_terminal(stdin_fd, is_tty), contextlib.ExitStack() as stack:
+        if catch_up is not None:
+            stack.callback(catch_up_stop, catch_up)
         last_render = 0.0
         for line in tail(args.log_path):
+            if catch_up is not None and caught_up is None:
+                caught_up = catch_up_poll(catch_up)
             if line is RESTARTED or (line is not None and RUN_MARKER in line):
+                runs += 1
                 # Only across a marker: a RESTARTED is a new file, with no
                 # previous run to disagree with.
                 prev_config = state.config if line is not RESTARTED else {}
@@ -3860,6 +3969,10 @@ def main():
                     # large log that is seconds of reading worth watching.
                     replay_seen += 1
                     DISPLAY.progress = min(1.0, replay_seen / replay_total)
+            if caught_up is not None and not DISPLAY.walking:
+                if caught_up[0] == runs and caught_up[1] is not None and not state.done:
+                    state.eta_envelope = caught_up[1]
+                catch_up = caught_up = None
 
             actions = parse_scroll_actions(read_pending_input(stdin_fd)) if is_tty else []
             if any(action[0] == "quit" for action in actions):
