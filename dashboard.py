@@ -842,6 +842,8 @@ class State:
         self.sizes_version = 0  # bumped whenever a join logs its sizes
         self.price_parts = {}  # node id -> node_price_parts, for sizes_version
         self.price_parts_version = None
+        self.parts_version = 0  # bumped whenever a join counts a multiplication done
+        self.pending_work = None  # (key, pending_work): what is left of the tree, until it changes
         self.post_muls = None  # ((size, threads), the division's multiplications, the decimal output's)
         self.post_price = None  # (key, division seconds, decimal output seconds)
         self.eta_envelope = None  # (clock, end time) of the eta row's envelope when last fed
@@ -1115,6 +1117,7 @@ def handle_phase_line(state, content):
         # node must not read complete while any of its work remains.
         if tree_node.term is not None and tree_node.parts_done + 2 <= JOIN_PARTS:
             tree_node.parts_done += 1
+            state.parts_version += 1
         tree_node.term = term
     else:
         # Only a change of phase restarts the clock: a phase logged twice
@@ -2024,6 +2027,43 @@ def node_thread_price(state, node, cost, piece_sizes, memo, budget):
     return threads * (sum(cost.work(n) for n in muls) / speedup + sum(cost.rates[phase] * n for phase, n in moved))
 
 
+def pending_work(state, cost, piece_sizes, budget):
+    """What is left of the tree, kept until a node finishes, a join counts a
+    multiplication done or one logs its sizes: (terms' size of each pending
+    piece, pending joins by (cost class, threads)). A group holds the limbs of
+    its in-memory multiplications by the share of the join still ahead, its
+    spilled ones as (limbs, share), and the limbs it moves by phase, each
+    weighted by that share."""
+    root = state.tree_root
+    key = (id(root), state.sizes_version, sum((root.done_counts or {}).values()), state.parts_version,
+           budget, cost.size, cost.spill_limbs)
+    if state.pending_work is None or state.pending_work[0] != key:
+        memo, pieces, joins = {}, [], {}
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.own_done:
+                continue
+            stack.extend(node.children)
+            if not node.children:
+                pieces.append(sum(piece_sizes(node.i0)))
+                continue
+            threads, muls, moved = node_price_parts(state, node, cost, piece_sizes, memo, budget)
+            share = 1 - node.parts_done / JOIN_PARTS
+            group = joins.get((cost_class(node), threads))
+            if group is None:
+                group = joins[(cost_class(node), threads)] = ({}, [], collections.Counter())
+            for limbs in muls:
+                if cost.spill_limbs is not None and limbs >= cost.spill_limbs:
+                    group[1].append((limbs, share))
+                else:
+                    group[0].setdefault(share, []).append(limbs)
+            for phase, limbs in moved:
+                group[2][phase] += share * limbs
+        state.pending_work = (key, (pieces, joins))
+    return state.pending_work[1]
+
+
 def run_thread_left(state, cost):
     """Booked thread-seconds the split still needs: every unfinished node at its
     price scaled by how its cost class's finished tasks ran against theirs - a
@@ -2045,25 +2085,16 @@ def run_thread_left(state, cost):
             ratios[1] *= (recent / sum(done)) ** cost.b
     spans = [c for c in ratios if isinstance(c, int) and c > 1]
     fallback = max(ratios[max(spans)], 1.0) if spans else 1.0
-    left = 0.0
-    stack = [state.tree_root]
-    while stack:
-        node = stack.pop()
-        if node.own_done:
-            continue
-        stack.extend(node.children)
-        c = cost_class(node)
-        price = node_thread_price(state, node, cost, piece_sizes, memo, budget)
-        if c in ratios:
-            price *= ratios[c]
-        else:
-            if node.children:
-                threads = node_price_parts(state, node, cost, piece_sizes, memo, budget)[0]
-                price *= cost.slowdown.get(threads, 1.0)
-            price *= fallback
-        if not node.children and recent:
-            price *= (sum(piece_sizes(node.i0)) / recent) ** cost.b
-        left += price * (1 - node.parts_done / JOIN_PARTS)
+    pieces, joins = pending_work(state, cost, piece_sizes, budget)
+    b = cost.b
+    scaled = sum(size ** b for size in pieces) / recent ** b if recent else len(pieces)
+    left = cost.piece * ratios.get(1, fallback) * scaled
+    for (c, threads), (in_memory, spilled, moved) in joins.items():
+        work = cost.a * sum(share * sum(limbs ** b for limbs in group) for share, group in in_memory.items())
+        work += sum(share * cost.work(limbs) for limbs, share in spilled)
+        price = work / cost.speedup(threads) + sum(cost.rates[phase] * limbs for phase, limbs in moved.items())
+        scale = ratios[c] if c in ratios else cost.slowdown.get(threads, 1.0) * fallback
+        left += threads * scale * price
     return left
 
 
