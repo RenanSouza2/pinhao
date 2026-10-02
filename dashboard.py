@@ -844,6 +844,7 @@ class State:
         self.price_parts_version = None
         self.post_muls = None  # ((size, threads), the division's multiplications, the decimal output's)
         self.post_price = None  # (key, division seconds, decimal output seconds)
+        self.eta_envelope = None  # (clock, end time) the eta row last showed
         self.tree_by_key = None  # (i0, i_max) -> TreeNode; the range identifies a node on its own
         self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
         self.halt = None  # last "launch halt" as (reason, i0, i_max, level, mem), cleared by the next launch
@@ -1424,6 +1425,12 @@ LIKELY_EARLY_SHARE = 0.1
 LIKELY_EARLY = 1.25
 LIKELY_LATER = 1.15
 
+# The eta row's end time follows a later ETA at once and falls toward an
+# earlier one with a time constant of ETA_RELEASE_SHARE of the time left,
+# ETA_RELEASE_MIN seconds at least.
+ETA_RELEASE_SHARE = 0.1
+ETA_RELEASE_MIN = 60.0
+
 # The division's and the decimal output's seconds against what their
 # multiplications price at on the curve.
 DIVIDE_SCALE = 0.74
@@ -1920,6 +1927,18 @@ def eta_wait(state, cost):
     if state.piece_fit[0] == 0:
         return "log has no operand sizes" if state.sizes_missing else "after the first join"
     return None
+
+
+def eta_envelope(state, rest, now):
+    """End time the eta row shows for the ETA's `rest` at clock `now`."""
+    end = now + rest
+    if state.eta_envelope is not None:
+        then, shown = state.eta_envelope
+        if end < shown:
+            tau = max(ETA_RELEASE_SHARE * rest, ETA_RELEASE_MIN)
+            end += (shown - end) * math.exp(-max(0.0, now - then) / tau)
+    state.eta_envelope = (now, end)
+    return end
 
 
 def likely_left(state, rest, now):
@@ -2901,8 +2920,9 @@ def _eta_row(state, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            ends = fmt_clock(clock + rest, clock)
-            likely = fmt_clock(clock + likely_left(state, rest, clock), clock)
+            end = eta_envelope(state, rest, clock)
+            ends = fmt_clock(end, clock)
+            likely = fmt_clock(max(clock + likely_left(state, rest, clock), end), clock)
             return labelled("eta", f"ends {ends}" if likely == ends else f"ends {ends}, likely by {likely}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
