@@ -844,7 +844,7 @@ class State:
         self.price_parts_version = None
         self.post_muls = None  # ((size, threads), the division's multiplications, the decimal output's)
         self.post_price = None  # (key, division seconds, decimal output seconds)
-        self.eta_envelope = None  # (clock, end time) the eta row last showed
+        self.eta_envelope = None  # (clock, end time) of the ETA's envelope when last fed
         self.tree_by_key = None  # (i0, i_max) -> TreeNode; the range identifies a node on its own
         self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
         self.halt = None  # last "launch halt" as (reason, i0, i_max, level, mem), cleared by the next launch
@@ -1419,14 +1419,15 @@ PIECE_WINDOW = 128
 # Multiplications finished before the run's ETA is shown.
 ETA_WARMUP_MULS = 64
 
-# The "likely by" bound: the ETA's time left times LIKELY_EARLY while the run
-# is under LIKELY_EARLY_SHARE done by the ETA's own reckoning, LIKELY_LATER after.
+# The eta row's end time: the ETA's time left times LIKELY_EARLY while the run
+# is under LIKELY_EARLY_SHARE done by the ETA's own reckoning, LIKELY_LATER
+# after, or the ETA's envelope when that is later.
 LIKELY_EARLY_SHARE = 0.1
 LIKELY_EARLY = 1.25
 LIKELY_LATER = 1.15
 
-# The eta row's end time follows a later ETA at once and falls toward an
-# earlier one with a time constant of ETA_RELEASE_SHARE of the time left,
+# The ETA's envelope follows a later ETA at once and falls toward an earlier
+# one with a time constant of ETA_RELEASE_SHARE of the time left,
 # ETA_RELEASE_MIN seconds at least.
 ETA_RELEASE_SHARE = 0.1
 ETA_RELEASE_MIN = 60.0
@@ -1930,7 +1931,7 @@ def eta_wait(state, cost):
 
 
 def eta_envelope(state, rest, now):
-    """End time the eta row shows for the ETA's `rest` at clock `now`."""
+    """End time of the ETA's envelope, fed the ETA's `rest` at clock `now`."""
     end = now + rest
     if state.eta_envelope is not None:
         then, shown = state.eta_envelope
@@ -2920,10 +2921,8 @@ def _eta_row(state, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            end = eta_envelope(state, rest, clock)
-            ends = fmt_clock(end, clock)
-            likely = fmt_clock(max(clock + likely_left(state, rest, clock), end), clock)
-            return labelled("eta", f"ends {ends}" if likely == ends else f"ends {ends}, likely by {likely}")
+            end = max(clock + likely_left(state, rest, clock), eta_envelope(state, rest, clock))
+            return labelled("eta", f"ends {fmt_clock(end, clock)}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
 
