@@ -849,7 +849,7 @@ class State:
         self.pending_work = None  # (key, pending_work): what is left of the tree, until it changes
         self.post_muls = None  # ((size, threads), the division's multiplications, the decimal output's)
         self.post_price = None  # (key, division seconds, decimal output seconds)
-        self.eta_envelope = None  # (clock, end time) of the eta row's envelope when last fed
+        self.eta_envelope = None  # (clock, end time, tick shown) of the eta row's envelope when last fed
         self.tree_by_key = None  # (i0, i_max) -> TreeNode; the range identifies a node on its own
         self.mem_booked = None  # the scheduler's own total_mem_cost, from "active memory"
         self.halt = None  # last "launch halt" as (reason, i0, i_max, level, mem), cleared by the next launch
@@ -1385,16 +1385,18 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
-def fmt_clock(ts, now):
-    """Local time at ts to the nearest minute: bare on now's date, with the
-    weekday up to six days on, with the date past that."""
+def fmt_clock(ts, now, hours=False):
+    """Local time at ts to the nearest minute, or as a bare hour if `hours`:
+    bare on now's date, with the weekday up to six days on, with the date past
+    that."""
     at = datetime.datetime.fromtimestamp(round(ts / 60) * 60)
     days = (at.date() - datetime.date.fromtimestamp(now)).days
+    clock = "%Hh" if hours else "%H:%M"
     if days == 0:
-        return at.strftime("%H:%M")
+        return at.strftime(clock)
     if 0 < days < 7:
-        return at.strftime("%a %H:%M")
-    return at.strftime("%b %d %H:%M")
+        return at.strftime(f"%a {clock}")
+    return at.strftime(f"%b %d {clock}")
 
 
 # ETA: one cost curve for a multiplication, fitted to the run's own:
@@ -1437,6 +1439,15 @@ LIKELY_LATER = 1.15
 # ETA_RELEASE_MIN seconds at least.
 ETA_RELEASE_SHARE = 0.1
 ETA_RELEASE_MIN = 60.0
+
+# The end time shown is the envelope's, up to the next tick of the local
+# clock: (seconds left at least, seconds between ticks), each step a multiple
+# of the next.
+ETA_STEPS = ((12 * 3600, 3600), (3 * 3600, 1800), (3600, 900), (1200, 300), (0, 60))
+
+# Share of a step the envelope falls under an earlier tick before the shown
+# one follows it down.
+ETA_TICK_HOLD = 0.25
 
 # Seconds of log time between the ETAs the catch-up feeds the envelope.
 ETA_CATCH_UP_STEP = 60.0
@@ -1939,16 +1950,27 @@ def eta_wait(state, cost):
     return None
 
 
+def clock_ceil(ts, step):
+    """ts up to the next multiple of `step` seconds on the local clock."""
+    shift = datetime.datetime.fromtimestamp(ts).astimezone().utcoffset().total_seconds()
+    return math.ceil((ts + shift) / step) * step - shift
+
+
 def eta_envelope(state, rest, now):
-    """End time of the envelope, fed `rest` seconds left at clock `now`."""
-    end = now + rest
+    """End time the eta row shows, fed `rest` seconds left at clock `now`, and
+    the seconds between its ticks: the envelope's, up to its tick."""
+    end, tick = now + rest, None
     if state.eta_envelope is not None:
-        then, shown = state.eta_envelope
+        then, shown, tick = state.eta_envelope
         if end < shown:
             tau = max(ETA_RELEASE_SHARE * rest, ETA_RELEASE_MIN)
             end += (shown - end) * math.exp(-max(0.0, now - then) / tau)
-    state.eta_envelope = (now, end)
-    return end
+    step = next(step for least, step in ETA_STEPS if end - now >= least)
+    held = tick is not None and tick == clock_ceil(tick, step)
+    if not held or end > tick or end < tick - (1 + ETA_TICK_HOLD) * step:
+        tick = clock_ceil(end, step)
+    state.eta_envelope = (now, end, tick)
+    return tick, step
 
 
 def likely_left(state, rest, now):
@@ -2963,8 +2985,8 @@ def _eta_row(state, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            end = eta_envelope(state, likely_left(state, rest, clock), clock)
-            return labelled("eta", f"ends {fmt_clock(end, clock)}")
+            end, step = eta_envelope(state, likely_left(state, rest, clock), clock)
+            return labelled("eta", f"ends {fmt_clock(end, clock, hours=step == 3600)}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
 
@@ -3619,8 +3641,8 @@ def catch_up_run(path, records, make_state, out):
             if 100 * k // records > told:
                 told = 100 * k // records
                 os.write(out, f"{told}\n".encode())
-    then, end = state.eta_envelope or (None, None)
-    os.write(out, f"end {runs} {then!r} {end!r}\n".encode())
+    then, end, tick = state.eta_envelope or (None, None, None)
+    os.write(out, f"end {runs} {then!r} {end!r} {tick!r}\n".encode())
 
 
 def catch_up_start(path, records, make_state):
@@ -3662,8 +3684,8 @@ def catch_up_poll(job):
     result = None
     for line in lines:
         if line.startswith(b"end "):
-            runs, then, end = line.split()[1:]
-            result = (int(runs), None if then == b"None" else (float(then), float(end)))
+            runs, *envelope = line.split()[1:]
+            result = (int(runs), None if envelope[0] == b"None" else tuple(map(float, envelope)))
         elif line:
             DISPLAY.catch_up = int(line) / 100
     if result is None and closed:
