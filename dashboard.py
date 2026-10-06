@@ -1434,11 +1434,13 @@ LIKELY_EARLY_SHARE = 0.1
 LIKELY_EARLY = 1.25
 LIKELY_LATER = 1.15
 
-# The envelope follows a later end time at once and falls toward an earlier
-# one with a time constant of ETA_RELEASE_SHARE of the time left,
-# ETA_RELEASE_MIN seconds at least.
-ETA_RELEASE_SHARE = 0.1
-ETA_RELEASE_MIN = 60.0
+# Share added on top of that at the run's start, and the seconds of run it
+# fades with.
+LIKELY_YOUNG = 0.2
+LIKELY_YOUNG_FADE = 900.0
+
+# Time constant, in seconds, the envelope follows the end time with.
+ETA_FOLLOW = 3600.0
 
 # The end time shown is the envelope's, up to the next tick of the local
 # clock: (seconds left at least, seconds between ticks), each step a multiple
@@ -1962,9 +1964,7 @@ def eta_envelope(state, rest, now):
     end, tick = now + rest, None
     if state.eta_envelope is not None:
         then, shown, tick = state.eta_envelope
-        if end < shown:
-            tau = max(ETA_RELEASE_SHARE * rest, ETA_RELEASE_MIN)
-            end += (shown - end) * math.exp(-max(0.0, now - then) / tau)
+        end += (shown - end) * math.exp(-max(0.0, now - then) / ETA_FOLLOW)
     step = next(step for least, step in ETA_STEPS if end - now >= least)
     held = tick is not None and tick == clock_ceil(tick, step)
     if not held or end > tick or end < tick - (1 + ETA_TICK_HOLD) * step:
@@ -1977,7 +1977,8 @@ def likely_left(state, rest, now):
     """Seconds the run likely ends within, from the ETA's `rest`."""
     elapsed = max(0.0, now - (state.log_start or now))
     early = elapsed < LIKELY_EARLY_SHARE * (elapsed + rest)
-    return rest * (LIKELY_EARLY if early else LIKELY_LATER)
+    young = LIKELY_YOUNG * math.exp(-elapsed / LIKELY_YOUNG_FADE)
+    return rest * (LIKELY_EARLY if early else LIKELY_LATER) * (1 + young)
 
 
 def run_time_left(state, cost, now):
