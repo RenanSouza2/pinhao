@@ -124,7 +124,11 @@ output to `thread_log/run.log`:
 ./run_debug.sh  # debug build with sanitizers
 ```
 
-Every run opens with a `=== run <timestamp> | main.c <cksum> ===` marker. A log
+Every run opens with a `=== run <timestamp> | main.c <cksum> ===` marker and,
+under it, a `=== machine <label> | <os> | <cpu> | <n> cores | <n> GiB ===` line
+saying what it ran on. The label is the first line of `.machine`, an untracked
+file each computer sets for itself (`echo dell > .machine`); without one the
+line reads `unlabelled`. A log
 is never deleted: when the last run in `thread_log/run.log` has the same
 `src/main.c` — where every `pi()` argument is a literal — and never reached
 `display end`, the new run resumes it and appends to the same file. Otherwise

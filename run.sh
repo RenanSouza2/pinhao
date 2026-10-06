@@ -59,4 +59,21 @@ fi
 # record ends in a tab, so the marker would otherwise glue onto the last one.
 printf '\n=== run %s | main.c %s ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$config_id" >> "$log"
 
+# What the run ran on. The label is this machine's own, from the untracked
+# .machine; the memory is in GiB.
+label="$(head -n 1 .machine 2>/dev/null || true)"
+case "$(uname -s)" in
+    Darwin)
+        cpu="$(sysctl -n machdep.cpu.brand_string)"
+        mem="$(sysctl -n hw.memsize)"
+        ;;
+    *)
+        cpu="$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)"
+        mem="$(awk '/^MemTotal:/{printf "%.0f", $2 * 1024}' /proc/meminfo)"
+        ;;
+esac
+printf '=== machine %s | %s | %s | %s cores | %s GiB ===\n' \
+    "${label:-unlabelled}" "$(uname -s)" "${cpu:-unknown cpu}" "$(getconf _NPROCESSORS_ONLN)" \
+    "$(awk -v b="$mem" 'BEGIN{printf "%.1f", b / 1073741824}')" >> "$log"
+
 time ./src/main.out "${args[@]}" PI 2> >(tee -a "$log" >&2)
