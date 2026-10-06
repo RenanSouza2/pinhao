@@ -1385,13 +1385,20 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
-def fmt_clock(ts, now, hours=False):
-    """Local time at ts to the nearest minute, or as a bare hour if `hours`:
-    bare on now's date, with the weekday up to six days on, with the date past
-    that."""
+def fmt_clock(ts, now, step=60):
+    """Local time at ts to the nearest minute, as it reads on a clock ticking
+    every `step` seconds: bare on now's date, with the weekday up to six days
+    on, with the date past that, and the hour alone from an hour's step up,
+    midnight as 24h of the day it ends. From a day's step up, the date of the
+    day that ends at ts."""
     at = datetime.datetime.fromtimestamp(round(ts / 60) * 60)
+    if step >= 86400:
+        return (at - datetime.timedelta(hours=12)).strftime("%b %d")
+    clock = "%Hh" if step >= 3600 else "%H:%M"
+    if step >= 3600 and at.time() == datetime.time():
+        at -= datetime.timedelta(days=1)
+        clock = "24h"
     days = (at.date() - datetime.date.fromtimestamp(now)).days
-    clock = "%Hh" if hours else "%H:%M"
     if days == 0:
         return at.strftime(clock)
     if 0 < days < 7:
@@ -1446,7 +1453,15 @@ ETA_FOLLOW = 3600.0
 # The end time shown is the envelope's, up to the next tick of the local
 # clock: (seconds left at least, seconds between ticks), each step a multiple
 # of the next.
-ETA_STEPS = ((12 * 3600, 3600), (3 * 3600, 1800), (3600, 900), (1200, 300), (0, 60))
+ETA_STEPS = (
+    (5 * 86400, 86400),
+    (2 * 86400, 6 * 3600),
+    (12 * 3600, 3600),
+    (3 * 3600, 1800),
+    (3600, 900),
+    (1200, 300),
+    (0, 60),
+)
 
 # Share of a step the envelope falls under an earlier tick before the shown
 # one follows it down.
@@ -1954,9 +1969,14 @@ def eta_wait(state, cost):
 
 
 def clock_ceil(ts, step):
-    """ts up to the next multiple of `step` seconds on the local clock."""
-    shift = datetime.datetime.fromtimestamp(ts).astimezone().utcoffset().total_seconds()
-    return math.ceil((ts + shift) / step) * step - shift
+    """ts up to the next multiple of `step` seconds past midnight on the local
+    clock."""
+    at = datetime.datetime.fromtimestamp(ts)
+    midnight = at.replace(hour=0, minute=0, second=0, microsecond=0)
+    steps = math.ceil((at - midnight).total_seconds() / step)
+    tick = midnight + datetime.timedelta(seconds=steps * step)
+    # an hour the clock repeats: its second pass
+    return max(tick.timestamp(), tick.replace(fold=1).timestamp())
 
 
 def eta_envelope(state, rest, now):
@@ -2989,7 +3009,7 @@ def _eta_row(state, cost):
         rest = run_time_left(state, cost, clock)
         if rest is not None:
             end, step = eta_envelope(state, rest, clock)
-            return labelled("eta", f"ends {fmt_clock(end, clock, hours=step == 3600)}")
+            return labelled("eta", f"ends {fmt_clock(end, clock, step=step)}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
 
