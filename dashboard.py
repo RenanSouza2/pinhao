@@ -1439,7 +1439,8 @@ LIKELY_LATER = 1.15
 LIKELY_YOUNG = 0.2
 LIKELY_YOUNG_FADE = 900.0
 
-# Time constant, in seconds, the envelope follows the end time with.
+# Time constant, in seconds, the envelope follows that end time with. It is
+# never before the ETA's own end.
 ETA_FOLLOW = 3600.0
 
 # The end time shown is the envelope's, up to the next tick of the local
@@ -1959,12 +1960,13 @@ def clock_ceil(ts, step):
 
 
 def eta_envelope(state, rest, now):
-    """End time the eta row shows, fed `rest` seconds left at clock `now`, and
-    the seconds between its ticks: the envelope's, up to its tick."""
-    end, tick = now + rest, None
+    """End time the eta row shows with the ETA's `rest` seconds left at clock
+    `now`, and the seconds between its ticks: the envelope's, up to its tick."""
+    end, tick = now + likely_left(state, rest, now), None
     if state.eta_envelope is not None:
         then, shown, tick = state.eta_envelope
         end += (shown - end) * math.exp(-max(0.0, now - then) / ETA_FOLLOW)
+    end = max(end, now + max(rest, 0.0))
     step = next(step for least, step in ETA_STEPS if end - now >= least)
     held = tick is not None and tick == clock_ceil(tick, step)
     if not held or end > tick or end < tick - (1 + ETA_TICK_HOLD) * step:
@@ -2986,7 +2988,7 @@ def _eta_row(state, cost):
             clock += max(0.0, time.time() - state.last_line_time)
         rest = run_time_left(state, cost, clock)
         if rest is not None:
-            end, step = eta_envelope(state, likely_left(state, rest, clock), clock)
+            end, step = eta_envelope(state, rest, clock)
             return labelled("eta", f"ends {fmt_clock(end, clock, hours=step == 3600)}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
@@ -3637,7 +3639,7 @@ def catch_up_run(path, records, make_state, out):
             if state.log_time is not None and not state.done and (due is None or state.log_time >= due):
                 rest = run_time_left(state, fit_cost(state), state.log_time)
                 if rest is not None:
-                    eta_envelope(state, likely_left(state, rest, state.log_time), state.log_time)
+                    eta_envelope(state, rest, state.log_time)
                 due = state.log_time + ETA_CATCH_UP_STEP
             if 100 * k // records > told:
                 told = 100 * k // records
