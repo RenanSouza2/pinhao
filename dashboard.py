@@ -81,7 +81,7 @@ ALERT_OFF = "\x1b[22;39m"
 # as NODE_PENDING and NODE_DONE rather than competing with the text inside it.
 TREE_BOX_ON = "\x1b[38;2;74;78;90m"
 
-# Neutral grey (#7C808C) for a task's measured RSS, set against the estimate
+# Neutral grey (#7C808C) for the run's measured RSS, set against the estimate
 # beside it in the default foreground: the estimate is what the scheduler acts
 # on, the measurement is the check on it, so only one of the pair reads loud.
 RSS_ON = "\x1b[38;2;124;128;140m"
@@ -96,6 +96,10 @@ IN_FLIGHT_ON = "\x1b[38;2;74;78;90m"
 # already means something is wrong (coral alert, wine lock, amber I/O), so a
 # warm badge would read as a condition rather than as a count.
 MULTI_THR_ON = "\x1b[38;2;67;150;162m"
+
+# Orchid (#D78FD8) on slot 0's id, the slot the scheduler fills under its own
+# rule. Brighter than the default foreground the other ids take, and not warm.
+SLOT_0_ON = "\x1b[38;2;215;143;216m"
 
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -306,7 +310,7 @@ class TreeNode:
         "resumed",
         "own_done", "in_progress", "task_idx", "pid", "threads", "threads_live", "start_time", "active_count", "parent", "children",
         "mem_estimate", "op_limbs", "result_limbs", "steps_done", "mul_threads", "mul_samples",
-        "term", "micro", "micro_start", "eta_anchor",
+        "term", "micro", "micro_start", "eta_anchor", "micro_anchor",
     )
 
     def __init__(self, i0, level, kind, n2, parent):
@@ -343,7 +347,8 @@ class TreeNode:
         self.term = None  # e.g. "P1xP2" or "R", from a join's "mul ..." header line; leaves have none
         self.micro = None  # e.g. "loading P1" / "multiplying" / "evaluating", from a phase line
         self.micro_start = None  # log timestamp the current micro-phase was entered at
-        self.eta_anchor = None  # (when it was priced, seconds left then): the task's ETA counts down from it
+        self.eta_anchor = None  # ((phase start, booked threads) it was priced at, seconds left then): the task's ETA counts down from it
+        self.micro_anchor = None  # (phase start it was priced at, seconds the phase takes in full, None if unpriced)
 
 
 def _build_span(i0, span, level, parent, by_key):
@@ -1391,6 +1396,13 @@ def fmt_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+def fmt_phase_time(seconds):
+    # fmt_duration, but under a minute as whole seconds: 56s
+    if seconds is None or seconds != seconds or seconds >= 60:
+        return fmt_duration(seconds)
+    return f"{max(0, int(seconds))}s"
+
+
 def fmt_clock(ts, now, step=60):
     """Local time at ts to the nearest minute, as it reads on a clock ticking
     every `step` seconds: bare on now's date, with the weekday up to six days
@@ -1759,8 +1771,8 @@ def fit_cost(state):
     return Cost(a, b, s, piece, rates, state.config.get("size"), spills, state.spill_limbs, slowdown)
 
 
-def join_time_left(node, cost):
-    """Seconds a join's steps take in full, from the one it is in: a
+def join_step_times(node, cost):
+    """Seconds each of a join's steps takes in full, from the one it is in: a
     multiplication by the curve, scaled by how its finished ones ran against
     it, the running one at the threads it started on and the rest at the
     threads booked; a load, write or add at its rate per limb."""
@@ -1768,22 +1780,40 @@ def join_time_left(node, cost):
     runs = [sec * cost.speedup(thr) / cost.work(n) for n, thr, sec in node.mul_samples or ()]
     scale = statistics.median(runs) if runs else 1.0
     running = step_running(node)
-    left = 0.0
+    times = []
     for k in range(node.steps_done, len(JOIN_STEPS)):
         phase = JOIN_STEPS[k][1]
         if phase == "multiplying":
             # a donation only reaches the worker at its next multiplication
             threads = node.mul_threads if running and k == node.steps_done else node.threads
-            left += scale * cost.work(limbs[k]) / cost.speedup(threads)
+            times.append(scale * cost.work(limbs[k]) / cost.speedup(threads))
         else:
-            left += cost.rates[phase] * limbs[k]
-    return left
+            times.append(cost.rates[phase] * limbs[k])
+    return times
+
+
+def join_time_left(node, cost):
+    return sum(join_step_times(node, cost))
+
+
+def micro_time(node, cost):
+    """Seconds the phase a join is in takes in full, priced once as the phase
+    starts, or None where it has no price: a phase that is no step of the join,
+    or one the curve cannot price yet."""
+    if node.micro_anchor is None or node.micro_anchor[0] != node.micro_start:
+        seconds = None
+        if (node.children and cost is not None and cost.a is not None and cost.size is not None
+                and node.op_limbs is not None and step_running(node)):
+            seconds = join_step_times(node, cost)[0] or None
+        node.micro_anchor = (node.micro_start, seconds)
+    return node.micro_anchor[1]
 
 
 def node_time_left(node, cost, now):
     """Seconds a running task still needs, or None where the curve cannot price
-    it yet. A piece is priced when it starts and a join whenever its phase
-    changes; in between it counts down, negative once overrun."""
+    it yet. A piece is priced when it starts and a join whenever its phase or
+    its booked threads change; in between it counts down, negative once
+    overrun."""
     if cost is None or node.start_time is None:
         return None
     if not node.children:
@@ -1794,8 +1824,9 @@ def node_time_left(node, cost, now):
         return None
     else:
         since = node.micro_start if node.micro_start is not None else node.start_time
-    if node.eta_anchor is None or node.eta_anchor[0] != since:
-        node.eta_anchor = (since, join_time_left(node, cost) if node.children else cost.piece)
+    key = (since, node.threads)
+    if node.eta_anchor is None or node.eta_anchor[0] != key:
+        node.eta_anchor = (key, join_time_left(node, cost) if node.children else cost.piece)
     return node.eta_anchor[1] - (now - since)
 
 
@@ -2355,7 +2386,7 @@ def active_mem_estimate(node):
 TreeView = collections.namedtuple(
     "TreeView",
     "lines now cost"
-    " pid_rss pid_cpu pid_io disk_lock_enabled chunk_span size width progress",
+    " pid_cpu pid_io disk_lock_enabled chunk_span size width progress",
 )
 
 
@@ -2383,15 +2414,9 @@ def node_state(node, view):
     return "\u00b7", "pending", None, NODE_PENDING
 
 
-def _memory_segment(node, view):
-    """Booked against measured. Estimate first, measured second - the order is
-    what says which is which, so it never varies."""
-    current = view.pid_rss.get(node.pid) if node.pid is not None else None
-    if node.mem_estimate is None and current is None:
-        return None
-    est = fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else "?"
-    cur = fmt_bytes(current) if current is not None else "?"
-    return f"{est} / {RSS_ON}{cur}{OFF}"
+def _memory_segment(node):
+    """What the scheduler booked for the task."""
+    return fmt_bytes(node.mem_estimate) if node.mem_estimate is not None else None
 
 
 def _threads_segment(node):
@@ -2422,7 +2447,7 @@ def _cores_segment(node, view):
         return None
     expected = expected_threads(node)
     shortfall = 1.0 - cores / expected if expected else 0.0
-    reading = f"{cores:.1f}c" if expected is None else f"{cores:.1f}c / {expected}"
+    reading = f"{fmt_num(cores)}c" if expected is None else f"{fmt_num(cores)}c / {expected}"
     return f"{severity_colour(shortfall, alarm=0.5)}{reading}{OFF}"
 
 
@@ -2451,7 +2476,12 @@ def _micro_segment(node, view):
     # The phase name is the reading; how long it has been stuck in it is the
     # check on it, so that rides in the RSS grey.
     if node.micro_start is not None:
-        micro += f" {RSS_ON}({fmt_duration(view.now - node.micro_start)}){OFF}"
+        took = fmt_phase_time(view.now - node.micro_start)
+        # Nothing is expected in a replay: what the phase took is already history.
+        expected = None if DISPLAY.walking else micro_time(node, view.cost)
+        if expected is not None:
+            took += f"/{fmt_phase_time(expected)}"
+        micro += f" {RSS_ON}({took}){OFF}"
     rate = view.pid_io.get(node.pid) if node.pid is not None else None
     if rate is not None and is_io_phase(node.micro):
         moved = rate[1] if node.micro == "writing" else rate[0]
@@ -2483,7 +2513,7 @@ def node_detail(node, view, status):
                 text += f" {IN_FLIGHT_ON}+{fmt_share(100.0 * owed / total)}%{OFF}"
             return text, []
         return f" {RSS_ON}0%{OFF}", []
-    detail = f"[{status}]"
+    detail = f"{SLOT_0_ON}[{status}]{OFF}" if node.task_idx == 0 else f"[{status}]"
     parts = []
     if node.start_time is None:
         return "", [detail]
@@ -2500,7 +2530,7 @@ def node_detail(node, view, status):
                 else "+" + fmt_duration(-remaining)
             )
             detail += f" ({eta_str})"
-        for segment in (_memory_segment(node, view), _threads_segment(node),
+        for segment in (_memory_segment(node), _threads_segment(node),
                         _cores_segment(node, view), _term_segment(node),
                         _micro_segment(node, view)):
             if segment is not None:
@@ -3015,7 +3045,9 @@ def _eta_row(state, cost):
         rest = run_time_left(state, cost, clock)
         if rest is not None:
             end, step = eta_envelope(state, rest, clock)
-            return labelled("eta", f"ends {fmt_clock(end, clock, step=step)}")
+            # a day is the band the end falls in, a clock time the tick it ends by
+            word = "on" if step >= 86400 else "by"
+            return labelled("eta", f"ends {word} {fmt_clock(end, clock, step=step)}")
         why = "no work measured yet"
     return labelled("eta", f"{RSS_ON}{why}{OFF}")
 
@@ -3533,7 +3565,7 @@ def render(state):
             tree_now = state.log_time if (DISPLAY.replaying and state.log_time) else now
             render_tree(state.tree_root, TreeView(
                 tree_lines, tree_now,
-                cost, pid_rss, pid_cpu,
+                cost, pid_cpu,
                 pid_io, state.disk_lock_enabled is not False,
                 state.tree_chunk_span,
                 state.config.get("size", state.explicit_size), term_w - TREE_INSET,
