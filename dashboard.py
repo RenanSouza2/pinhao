@@ -174,7 +174,7 @@ _TASK_ID = r"\[\s*(?P<idx>\d+)\]\[\s*(?P<pid>\d+)\]\[\s*(?P<ts>[\d.]+)\]"
 RE_NODE_PROCESS = re.compile(
     _TASK_ID + r"\s*(?P<action>.+?)\s*\|\s*"
     r"(?P<i0>\d+)\s+(?P<i_max>\d+)\s+(?P<level>\d+)"
-    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|avg\s+(?P<mem>\d+)B(?:\s*\|\s*limbs\s+(?P<limbs>\d+(?:\s+\d+){5}))?)"
+    r"(?:\s*\|\s*(?:(?P<dur>[\d.]+)|THR\s+(?P<thr>\d+)|avg\s+(?P<mem>\d+)B(?:\s*\|\s*limbs\s+(?P<limbs>\d+(?:\s+\d+){5}))?)"
     r"(?:\s+(?P<lock>HIT|MISS))?)?"
 )
 RE_PIECE = re.compile(
@@ -1094,11 +1094,17 @@ def handle_phase_line(state, content):
     if entry is not None:
         if not is_header:
             entry["micro"] = action
-        # split_task_threads() re-reads the shared slot for each multiplication,
-        # and the "multiplying" line is logged just before that read: this is
-        # where a donation booked earlier actually takes effect.
-        if action == "multiplying" and entry.get("threads") is not None:
-            entry["threads_live"] = entry["threads"]
+        # The shared slot is re-read for each multiplication, and "multiplying"
+        # carries the count read. Its "task donate" line can still be on the
+        # way, so the booking is raised to match. A build that logs no count
+        # is taken to have picked up everything booked by this line.
+        if action == "multiplying":
+            thr = m.group("thr")
+            if thr is not None:
+                entry["threads_live"] = int(thr)
+                entry["threads"] = max(entry.get("threads") or 0, int(thr))
+            elif entry.get("threads") is not None:
+                entry["threads_live"] = entry["threads"]
         # Kept per pid, so it survives a run whose tree is too large to display.
         if action == "resumed":
             entry["resumed"] = True
