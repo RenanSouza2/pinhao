@@ -34,11 +34,11 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
         n_process = (uint64_t)n_proc_avail;
     }
 
-    // ram_budget_bytes is per worker: divides the band by the clamped n_process
+    // ram_budget_bytes is per multiply, split among its threads
     araucaria_disk_config_t config = {
         .disk_path = "cache/swap",
         .disk_threshold_bytes = mem_max / 2,
-        .ram_budget_bytes = mem_max / n_process
+        .ram_budget_bytes = mem_max / 8
     };
     araucaria_disk_config_set(&config);
 
@@ -61,10 +61,11 @@ int main(void)
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("\nbegin");
 
-    uint64_t mem_launch = U64(20) * 1024 * 1024 * 1024;
-    uint64_t mem_max = U64(25) * 1024 * 1024 * 1024;
+    uint64_t mem_launch = U64(14) * 1024 * 1024 * 1024;
+    uint64_t mem_max = U64(18) * 1024 * 1024 * 1024;
 
-    pi(4'000'000'000, 16, mem_launch, mem_max);
+    uint64_t size = (U64(2) * 1024 * 1024 * 1024) - 1;
+    pi(size, 16, mem_launch, mem_max);
 
     printf("\n");
     return 0;
