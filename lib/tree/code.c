@@ -985,7 +985,7 @@ static void task_donate(tree_scheduler_p s)
         return;
     }
 
-    for(uint64_t i=0; i<s->n_process; i++)
+    for(uint64_t i=s->n_process-1; i!=UINT64_MAX; i--)
     {
         tree_task_p t = &s->tasks[i];
 
