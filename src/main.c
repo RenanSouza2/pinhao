@@ -65,7 +65,7 @@ int main(void)
     uint64_t mem_launch = U64(14) * 1024 * 1024 * 1024;
     uint64_t mem_max = U64(18) * 1024 * 1024 * 1024;
 
-    uint64_t size = (U64(2) * 1024 * 1024 * 1024) - 1;
+    uint64_t size = (U64(4) * 1024 * 1024 * 1024) - 1;
     pi(size, 16, mem_launch, mem_max);
 
     printf("\n");
