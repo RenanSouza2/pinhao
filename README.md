@@ -248,7 +248,8 @@ There are two independent caching layers, and only one of them is optional:
   holds resident over such an array, and is what `num_mul_estimate_memory`
   charges against. `src/main.c` sets this in `pi()`, after `n_process` has
   been clamped to the core count, pointed at the tracked `./cache/swap` with a
-  threshold of `mem_max / 4` and a budget of `mem_max / n_process`. Drop the
+  threshold of `mem_max / 2`, a budget of `mem_max / 8`, and the decimal
+  output's conversion pool held to `mem_launch` (`pool_budget_bytes`). Drop the
   call to keep every `num` on the heap.
 
 ### Cross-Process Disk Lock

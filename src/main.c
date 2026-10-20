@@ -38,7 +38,8 @@ static void pi(uint64_t size, uint64_t n_process, uint64_t mem_launch, uint64_t 
     araucaria_disk_config_t config = {
         .disk_path = "cache/swap",
         .disk_threshold_bytes = mem_max / 2,
-        .ram_budget_bytes = mem_max / 8
+        .ram_budget_bytes = mem_max / 8,
+        .pool_budget_bytes = mem_launch
     };
     araucaria_disk_config_set(&config);
 
