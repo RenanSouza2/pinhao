@@ -800,6 +800,7 @@ class State:
         self.mul_limbs_lo = None  # smallest and largest limbs multiplied
         self.mul_limbs_hi = None
         self.io_sums = {phase: [0, 0.0] for phase in IO_PHASES}  # phase -> [limbs, seconds] of every load, write or add
+        self.add_bins = {}  # size_bin -> [limbs, seconds, adds] of the adds of that size
         self.piece_fit = [0.0] * 9  # sums [n, x, x^2, P, Q, R, xP, xQ, xR], x log i0
         self.piece_last = None  # (P, Q, R) of the last piece sized
         self.sizes_missing = False  # a "joining" line carried no limbs
@@ -1426,16 +1427,24 @@ def fmt_clock(ts, now, step=60):
 
 # ETA: one cost curve for a multiplication, fitted to the run's own:
 # seconds = a * limbs**b * (s + (1 - s) / threads), limbs both operands' in all.
-# A load, a write and an add each cost seconds per limb they move, averaged
-# over the run.
+# A load and a write each cost seconds per limb they move, averaged over the
+# run; an add, averaged over the run's adds in its power of two of limbs once
+# ADD_BIN_MIN of them have run.
 
 # b and s until the run has measured its own.
-MUL_EXPONENT = 1.27
+MUL_EXPONENT = 1.11
 MUL_SERIAL = 0.0
 
 # A multiplication araucaria backs with disk, against the curve, until the run
 # has spilled one of its own.
-SPILL_SLOWDOWN = 2.9
+SPILL_SLOWDOWN = 2.0
+
+# Adds in a power of two of limbs before they are priced apart from the rest.
+ADD_BIN_MIN = 3
+
+# Joins a span class must have finished before its ratio prices the classes no
+# task has finished yet.
+FALLBACK_MIN_JOINS = 4
 
 # Limbs in all from which a multiplication measures how much slower its thread
 # count runs than the curve.
@@ -1443,7 +1452,7 @@ SLOWDOWN_LIMBS = 64_000_000
 
 # b is fitted once the limbs multiplied span this ratio, s once two thread
 # counts have run; s is picked from this grid.
-FIT_LIMB_SPREAD = 4.0
+FIT_LIMB_SPREAD = 64.0
 SERIAL_GRID = tuple(i / 100 for i in range(61))
 
 # Pieces the current piece time is taken over.
@@ -1452,21 +1461,18 @@ PIECE_WINDOW = 128
 # Multiplications finished before the run's ETA is shown.
 ETA_WARMUP_MULS = 64
 
-# The eta row's end time: the envelope of the ETA's time left times
-# LIKELY_EARLY while the run is under LIKELY_EARLY_SHARE done by the ETA's own
-# reckoning, LIKELY_LATER after.
-LIKELY_EARLY_SHARE = 0.1
-LIKELY_EARLY = 1.25
-LIKELY_LATER = 1.15
+# The eta row's end time: the envelope of the ETA's time left times LIKELY.
+LIKELY = 1.07
 
 # Share added on top of that at the run's start, and the seconds of run it
 # fades with.
-LIKELY_YOUNG = 0.2
-LIKELY_YOUNG_FADE = 900.0
+LIKELY_YOUNG = 0.4
+LIKELY_YOUNG_FADE = 7200.0
 
-# Time constant, in seconds, the envelope follows that end time with. It is
-# never before the ETA's own end.
-ETA_FOLLOW = 3600.0
+# Time constants, in seconds, the envelope follows that end time with when it
+# moves later and when it moves earlier. It is never before the ETA's own end.
+ETA_FOLLOW_UP = 10800.0
+ETA_FOLLOW_DOWN = 3600.0
 
 # The end time shown is the envelope's, up to the next tick of the local
 # clock: (seconds left at least, seconds between ticks), each step a multiple
@@ -1483,15 +1489,15 @@ ETA_STEPS = (
 
 # Share of a step the envelope falls under an earlier tick before the shown
 # one follows it down.
-ETA_TICK_HOLD = 0.25
+ETA_TICK_HOLD = 0.10
 
 # Seconds of log time between the ETAs the catch-up feeds the envelope.
 ETA_CATCH_UP_STEP = 60.0
 
 # The division's and the decimal output's seconds against what their
 # multiplications price at on the curve.
-DIVIDE_SCALE = 0.74
-DISPLAY_SCALE = 1.30
+DIVIDE_SCALE = 1.05
+DISPLAY_SCALE = 1.27
 
 # An SSM square against a multiplication of as many limbs in all.
 SQUARE_COST = 2 / 3
@@ -1605,6 +1611,11 @@ def book_phase_end(state, node, action, ts):
         sums = state.io_sums[begin]
         sums[0] += limbs
         sums[1] += seconds
+        if begin == "adding":
+            sums = state.add_bins.setdefault(size_bin(limbs), [0, 0.0, 0])
+            sums[0] += limbs
+            sums[1] += seconds
+            sums[2] += 1
         return
     if seconds <= 0:
         return
@@ -1701,36 +1712,54 @@ def spill_limbs(mem_max):
     return lo
 
 
+def size_bin(limbs):
+    # floor of log2 limbs
+    return max(int(limbs), 1).bit_length() - 1
+
+
 class Cost:
     """The run's cost curve as of one frame."""
 
-    __slots__ = ("a", "b", "s", "piece", "rates", "size", "spills", "spill_limbs", "slowdown")
+    __slots__ = ("a", "b", "s", "piece", "rates", "add_rates", "size", "spills", "spill_limbs", "slowdown")
 
-    def __init__(self, a, b, s, piece, rates, size, spills=None, spill_limbs=None, slowdown=None):
+    def __init__(self, a, b, s, piece, rates, size, spills=None, spill_limbs=None, slowdown=None, add_rates=None):
         self.a, self.b, self.s, self.piece, self.size = a, b, s, piece, size
         self.rates = rates  # IO_PHASES -> seconds per limb moved, 0 until one has run
-        self.spills = spills  # the run's spills: (their limbs sorted, running sums of their slowdowns)
+        self.add_rates = add_rates or {}  # size_bin -> seconds per limb of the adds of that size
+        self.spills = spills  # threads, None for any -> (the run's spills' limbs sorted, running sums of their slowdowns)
         self.spill_limbs = spill_limbs  # fewest limbs in all that go to disk
         self.slowdown = slowdown or {}  # threads -> big multiplications on them against the curve
 
     def speedup(self, threads):
         return 1.0 / (self.s + (1.0 - self.s) / max(threads or 1, 1))
 
-    def spill(self, limbs):
+    def io_rate(self, phase, bin_=None):
+        # seconds per limb a load, write or add moves, an add by its size_bin
+        rate = self.add_rates.get(bin_) if phase == "adding" else None
+        return self.rates[phase] if rate is None else rate
+
+    def io(self, phase, limbs):
+        return self.io_rate(phase, size_bin(limbs)) * limbs
+
+    def spill(self, limbs, threads=None):
         # slowdown on disk: the mean over the run's spills within a factor of 2
-        # in limbs, over all of them when none is
+        # in limbs on as many threads, else on any, else over all of them
         if not self.spills:
             return SPILL_SLOWDOWN
-        sizes, sums = self.spills
-        lo, hi = bisect.bisect_left(sizes, limbs / 2), bisect.bisect_right(sizes, 2 * limbs)
-        if lo == hi:
-            lo, hi = 0, len(sizes)
-        return (sums[hi] - sums[lo]) / (hi - lo)
+        for key in (threads, None):
+            if key not in self.spills:
+                continue
+            sizes, sums = self.spills[key]
+            lo, hi = bisect.bisect_left(sizes, limbs / 2), bisect.bisect_right(sizes, 2 * limbs)
+            if lo < hi:
+                return (sums[hi] - sums[lo]) / (hi - lo)
+        sizes, sums = self.spills[None]
+        return sums[-1] / len(sizes)
 
-    def work(self, limbs):
+    def work(self, limbs, threads=None):
         # single-thread seconds
         work = self.a * limbs ** self.b
-        return work * self.spill(limbs) if self.spill_limbs is not None and limbs >= self.spill_limbs else work
+        return work * self.spill(limbs, threads) if self.spill_limbs is not None and limbs >= self.spill_limbs else work
 
 
 def fit_cost(state):
@@ -1759,26 +1788,32 @@ def fit_cost(state):
         _, a, slowdown = state.mul_scale
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
     rates = {phase: sec / limbs if limbs else 0.0 for phase, (limbs, sec) in state.io_sums.items()}
+    add_rates = {k: sec / limbs for k, (limbs, sec, adds) in state.add_bins.items() if adds >= ADD_BIN_MIN and limbs}
     spills = None
     if state.spill_samples and a is not None:
         key = (len(state.spill_samples), a, b, s)
         if state.spill_scale is None or state.spill_scale[0] != key:
-            slow = sorted((limbs, sec / (a * limbs ** b * (s + (1.0 - s) / thr)))
+            slow = sorted((limbs, thr, sec / (a * limbs ** b * (s + (1.0 - s) / thr)))
                           for limbs, thr, sec in state.spill_samples)
-            sums = list(itertools.accumulate((r for _, r in slow), initial=0.0))
-            state.spill_scale = (key, ([limbs for limbs, _ in slow], sums))
+            tables = {}
+            for threads in {None} | {thr for _, thr, _ in slow}:
+                mine = [(limbs, r) for limbs, thr, r in slow if threads is None or thr == threads]
+                sums = list(itertools.accumulate((r for _, r in mine), initial=0.0))
+                tables[threads] = ([limbs for limbs, _ in mine], sums)
+            state.spill_scale = (key, tables)
         spills = state.spill_scale[1]
-    return Cost(a, b, s, piece, rates, state.config.get("size"), spills, state.spill_limbs, slowdown)
+    return Cost(a, b, s, piece, rates, state.config.get("size"), spills, state.spill_limbs, slowdown, add_rates)
 
 
 def join_step_times(node, cost):
     """Seconds each of a join's steps takes in full, from the one it is in: a
-    multiplication by the curve, scaled by how its finished ones ran against
-    it, the running one at the threads it started on and the rest at the
-    threads booked; a load, write or add at its rate per limb."""
+    multiplication by the curve, scaled by how its finished ones on as many
+    threads ran against it, the running one at the threads it started on and
+    the rest at the threads booked; a load, write or add at its rate per limb."""
     limbs = step_limbs(node.op_limbs, exact_path(node.op_limbs, node.kind, cost.size), cost.size)
-    runs = [sec * cost.speedup(thr) / cost.work(n) for n, thr, sec in node.mul_samples or ()]
-    scale = statistics.median(runs) if runs else 1.0
+    runs = collections.defaultdict(list)
+    for n, thr, sec in node.mul_samples or ():
+        runs[thr].append(sec * cost.speedup(thr) / cost.work(n, thr))
     running = step_running(node)
     times = []
     for k in range(node.steps_done, len(JOIN_STEPS)):
@@ -1786,9 +1821,10 @@ def join_step_times(node, cost):
         if phase == "multiplying":
             # a donation only reaches the worker at its next multiplication
             threads = node.mul_threads if running and k == node.steps_done else node.threads
-            times.append(scale * cost.work(limbs[k]) / cost.speedup(threads))
+            scale = statistics.median(runs[threads]) if threads in runs else 1.0
+            times.append(scale * cost.work(limbs[k], threads) / cost.speedup(threads))
         else:
-            times.append(cost.rates[phase] * limbs[k])
+            times.append(cost.io(phase, limbs[k]))
     return times
 
 
@@ -1964,7 +2000,7 @@ def post_split_prices(state, cost):
                            display_muls(cost.size, threads))
     key = (cost.size, threads, cost.a, cost.b, cost.s, cost.spill_limbs, len(state.spill_samples))
     if state.post_price is None or state.post_price[0] != key:
-        divide, display = (sum(k * cost.work(limbs) * (SQUARE_COST if square else 1.0) / cost.speedup(thr) / at_once
+        divide, display = (sum(k * cost.work(limbs, thr) * (SQUARE_COST if square else 1.0) / cost.speedup(thr) / at_once
                                for (limbs, thr, square, at_once), k in muls.items())
                            for muls in state.post_muls[1:])
         state.post_price = (key, DIVIDE_SCALE * divide, DISPLAY_SCALE * display)
@@ -2022,7 +2058,8 @@ def eta_envelope(state, rest, now):
     end, tick = now + likely_left(state, rest, now), None
     if state.eta_envelope is not None:
         then, shown, tick = state.eta_envelope
-        end += (shown - end) * math.exp(-max(0.0, now - then) / ETA_FOLLOW)
+        follow = ETA_FOLLOW_UP if end > shown else ETA_FOLLOW_DOWN
+        end += (shown - end) * math.exp(-max(0.0, now - then) / follow)
     end = max(end, now + max(rest, 0.0))
     step = next(step for least, step in ETA_STEPS if end - now >= least)
     held = tick is not None and tick == clock_ceil(tick, step)
@@ -2035,9 +2072,8 @@ def eta_envelope(state, rest, now):
 def likely_left(state, rest, now):
     """Seconds the run likely ends within, from the ETA's `rest`."""
     elapsed = max(0.0, now - (state.log_start or now))
-    early = elapsed < LIKELY_EARLY_SHARE * (elapsed + rest)
     young = LIKELY_YOUNG * math.exp(-elapsed / LIKELY_YOUNG_FADE)
-    return rest * (LIKELY_EARLY if early else LIKELY_LATER) * (1 + young)
+    return rest * LIKELY * (1 + young)
 
 
 def run_time_left(state, cost, now):
@@ -2071,7 +2107,7 @@ def node_work(node, cost, piece_sizes, memo):
         return cost.piece
     op, exact = node_operands(node, cost, piece_sizes, memo)
     limbs = step_limbs(op, exact, cost.size)
-    return sum(cost.work(n) if phase == "multiplying" else cost.rates[phase] * n
+    return sum(cost.work(n) if phase == "multiplying" else cost.io(phase, n)
                for (_, phase, _), n in zip(JOIN_STEPS, limbs))
 
 
@@ -2085,7 +2121,8 @@ def mul_threads_ceiling(count):
 
 def node_price_parts(state, node, cost, piece_sizes, memo, budget):
     """(threads the scheduler gives a join, its multiplications' limbs, limbs by
-    load/write/add phase), kept until a join logs its sizes."""
+    load/write/add phase and, for an add, its size_bin), kept until a join logs
+    its sizes."""
     if state.price_parts_version != state.sizes_version:
         state.price_parts, state.price_parts_version = {}, state.sizes_version
     parts = state.price_parts.get(id(node))
@@ -2098,7 +2135,7 @@ def node_price_parts(state, node, cost, piece_sizes, memo, budget):
             if phase == "multiplying":
                 muls.append(n)
             else:
-                moved[phase] += n
+                moved[(phase, size_bin(n) if phase == "adding" else None)] += n
         parts = (1 << (threads.bit_length() - 1), tuple(muls), tuple(moved.items()))
         state.price_parts[id(node)] = parts
     return parts
@@ -2112,7 +2149,8 @@ def node_thread_price(state, node, cost, piece_sizes, memo, budget):
         return cost.piece
     threads, muls, moved = node_price_parts(state, node, cost, piece_sizes, memo, budget)
     speedup = cost.speedup(threads)
-    return threads * (sum(cost.work(n) for n in muls) / speedup + sum(cost.rates[phase] * n for phase, n in moved))
+    return threads * (sum(cost.work(n, threads) for n in muls) / speedup
+                      + sum(cost.io_rate(*key) * n for key, n in moved))
 
 
 def pending_work(state, cost, piece_sizes, budget):
@@ -2146,8 +2184,8 @@ def pending_work(state, cost, piece_sizes, budget):
                     group[1].append((limbs, share))
                 else:
                     group[0].setdefault(share, []).append(limbs)
-            for phase, limbs in moved:
-                group[2][phase] += share * limbs
+            for what, limbs in moved:
+                group[2][what] += share * limbs
         state.pending_work = (key, (pieces, joins))
     return state.pending_work[1]
 
@@ -2156,9 +2194,10 @@ def run_thread_left(state, cost):
     """Booked thread-seconds the split still needs: every unfinished node at its
     price scaled by how its cost class's finished tasks ran against theirs - a
     class none has finished slowed down as the run's big multiplications on as
-    many threads are, and at the largest finished span class's ratio, at least
-    1 - a pending piece at the finished pieces' mean, by its terms' size against
-    theirs, and a running join less the multiplications it has finished."""
+    many threads are, and at the ratio of the largest span class with
+    FALLBACK_MIN_JOINS finished, at least 1 - a pending piece at the finished
+    pieces' mean, by its terms' size against theirs, and a running join less
+    the multiplications it has finished."""
     piece_sizes = piece_sizes_at(state)
     memo, budget = {}, thread_budget(state) or 1
     ratios = {c: statistics.fmean(sec / node_thread_price(state, node, cost, piece_sizes, memo, budget)
@@ -2171,7 +2210,8 @@ def run_thread_left(state, cost):
         if recent and state.piece_log_count:
             done = piece_sizes(math.exp(state.piece_log_sum / state.piece_log_count) - PIECES_PER_LEAF / 2)
             ratios[1] *= (recent / sum(done)) ** cost.b
-    spans = [c for c in ratios if isinstance(c, int) and c > 1]
+    spans = [c for c in ratios if isinstance(c, int) and c > 1
+             and len(state.class_samples.get(c, ())) >= FALLBACK_MIN_JOINS]
     fallback = max(ratios[max(spans)], 1.0) if spans else 1.0
     pieces, joins = pending_work(state, cost, piece_sizes, budget)
     b = cost.b
@@ -2179,8 +2219,8 @@ def run_thread_left(state, cost):
     left = cost.piece * ratios.get(1, fallback) * scaled
     for (c, threads), (in_memory, spilled, moved) in joins.items():
         work = cost.a * sum(share * sum(limbs ** b for limbs in group) for share, group in in_memory.items())
-        work += sum(share * cost.work(limbs) for limbs, share in spilled)
-        price = work / cost.speedup(threads) + sum(cost.rates[phase] * limbs for phase, limbs in moved.items())
+        work += sum(share * cost.work(limbs, threads) for limbs, share in spilled)
+        price = work / cost.speedup(threads) + sum(cost.io_rate(*key) * limbs for key, limbs in moved.items())
         scale = ratios[c] if c in ratios else cost.slowdown.get(threads, 1.0) * fallback
         left += threads * scale * price
     return left
