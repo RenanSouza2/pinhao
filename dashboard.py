@@ -1720,15 +1720,25 @@ def size_bin(limbs):
 class Cost:
     """The run's cost curve as of one frame."""
 
-    __slots__ = ("a", "b", "s", "piece", "rates", "add_rates", "size", "spills", "spill_limbs", "slowdown")
+    __slots__ = ("a", "b", "s", "piece", "piece_sizes", "piece_ref", "rates", "add_rates", "size", "spills",
+                 "spill_limbs", "slowdown")
 
-    def __init__(self, a, b, s, piece, rates, size, spills=None, spill_limbs=None, slowdown=None, add_rates=None):
+    def __init__(self, a, b, s, piece, rates, size, spills=None, spill_limbs=None, slowdown=None, add_rates=None,
+                 piece_sizes=None, piece_ref=None):
         self.a, self.b, self.s, self.piece, self.size = a, b, s, piece, size
+        self.piece_sizes = piece_sizes  # piece_sizes_at's, None before a piece is sized
+        self.piece_ref = piece_ref  # terms' size at the median i0 of the pieces `piece` is the median of
         self.rates = rates  # IO_PHASES -> seconds per limb moved, 0 until one has run
         self.add_rates = add_rates or {}  # size_bin -> seconds per limb of the adds of that size
         self.spills = spills  # threads, None for any -> (the run's spills' limbs sorted, running sums of their slowdowns)
         self.spill_limbs = spill_limbs  # fewest limbs in all that go to disk
         self.slowdown = slowdown or {}  # threads -> big multiplications on them against the curve
+
+    def piece_at(self, i0):
+        # seconds of the piece starting at i0: `piece` by its terms' size against piece_ref, to the b
+        if self.piece_sizes is None or not self.piece_ref:
+            return self.piece
+        return self.piece * (sum(self.piece_sizes(i0)) / self.piece_ref) ** self.b
 
     def speedup(self, threads):
         return 1.0 / (self.s + (1.0 - self.s) / max(threads or 1, 1))
@@ -1787,6 +1797,9 @@ def fit_cost(state):
             state.mul_scale = (key, scale, {t: statistics.median(v) for t, v in big.items() if len(v) >= 3})
         _, a, slowdown = state.mul_scale
     piece = statistics.median(list(state.piece_events)[-PIECE_WINDOW:]) if state.piece_events else None
+    piece_sizes = piece_sizes_at(state)
+    piece_ref = (sum(piece_sizes(statistics.median(state.piece_recent_i0)))
+                 if piece_sizes is not None and state.piece_recent_i0 else None)
     rates = {phase: sec / limbs if limbs else 0.0 for phase, (limbs, sec) in state.io_sums.items()}
     add_rates = {k: sec / limbs for k, (limbs, sec, adds) in state.add_bins.items() if adds >= ADD_BIN_MIN and limbs}
     spills = None
@@ -1802,7 +1815,8 @@ def fit_cost(state):
                 tables[threads] = ([limbs for limbs, _ in mine], sums)
             state.spill_scale = (key, tables)
         spills = state.spill_scale[1]
-    return Cost(a, b, s, piece, rates, state.config.get("size"), spills, state.spill_limbs, slowdown, add_rates)
+    return Cost(a, b, s, piece, rates, state.config.get("size"), spills, state.spill_limbs, slowdown, add_rates,
+                piece_sizes, piece_ref)
 
 
 def join_step_times(node, cost):
@@ -1862,7 +1876,7 @@ def node_time_left(node, cost, now):
         since = node.micro_start if node.micro_start is not None else node.start_time
     key = (since, node.threads)
     if node.eta_anchor is None or node.eta_anchor[0] != key:
-        node.eta_anchor = (key, join_time_left(node, cost) if node.children else cost.piece)
+        node.eta_anchor = (key, join_time_left(node, cost) if node.children else cost.piece_at(node.i0))
     return node.eta_anchor[1] - (now - since)
 
 
@@ -2203,7 +2217,7 @@ def run_thread_left(state, cost):
     ratios = {c: statistics.fmean(sec / node_thread_price(state, node, cost, piece_sizes, memo, budget)
                                   for node, sec in samples[-16:])
               for c, samples in state.class_samples.items()}
-    recent = sum(piece_sizes(statistics.median(state.piece_recent_i0))) if state.piece_recent_i0 else None
+    recent = cost.piece_ref
     if 1 in state.class_cost:
         sec, tasks = state.class_cost[1]
         ratios[1] = sec / tasks / cost.piece
