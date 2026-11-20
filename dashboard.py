@@ -3738,6 +3738,17 @@ def tail(path):
             f.close()
 
 
+def next_run_state(state, make_state, marker_config):
+    """The state a run marker starts. Between runs of one config the pieces'
+    times and sizes carry over."""
+    new = make_state()
+    new.marker_config = marker_config
+    if marker_config is not None and marker_config == state.marker_config:
+        new.piece_events, new.piece_recent_i0 = state.piece_events, state.piece_recent_i0
+        new.piece_fit, new.piece_last = state.piece_fit, state.piece_last
+    return new
+
+
 def catch_up_run(path, records, make_state, out):
     """The catch-up's child: feed the log's first `records` to a state of its
     own, the envelope fed an ETA every ETA_CATCH_UP_STEP of log time, and write
@@ -3747,7 +3758,9 @@ def catch_up_run(path, records, make_state, out):
     with open(path, errors="replace") as f:
         for k, line in enumerate(itertools.islice(f, records)):
             if RUN_MARKER in line:
-                state, runs, due = make_state(), runs + 1, None
+                marker = RE_RUN_MARKER.search(line)
+                state = next_run_state(state, make_state, marker.group("config") if marker else None)
+                runs, due = runs + 1, None
                 continue
             feed_line(state, line)
             if state.log_time is not None and not state.done and (due is None or state.log_time >= due):
@@ -4084,12 +4097,11 @@ def main():
                 # "since dashboard attached" is a reading about the dashboard,
                 # not about the run, so it and the total are what a boundary keeps.
                 attached = state.start_time
-                state = make_state()
+                state = next_run_state(state, make_state, marker_config)
                 state.prev_config = prev_config
                 state.start_time = attached
                 state.banked_time = banked
                 state.runs_before = runs_before
-                state.marker_config = marker_config
                 # Keyed by pid, and the next run forks its own workers.
                 _CPU_SAMPLER.reset()
                 done_announced = False
