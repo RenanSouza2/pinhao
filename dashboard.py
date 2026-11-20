@@ -52,10 +52,11 @@ LOCK_ON = "\x1b[38;2;114;47;55m"
 MUL_ON = "\x1b[38;2;107;142;107m"
 
 # Tree node states. Deep teal for work behind you, violet for work still ahead,
-# muted blue for the trail down to a running worker, and MUL_ON's green on the
-# node that is running - the same green its "multiplying" phase is written in,
-# so the node and the work it is doing read as one thing. Green belongs to the
-# running node alone: a done node in the same hue read as still working.
+# a brighter violet once all of its inputs are done, muted blue for the trail
+# down to a running worker, and MUL_ON's green on the node that is running -
+# the same green its "multiplying" phase is written in, so the node and the
+# work it is doing read as one thing. Green belongs to the running node alone:
+# a done node in the same hue read as still working.
 #
 # NODE_DONE and NODE_PENDING are within 0.5 of each other in contrast against
 # the #0A143C ground, too close to tell apart by weight - hue alone separates
@@ -67,6 +68,7 @@ NODE_RUNNING = "\x1b[38;2;107;142;107m"  # #6B8E6B  green,    contrast  4.84
 NODE_ACTIVE = "\x1b[38;2;142;156;200m"   # #8E9CC8  blue,               6.57
 NODE_DONE = "\x1b[38;2;39;92;107m"       # #275C6B  teal,               2.40
 NODE_PENDING = "\x1b[38;2;78;63;99m"     # #4E3F63  violet,             1.88
+NODE_READY = "\x1b[38;2;139;95;176m"     # #8B5FB0  amethyst,           3.70
 
 # Coral (#E07A5F) for the few states that mean something is going wrong: the
 # run has gone quiet, the scheduler has stopped admitting work, or the disk
@@ -2460,7 +2462,7 @@ def node_state(node, view):
         return "\u25b8", "in_progress", str(node.task_idx), NODE_RUNNING
     # Vacuously true for a leaf: a piece depends on nothing.
     if all(c.own_done for c in node.children):
-        return "\u00b7", "ready", None, NODE_PENDING
+        return "\u25b9", "ready", None, NODE_READY
     if node.active_count > 0:
         return "\u25cb", "in_progress", None, NODE_ACTIVE
     if node.leaves_done > 0:
