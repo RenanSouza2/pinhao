@@ -1,10 +1,10 @@
 # Pi Threads
 
-A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 40,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
+A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 80,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
 
 ## Features
 
-- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 40B+ digits.
+- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 80B+ digits.
 - **Out-of-core Processing:** Intelligently saves intermediate states and large numbers to disk to overcome RAM limitations, using a configurable cache threshold.
 - **Multi-Process Parallelization:** Uses `fork` to parallelize chunks of the binary splitting tree, speeding up computation across multiple cores.
 - **Custom Big-Number Library:** Relies on the `araucaria` submodule to handle big integer and big float arithmetic, binary splitting types (P, Q, R), and disk serialization.
@@ -60,7 +60,7 @@ The build system is managed via standard Makefiles.
 ## Usage
 
 By default, the scale of Pi calculation is hardcoded in `src/main.c`.
-`pi()` takes a `size`, the number of processes to fork across, and three
+`pi()` takes a `size`, the number of processes to fork across, and two
 memory budgets.
 
 `size` is the target mantissa size of the result, in 64-bit limbs (`araucaria`
@@ -155,8 +155,11 @@ between runs, never counts.
 While a run is in progress (or after one finishes), `./dashboard.py` renders
 a live terminal dashboard from `thread_log/run.log`:
 ```bash
-./dashboard.py [path/to/run.log] [--size N] [--n-process N]
+./dashboard.py [path/to/run.log] [--size N] [--n-process N] [--no-replay] [--replay-fps F]
 ```
+It walks the log from the start before following it live; `--no-replay`
+jumps straight to the end, and `--replay-fps` sets the walk's frame rate
+(default 60).
 
 ### Verifying the digits
 
@@ -221,11 +224,12 @@ There are two independent caching layers, and only one of them is optional:
   result is checkpointed to disk under `./cache/pieces/` and
   `./cache/numbers/`, and the final result under `./cache/res/bin/`. This
   happens unconditionally — it's how the computation stays out-of-core and
-  how a finished run can be reused: `pi_tree()`/`pi_finish()` check whether
-  a given `size` is already stored (`pi_is_stored`) and load it straight
-  from `./cache/res/bin/` instead of recomputing, and likewise individual split
-  results are skipped if already on disk (`split_big_res_is_stored`). This
-  path needs no configuration and is unrelated to `araucaria`.
+  how a finished run can be reused: `pi_finish()` saves the result under
+  `./cache/res/bin/`, and `pi_tree()` checks whether a given `size` is already
+  stored there (`pi_is_stored`) and loads it instead of recomputing; likewise
+  individual split results are skipped if already on disk
+  (`split_big_res_is_stored`). This path needs no configuration and is
+  unrelated to `araucaria`.
 
 - **`araucaria`'s disk-backed numbers (opt-in).** By default `araucaria`
   keeps every big number's limb array on the heap, with no disk spilling
@@ -256,30 +260,31 @@ There are two independent caching layers, and only one of them is optional:
 
 All processes read and write the `cache/*.bin` files over the same physical
 disk, so concurrent I/O can be slower than serialized I/O on a spinning
-drive. `config.h` gates this with `LOCK_DISK_IO`:
+drive. `config.h` gates this with `LOCK_DISK_IO`, commented out by default:
 
 ```c
-#define LOCK_DISK_IO
+// #define LOCK_DISK_IO
 ```
 
-When defined, cache reads and writes take an exclusive `flock` on
-`./cache/disk.lock`, serializing disk access across all forked workers.
-Comment the define out on an NVMe or SSD, where parallel I/O is the faster
-choice. The run log reports which mode is active on its `disk lock` line.
+Uncommented, cache reads and writes take an exclusive `flock` on
+`./cache/disk.lock`, serializing disk access across all forked workers. That
+suits a spinning drive; leave it off on an NVMe or SSD, where parallel I/O is
+the faster choice. The run log reports which mode is active on its
+`disk lock` line.
 
 ### Keeping Exact Pieces
 
 An exact `pieces/p_*.bin` triple carries no `size`, so it stays valid across
 runs of any precision. `config.h` gates whether a join deletes the pieces it
-consumed:
+consumed, with `KEEP_PIECES` commented out by default:
 
 ```c
-#define KEEP_PIECES
+// #define KEEP_PIECES
 ```
 
-When defined, a join leaves its children in `pieces/` for the next run to
-reuse. Comment it out to reclaim the disk instead — the run then keeps only
-what it is still working on.
+By default a join deletes its children, so the run keeps only what it is
+still working on. Uncommented, a join leaves them in `pieces/` for the next
+run to reuse, at the cost of the disk they hold.
 
 ## Project Structure
 
@@ -288,9 +293,13 @@ what it is still working on.
 - `lib/`: Core logic for binary splitting, all built on top of `araucaria`:
   - `tree`: Current implementation used by `src/main.c` — a forked
     binary-splitting tree (`pi_tree`).
-  - `big`, `linear`, `split`, `union`: Earlier/alternate implementations and
-    building blocks (`pi_big`, `pi_v1`/`pi_v2`/`pi_v3`, splitting and union
-    number helpers) kept for reference and experimentation.
+  - `big`: What `tree` runs on — leaf pieces, joins of P/Q/R terms, their
+    cache files, and `pi_finish`'s final division.
+  - `union`: A number that is either a `sig` or a `flt`, the form `big`
+    stores P/Q/R terms in.
+  - `linear`, `split`: Earlier implementations (`pi_v1`/`pi_v2`/`pi_v3`,
+    splitting helpers) kept for reference and experimentation; unused by
+    `src/main.c`.
 - `mods/`: Git submodules containing shared libraries:
   - `clu`: Memory management debug tool.
   - `macros`: C macros for assertions, timing, static typing, and threading.
