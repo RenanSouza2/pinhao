@@ -55,6 +55,7 @@ dkms.conf
 .vscode/settings.json
 
 thread_log/*
+.machine
 cache*/*
 runner
 

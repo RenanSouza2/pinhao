@@ -13,8 +13,8 @@
 #include "../../mods/macros/uint.h"
 #include "../../mods/macros/time.h"
 
-#define TREE_PIECE_SIZE 24
-#define TREE_LEAF_COST_BYTES (U64(512) * 1024 * 1024)
+#define TREE_PIECE_SIZE 22
+#define TREE_LEAF_COST_BYTES (U64(128) * 1024 * 1024)
 
 // Top bits of index_max that become the chain: the range is cut into chunks of
 // B(chunk_span), folded in one at a time instead of halved.
@@ -41,9 +41,14 @@
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", \
         IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, LEVEL, DUR)
 
-#define LOG_NODE_MEM(IDX, PID, LABEL, I_0, I_MAX, LEVEL, MEM) \
-    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B", \
-        IDX, PID, get_wall_time(), LABEL, I_0, I_MAX, LEVEL, MEM)
+// The plan's memory, then the operands' limb counts: left child's P Q R, then
+// the right child's.
+#define LOG_NODE_JOINING(IDX, PID, I_0, I_MAX, LEVEL, N) \
+    tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | avg " U64P(12) "B" \
+        " | limbs " U64P(10) " " U64P(10) " " U64P(10) " " U64P(10) " " U64P(10) " " U64P(10) "", \
+        IDX, PID, get_wall_time(), "joining", I_0, I_MAX, LEVEL, (N)->plan.mem_cost, \
+        (N)->ops[0][NODE_OP_P], (N)->ops[0][NODE_OP_Q], (N)->ops[0][NODE_OP_R], \
+        (N)->ops[1][NODE_OP_P], (N)->ops[1][NODE_OP_Q], (N)->ops[1][NODE_OP_R])
 
 #define LOG_NODE_PIECE(IDX, PID, I_0, I_MAX, DUR) \
     tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " %3s | %7.1f", \
@@ -107,6 +112,8 @@ STRUCT(node)
     bool ops_set;
     // [0] left child, [1] right child; inner index is NODE_OP_P/Q/R
     uint64_t ops[2][3];
+    // limbs an op is multiplied at, at most: size off the exact path
+    uint64_t ops_cap;
     tree_plan_t plan;
     union {
         big_t big;
@@ -421,6 +428,7 @@ static void node_op_sizes(node_p n)
                 n->ops[0][i] = split_span_res_op_size(size, i_0, span - 1, level + 1, i);
                 n->ops[1][i] = split_span_res_op_size(size, i_0 + B(span - 1), span - 1, level + 1, i);
             }
+            n->ops_cap = split_span_res_is_sig(size, i_0, span) ? UINT64_MAX : size;
         }
         break;
 
@@ -437,6 +445,7 @@ static void node_op_sizes(node_p n)
                 n->ops[0][i] = split_span_res_op_size(size, i_0, span, level + 1, i);
                 n->ops[1][i] = split_big_res_op_size(size, i_0 + B(span), remainder - B(span), level + 1, i);
             }
+            n->ops_cap = size;
         }
         break;
 
@@ -452,6 +461,7 @@ static void node_op_sizes(node_p n)
                 n->ops[0][i] = split_big_res_op_size(size, i_0, prefix, 0, i);
                 n->ops[1][i] = split_big_res_op_size(size, i_0 + prefix, chunk, 0, i);
             }
+            n->ops_cap = size;
         }
         break;
 
@@ -531,6 +541,12 @@ static uint64_t get_free_index(tree_scheduler_p s)
 
 
 
+static uint64_t node_op_mul(node_p n, uint64_t child, uint64_t op)
+{
+    uint64_t count = n->ops[child][op];
+    return count < n->ops_cap ? count : n->ops_cap;
+}
+
 static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 {
     if(node_is_leaf(n))
@@ -540,20 +556,18 @@ static uint64_t node_estimate_memory(node_p n, uint64_t threads)
 
     node_op_sizes(n);
 
-    uint64_t threshold = araucaria_disk_config_get_threshold_bytes();
-
     // split_span_res_join's four terms, in order: P1xP2, Q1xQ2, P1xR2, R1xQ2
     const uint64_t terms[4][2] = {
-        { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_P] },
-        { n->ops[0][NODE_OP_Q], n->ops[1][NODE_OP_Q] },
-        { n->ops[0][NODE_OP_P], n->ops[1][NODE_OP_R] },
-        { n->ops[0][NODE_OP_R], n->ops[1][NODE_OP_Q] }
+        { node_op_mul(n, 0, NODE_OP_P), node_op_mul(n, 1, NODE_OP_P) },
+        { node_op_mul(n, 0, NODE_OP_Q), node_op_mul(n, 1, NODE_OP_Q) },
+        { node_op_mul(n, 0, NODE_OP_P), node_op_mul(n, 1, NODE_OP_R) },
+        { node_op_mul(n, 0, NODE_OP_R), node_op_mul(n, 1, NODE_OP_Q) }
     };
 
     double total = 0.0;
     for(uint64_t i = 0; i < 4; i++)
     {
-        total += (double)num_mul_estimate_memory(terms[i][0], terms[i][1], threshold, threads);
+        total += (double)num_mul_estimate_memory(terms[i][0], terms[i][1], threads);
     }
 
     // P, Q and R run within a few percent of each other, so the four terms are
@@ -609,7 +623,7 @@ static uint64_t node_threads_ceiling(node_p n)
     }
 
     node_op_sizes(n);
-    return num_mul_threads_ceiling(n->ops[0][NODE_OP_R], n->ops[1][NODE_OP_Q]);
+    return num_mul_threads_ceiling(node_op_mul(n, 0, NODE_OP_R), node_op_mul(n, 1, NODE_OP_Q));
 }
 
 static uint64_t node_threads(node_p n, uint64_t free_threads)
@@ -754,6 +768,7 @@ static void node_big_process(node_p n, uint64_t index, _Atomic uint64_t *threads
     uint64_t i_max = i_0 + remainder - 1;
 
     LOG_NODE(index, pid, "begin", i_0, i_max, level);
+    LOG_NODE_JOINING(index, pid, i_0, i_max, level, n);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -786,7 +801,7 @@ static void node_span_process(node_p n, uint64_t index, _Atomic uint64_t *thread
         return;
     }
 
-    LOG_NODE_MEM(index, pid, "joining", i_0, i_max, level, n->plan.mem_cost);
+    LOG_NODE_JOINING(index, pid, i_0, i_max, level, n);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -811,7 +826,7 @@ static void node_chain_process(node_p n, uint64_t index, _Atomic uint64_t *threa
     uint64_t prefix = remainder - node_chain_chunk(n);
 
     LOG_NODE(index, pid, "begin", i_0, i_max, level);
-    LOG_NODE_MEM(index, pid, "joining", i_0, i_max, level, n->plan.mem_cost);
+    LOG_NODE_JOINING(index, pid, i_0, i_max, level, n);
     split_task_t t = {
         .index = index,
         .size = size,
@@ -970,7 +985,7 @@ static void task_donate(tree_scheduler_p s)
         return;
     }
 
-    for(uint64_t i=0; i<s->n_process; i++)
+    for(uint64_t i=s->n_process-1; i!=UINT64_MAX; i--)
     {
         tree_task_p t = &s->tasks[i];
 

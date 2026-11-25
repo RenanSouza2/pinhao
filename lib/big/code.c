@@ -94,7 +94,7 @@ static void split_sig(sig_num_t out[3], uint64_t i_0, uint64_t span)
 
 
 
-// dir picks the committed result or the half-join checkpoint under tmp: the
+// dir picks the committed result or the half-join checkpoint under partial: the
 // two carry the same name, so a crashed join pairs with its node by eye.
 static void sig_res_path_dir(
     char path[PATH_MAX_LEN],
@@ -322,11 +322,11 @@ static uint64_t union_res_op_size(
 
 
 
-// R's first addend (P1xR2), checkpointed under cache/tmp so it is not live
+// R's first addend (P1xR2), checkpointed under cache/partial so it is not live
 // across R1xQ2. Deleted once R is committed: never part of a node's result.
 static void sig_r_part_path_set(char path[PATH_MAX_LEN], uint64_t i_0, uint64_t span)
 {
-    sig_res_path_dir(path, "tmp", i_0, span);
+    sig_res_path_dir(path, "partial", i_0, span);
 }
 
 static void sig_r_part_save(sig_num_t sig, uint64_t i_0, uint64_t span)
@@ -382,7 +382,7 @@ static void union_r_part_path_set(
     uint64_t level
 )
 {
-    union_res_path_dir(path, "tmp", size, i_0, remainder, level);
+    union_res_path_dir(path, "partial", size, i_0, remainder, level);
 }
 
 static void union_r_part_save(union_num_t u, uint64_t size, uint64_t i_0, uint64_t remainder, uint64_t level)
@@ -510,7 +510,7 @@ uint64_t split_span_res_op_size(
     return union_res_op_size(size, i_0, remainder, level, index);
 }
 
-static bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
+bool split_span_res_is_sig(uint64_t size, uint64_t i_0, uint64_t span)
 {
     // size, i_0 , span - 1, level + 1
     if(!sig_res_is_stored(i_0, span - 1))
@@ -613,8 +613,19 @@ bool disk_lock_enabled(void)
     MACRO_END
 
 #define LOG_LOAD(OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT) LOG_LOAD_LABELED("loading", "loaded", OP, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
-#define LOG_MUL(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      LOG_PHASE("multiplying", "multiplied", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
 #define LOG_ADD(INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)      LOG_PHASE("adding", "added", INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)
+
+// THREADS is read once, ahead of the line that reports it; STMT multiplies on
+// mul_threads.
+#define LOG_MUL(THREADS, INDEX, PID, I_0, SPAN_ARG, DEPTH, STMT)                                                     \
+    MACRO_BEGIN                                                                                                      \
+        uint64_t mul_threads = (THREADS);                                                                            \
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | THR " U64P(3) "", INDEX, PID, get_wall_time(), "multiplying", I_0, SPAN_ARG, DEPTH, mul_threads); \
+        TIME_SETUP                                                                                                   \
+        STMT                                                                                                         \
+        TIME_END(_t)                                                                                                 \
+        tprintf("[" U64P(2) "][%7d][%17.6f] %-20s| " U64P(10) " " U64P(10) " " U64P(3) " | %7.1f", INDEX, PID, get_wall_time(), "multiplied", I_0, SPAN_ARG, DEPTH, dtime(_t)); \
+    MACRO_END
 
 // One name for one value: the term header of the third multiplication and the
 // operand label the "R" term reads it back under. Five characters, so it still
@@ -741,8 +752,8 @@ void split_span_res_join(split_task_p t, uint64_t span)
             LOCK_RELEASE(lock_held);
 
             sig_num_t sig;
-            LOG_MUL(index, pid, i_0, span, level,
-                sig = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
+            LOG_MUL(split_task_threads(t), index, pid, i_0, span, level,
+                sig = sig_num_mul_threads(sig_1, sig_2, mul_threads);
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
@@ -773,8 +784,8 @@ void split_span_res_join(split_task_p t, uint64_t span)
                 LOCK_RELEASE(lock_held);
 
                 sig_num_t sig_r_part;
-                LOG_MUL(index, pid, i_0, span, level,
-                    sig_r_part = sig_num_mul_threads(sig_1, sig_2, split_task_threads(t));
+                LOG_MUL(split_task_threads(t), index, pid, i_0, span, level,
+                    sig_r_part = sig_num_mul_threads(sig_1, sig_2, mul_threads);
                 );
 
                 LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
@@ -797,8 +808,8 @@ void split_span_res_join(split_task_p t, uint64_t span)
             LOCK_RELEASE(lock_held);
 
             sig_num_t sig_r_rest;
-            LOG_MUL(index, pid, i_0, span, level,
-                sig_r_rest = sig_num_mul_threads(sig_1, sig_2, split_task_threads_final(t));
+            LOG_MUL(split_task_threads_final(t), index, pid, i_0, span, level,
+                sig_r_rest = sig_num_mul_threads(sig_1, sig_2, mul_threads);
             );
 
             LOG_HEADER("R", index, pid, i_0, span, level);
@@ -859,8 +870,8 @@ void split_span_res_join(split_task_p t, uint64_t span)
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
-        LOG_MUL(index, pid, i_0, span, level,
-            u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        LOG_MUL(split_task_threads(t), index, pid, i_0, span, level,
+            u = union_num_mul_threads(u_1, u_2, mul_threads);
         );
 
         LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
@@ -891,8 +902,8 @@ void split_span_res_join(split_task_p t, uint64_t span)
             LOCK_RELEASE(lock_held);
 
             union_num_t u_r_part;
-            LOG_MUL(index, pid, i_0, span, level,
-                u_r_part = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+            LOG_MUL(split_task_threads(t), index, pid, i_0, span, level,
+                u_r_part = union_num_mul_threads(u_1, u_2, mul_threads);
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, span, level,
@@ -915,8 +926,8 @@ void split_span_res_join(split_task_p t, uint64_t span)
         LOCK_RELEASE(lock_held);
 
         union_num_t u_r_rest;
-        LOG_MUL(index, pid, i_0, span, level,
-            u_r_rest = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+        LOG_MUL(split_task_threads_final(t), index, pid, i_0, span, level,
+            u_r_rest = union_num_mul_threads(u_1, u_2, mul_threads);
         );
 
         LOG_HEADER("R", index, pid, i_0, span, level);
@@ -1093,8 +1104,8 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
-        LOG_MUL(index, pid, i_0, remainder, level,
-            u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        LOG_MUL(split_task_threads(t), index, pid, i_0, remainder, level,
+            u = union_num_mul_threads(u_1, u_2, mul_threads);
         );
 
         LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
@@ -1125,8 +1136,8 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
             LOCK_RELEASE(lock_held);
 
             union_num_t u_r_part;
-            LOG_MUL(index, pid, i_0, remainder, level,
-                u_r_part = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+            LOG_MUL(split_task_threads(t), index, pid, i_0, remainder, level,
+                u_r_part = union_num_mul_threads(u_1, u_2, mul_threads);
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
@@ -1149,8 +1160,8 @@ void split_big_res_join(split_task_p t, uint64_t remainder)
         LOCK_RELEASE(lock_held);
 
         union_num_t u_r_rest;
-        LOG_MUL(index, pid, i_0, remainder, level,
-            u_r_rest = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+        LOG_MUL(split_task_threads_final(t), index, pid, i_0, remainder, level,
+            u_r_rest = union_num_mul_threads(u_1, u_2, mul_threads);
         );
 
         LOG_HEADER("R", index, pid, i_0, remainder, level);
@@ -1227,8 +1238,8 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         LOCK_RELEASE(lock_held);
 
         union_num_t u;
-        LOG_MUL(index, pid, i_0, remainder, level,
-            u = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+        LOG_MUL(split_task_threads(t), index, pid, i_0, remainder, level,
+            u = union_num_mul_threads(u_1, u_2, mul_threads);
         );
 
         LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
@@ -1259,8 +1270,8 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
             LOCK_RELEASE(lock_held);
 
             union_num_t u_r_part;
-            LOG_MUL(index, pid, i_0, remainder, level,
-                u_r_part = union_num_mul_threads(u_1, u_2, split_task_threads(t));
+            LOG_MUL(split_task_threads(t), index, pid, i_0, remainder, level,
+                u_r_part = union_num_mul_threads(u_1, u_2, mul_threads);
             );
 
             LOG_WRITE_HOLD(lock_held, index, pid, i_0, remainder, level,
@@ -1283,8 +1294,8 @@ void split_pair_res_join(split_task_p t, uint64_t remainder, uint64_t remainder_
         LOCK_RELEASE(lock_held);
 
         union_num_t u_r_rest;
-        LOG_MUL(index, pid, i_0, remainder, level,
-            u_r_rest = union_num_mul_threads(u_1, u_2, split_task_threads_final(t));
+        LOG_MUL(split_task_threads_final(t), index, pid, i_0, remainder, level,
+            u_r_rest = union_num_mul_threads(u_1, u_2, mul_threads);
         );
 
         LOG_HEADER("R", index, pid, i_0, remainder, level);
@@ -1366,7 +1377,7 @@ static void split_big(
 
 static void pi_path_set(char path[PATH_MAX_LEN], uint64_t size)
 {
-    snprintf(path, PATH_MAX_LEN, CACHE "/res/pi_" U64P(015) ".bin", size);
+    snprintf(path, PATH_MAX_LEN, CACHE "/res/bin/pi_" U64P(015) ".bin", size);
 }
 
 static void pi_save(uint64_t size, flt_num_t flt_pi)

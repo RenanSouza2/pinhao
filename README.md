@@ -1,10 +1,10 @@
 # Pi Threads
 
-A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 40,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
+A high-performance, out-of-core, multi-processed C program to calculate Pi to billions of digits — 80,000,000,000+ digits computed to date. The project uses binary splitting combined with a custom big number implementation and parallel processing to handle extreme-scale mathematical computations.
 
 ## Features
 
-- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 40B+ digits.
+- **Extreme Scale Calculation:** Capable of computing Pi to massive scales — 80B+ digits.
 - **Out-of-core Processing:** Intelligently saves intermediate states and large numbers to disk to overcome RAM limitations, using a configurable cache threshold.
 - **Multi-Process Parallelization:** Uses `fork` to parallelize chunks of the binary splitting tree, speeding up computation across multiple cores.
 - **Custom Big-Number Library:** Relies on the `araucaria` submodule to handle big integer and big float arithmetic, binary splitting types (P, Q, R), and disk serialization.
@@ -60,7 +60,7 @@ The build system is managed via standard Makefiles.
 ## Usage
 
 By default, the scale of Pi calculation is hardcoded in `src/main.c`.
-`pi()` takes a `size`, the number of processes to fork across, and three
+`pi()` takes a `size`, the number of processes to fork across, and two
 memory budgets.
 
 `size` is the target mantissa size of the result, in 64-bit limbs (`araucaria`
@@ -97,7 +97,7 @@ against it.
 Scale these together with `size`. The values committed in `main.c` are sized
 for a full-scale run on a machine with plenty of RAM; leaving them there for a
 small test means the memory policy never binds. Scaling down has a floor,
-though: every leaf is priced at a fixed 512 MB (`TREE_LEAF_COST_BYTES`), so a
+though: every leaf is priced at a fixed 128 MB (`TREE_LEAF_COST_BYTES`), so a
 `mem_max` near or below that makes every leaf run solo and serializes the run.
 
 `n_process` is the number of processes to fork and also the thread budget
@@ -124,23 +124,53 @@ output to `thread_log/run.log`:
 ./run_debug.sh  # debug build with sanitizers
 ```
 
-Every run opens with a `=== run <timestamp> | main.c <cksum> ===` marker, and
-wipes `thread_log/` first. Pass `--keep` to append to the existing log instead;
-`dashboard.py` resets its parser on each marker and shows the newest run:
+Every run opens with a `=== run <timestamp> | main.c <cksum> ===` marker and,
+under it, a `=== machine <label> | <os> | <cpu> | <n> cores | <n> GiB ===` line
+saying what it ran on. The label is the first line of `.machine`, an untracked
+file each computer sets for itself (`echo dell > .machine`); without one the
+line reads `unlabelled`. A log
+is never deleted: when the last run in `thread_log/run.log` has the same
+`src/main.c` — where every `pi()` argument is a literal — and never reached
+`display end`, the new run resumes it and appends to the same file. Otherwise
+the old log is moved to `thread_log/run.<its first run's start>.log` and a new
+one begins. Override either way:
 ```bash
-./run.sh --keep
+./run.sh --keep   # append even after a finished run
+./run.sh --fresh  # archive even mid-computation
 ```
 
-`--keep` is for stacking runs of one configuration, so it refuses when
-`src/main.c` — where every `pi()` argument is a literal — has changed since the
-run that wrote the log; `--force` appends anyway. The dashboard checks the same
-thing exactly, from the config lines `pi_tree` logs, and warns when a run
-disagrees with the one before it in the log.
+`--keep` refuses when `src/main.c` has changed since the run that wrote the
+log; `--force` appends anyway. The dashboard checks the same thing exactly,
+from the config lines `pi_tree` logs, and warns when a run disagrees with the
+one before it in the log.
+
+`dashboard.py` resets its parser on each marker, so the tree shows the newest
+run, while a replay walks every run in the file in order. Its `total:` row
+sums the usable wall time of every run of one `main.c` in the log: a run counts
+up to `display end`, or while still running up to now, and a run that died
+only up to its last record that left work on disk (`piece`, `written`,
+`joined`, ...). Time spent on work a crash threw away, and the downtime
+between runs, never counts.
 
 While a run is in progress (or after one finishes), `./dashboard.py` renders
 a live terminal dashboard from `thread_log/run.log`:
 ```bash
-./dashboard.py [path/to/run.log] [--size N] [--n-process N]
+./dashboard.py [path/to/run.log] [--size N] [--n-process N] [--no-replay] [--replay-fps F]
+```
+It walks the log from the start before following it live; `--no-replay`
+jumps straight to the end, and `--replay-fps` sets the walk's frame rate
+(default 60).
+
+### Verifying the digits
+
+`./verify.py` checks a `res/dec/pi_<size>.txt` against
+[api.pi.delivery](https://api.pi.delivery): first the last `--tail` digits
+the precision fixes (default 1000), failing on any mismatch, then `--samples` random
+`--batch`-digit samples (default 100) every `--delay` seconds. With no
+`--samples` it runs until a mismatch or Ctrl-C. With no path it takes the
+largest `cache/res/dec/pi_*.txt`.
+```bash
+./verify.py [path/to/pi_<size>.txt] [--tail N] [--samples N] [--batch N] [--delay S]
 ```
 
 ### Cache file names
@@ -160,10 +190,14 @@ by index.
   chunks it has fused. It carries no `begin`, because every chain node in a run
   starts at the same index. The count runs down to 3; at two chunks the chain
   ends as an ordinary `r_` span.
-- `tmp/<name of its node>.bin` — a half-finished join's `P1xR2` checkpoint,
+- `partial/<name of its node>.bin` — a half-finished join's `P1xR2` checkpoint,
   under exactly the name of the node it belongs to, so `comm` against
   `pieces/` or `numbers/` shows what was in flight when a run stopped.
-- `res/pi_<size>.bin` — the finished value.
+- `res/bin/pi_<size>.bin` — the finished value.
+- `res/dec/pi_<size>.txt` — the finished value in decimal, as
+  `+ 3.1415… * 10 ^ 0`. It carries every digit the limbs hold; only the first
+  `floor((size - 2) × 64 × log10 2)` fractional digits are fixed by the
+  precision, and `verify.py` checks no further.
 
 The run log carries the same number in its third column — a node's `level`,
 or a chain's chunk count — so a log line and a filename name the node the same
@@ -188,13 +222,14 @@ There are two independent caching layers, and only one of them is optional:
 - **pinhao's own binary-splitting cache (always on).** As the tree in
   `lib/tree`/`lib/big` splits and joins P/Q/R terms, every intermediate
   result is checkpointed to disk under `./cache/pieces/` and
-  `./cache/numbers/`, and the final result under `./cache/res/`. This
+  `./cache/numbers/`, and the final result under `./cache/res/bin/`. This
   happens unconditionally — it's how the computation stays out-of-core and
-  how a finished run can be reused: `pi_tree()`/`pi_finish()` check whether
-  a given `size` is already stored (`pi_is_stored`) and load it straight
-  from `./cache/res/` instead of recomputing, and likewise individual split
-  results are skipped if already on disk (`split_big_res_is_stored`). This
-  path needs no configuration and is unrelated to `araucaria`.
+  how a finished run can be reused: `pi_finish()` saves the result under
+  `./cache/res/bin/`, and `pi_tree()` checks whether a given `size` is already
+  stored there (`pi_is_stored`) and loads it instead of recomputing; likewise
+  individual split results are skipped if already on disk
+  (`split_big_res_is_stored`). This path needs no configuration and is
+  unrelated to `araucaria`.
 
 - **`araucaria`'s disk-backed numbers (opt-in).** By default `araucaria`
   keeps every big number's limb array on the heap, with no disk spilling
@@ -205,45 +240,51 @@ There are two independent caching layers, and only one of them is optional:
   disk config before running:
   ```c
   araucaria_disk_config_t config = {
-      .disk_path            = "./cache/tmp",  // must already exist
+      .disk_path            = "./cache/swap", // must already exist
       .disk_threshold_bytes = 8192,           // bytes; larger allocations go to disk
+      .ram_budget_bytes     = 1 << 30,        // bytes one worker keeps resident
   };
   araucaria_disk_config_set(&config);
   ```
   Once set, any `num` allocation whose backing size (in bytes) exceeds
   `disk_threshold_bytes` is backed by an `mmap`-ed temporary file in
-  `disk_path` instead of the heap. `src/main.c` sets this near the top of
-  `main()`, pointed at the tracked `./cache/tmp` with a threshold of
-  `mem_max / 4`. Drop the call to keep every `num` on the heap.
+  `disk_path` instead of the heap. `ram_budget_bytes` caps what one worker
+  holds resident over such an array, and is what `num_mul_estimate_memory`
+  charges against. `src/main.c` sets this in `pi()`, after `n_process` has
+  been clamped to the core count, pointed at the tracked `./cache/swap` with a
+  threshold of `mem_max / 2`, a budget of `mem_max / 8`, and the decimal
+  output's conversion pool held to `mem_launch` (`pool_budget_bytes`). Drop the
+  call to keep every `num` on the heap.
 
 ### Cross-Process Disk Lock
 
 All processes read and write the `cache/*.bin` files over the same physical
 disk, so concurrent I/O can be slower than serialized I/O on a spinning
-drive. `config.h` gates this with `LOCK_DISK_IO`:
+drive. `config.h` gates this with `LOCK_DISK_IO`, commented out by default:
 
 ```c
-#define LOCK_DISK_IO
+// #define LOCK_DISK_IO
 ```
 
-When defined, cache reads and writes take an exclusive `flock` on
-`./cache/disk.lock`, serializing disk access across all forked workers.
-Comment the define out on an NVMe or SSD, where parallel I/O is the faster
-choice. The run log reports which mode is active on its `disk lock` line.
+Uncommented, cache reads and writes take an exclusive `flock` on
+`./cache/disk.lock`, serializing disk access across all forked workers. That
+suits a spinning drive; leave it off on an NVMe or SSD, where parallel I/O is
+the faster choice. The run log reports which mode is active on its
+`disk lock` line.
 
 ### Keeping Exact Pieces
 
 An exact `pieces/p_*.bin` triple carries no `size`, so it stays valid across
 runs of any precision. `config.h` gates whether a join deletes the pieces it
-consumed:
+consumed, with `KEEP_PIECES` commented out by default:
 
 ```c
-#define KEEP_PIECES
+// #define KEEP_PIECES
 ```
 
-When defined, a join leaves its children in `pieces/` for the next run to
-reuse. Comment it out to reclaim the disk instead — the run then keeps only
-what it is still working on.
+By default a join deletes its children, so the run keeps only what it is
+still working on. Uncommented, a join leaves them in `pieces/` for the next
+run to reuse, at the cost of the disk they hold.
 
 ## Project Structure
 
@@ -252,9 +293,13 @@ what it is still working on.
 - `lib/`: Core logic for binary splitting, all built on top of `araucaria`:
   - `tree`: Current implementation used by `src/main.c` — a forked
     binary-splitting tree (`pi_tree`).
-  - `big`, `linear`, `split`, `union`: Earlier/alternate implementations and
-    building blocks (`pi_big`, `pi_v1`/`pi_v2`/`pi_v3`, splitting and union
-    number helpers) kept for reference and experimentation.
+  - `big`: What `tree` runs on — leaf pieces, joins of P/Q/R terms, their
+    cache files, and `pi_finish`'s final division.
+  - `union`: A number that is either a `sig` or a `flt`, the form `big`
+    stores P/Q/R terms in.
+  - `linear`, `split`: Earlier implementations (`pi_v1`/`pi_v2`/`pi_v3`,
+    splitting helpers) kept for reference and experimentation; unused by
+    `src/main.c`.
 - `mods/`: Git submodules containing shared libraries:
   - `clu`: Memory management debug tool.
   - `macros`: C macros for assertions, timing, static typing, and threading.
@@ -264,9 +309,11 @@ what it is still working on.
 - `config.h`: Build-time switches for the program itself — `LOCK_DISK_IO`
   and `KEEP_PIECES`.
 - `cache/`: Default location for out-of-core file persistence — `pieces/`,
-  `numbers/` and `res/` hold the binary-splitting checkpoints, `tmp/` holds
-  half-finished joins and is also the `disk_path` for `araucaria`'s
+  `numbers/` and `res/` hold the binary-splitting checkpoints, `partial/` holds
+  half-finished joins, `swap/` is the `disk_path` for `araucaria`'s
   disk-backed numbers, and `disk.lock` is the cross-process I/O lock. See
   *Cache file names* above for the naming scheme.
 - `dashboard.py`: Live terminal dashboard that visualizes a run's progress
   from `thread_log/run.log`.
+- `verify.py`: Spot-checks a finished run's decimal digits against
+  api.pi.delivery.
